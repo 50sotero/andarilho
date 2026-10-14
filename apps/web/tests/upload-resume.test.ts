@@ -66,7 +66,9 @@ describe("persistence", () => {
   it("returns null for a different file", () => {
     const storage = new MemoryStorage();
     saveResumeRecord(record(), storage);
-    expect(loadResumeRecord("project-1", { ...file, lastModified: 1 }, { storage, now: NOW })).toBeNull();
+    expect(
+      loadResumeRecord("project-1", { ...file, lastModified: 1 }, { storage, now: NOW }),
+    ).toBeNull();
   });
 
   it("ignores and removes corrupted JSON", () => {

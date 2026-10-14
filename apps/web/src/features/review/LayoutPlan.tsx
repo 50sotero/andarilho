@@ -62,12 +62,7 @@ export function LayoutPlan({ layout, title }: { layout: Layout; title: string })
             />
           );
         })}
-        <circle
-          cx={layout.spawn.feet[0]}
-          cy={layout.spawn.feet[2]}
-          r={stroke * 5}
-          fill="#be123c"
-        />
+        <circle cx={layout.spawn.feet[0]} cy={layout.spawn.feet[2]} r={stroke * 5} fill="#be123c" />
       </svg>
       <figcaption className="text-xs text-stone-600 dark:text-stone-400">
         Top-down plan: walkable floor (teal), walls (black), openings (gaps), obstacles (yellow),

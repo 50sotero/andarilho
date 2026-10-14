@@ -44,7 +44,9 @@ export function stageStates(run: Run | null): Record<string, StageView> {
  * Formats stage-local progress if the worker reported it. Returns null when
  * nothing reliable is known (we never invent a percentage or ETA).
  */
-export function formatStageProgress(progress: Record<string, unknown> | null | undefined): string | null {
+export function formatStageProgress(
+  progress: Record<string, unknown> | null | undefined,
+): string | null {
   if (!progress) return null;
   const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : null);
   const current = num(progress.current);

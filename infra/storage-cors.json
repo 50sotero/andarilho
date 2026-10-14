@@ -3,7 +3,12 @@
     {
       "AllowedOrigins": ["http://localhost:3000"],
       "AllowedMethods": ["GET", "PUT", "HEAD"],
-      "AllowedHeaders": ["Content-Type", "Content-MD5", "x-amz-checksum-sha256", "x-amz-sdk-checksum-algorithm"],
+      "AllowedHeaders": [
+        "Content-Type",
+        "Content-MD5",
+        "x-amz-checksum-sha256",
+        "x-amz-sdk-checksum-algorithm"
+      ],
       "ExposeHeaders": ["ETag", "x-amz-checksum-sha256", "x-amz-version-id"],
       "MaxAgeSeconds": 3000
     }

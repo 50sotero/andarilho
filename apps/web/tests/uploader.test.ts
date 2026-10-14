@@ -10,7 +10,12 @@ import {
   type UploaderApi,
 } from "@/features/uploads/uploader";
 import { createLimiter } from "@/features/uploads/limiter";
-import { fileFingerprint, loadResumeRecord, resumeKey, saveResumeRecord } from "@/lib/upload-resume";
+import {
+  fileFingerprint,
+  loadResumeRecord,
+  resumeKey,
+  saveResumeRecord,
+} from "@/lib/upload-resume";
 import { MemoryStorage } from "./memory-storage";
 
 const PART = 100;
@@ -59,7 +64,10 @@ function fakeApi(fileSize: number, overrides: Partial<UploaderApi> = {}) {
       batches.push([...partNumbers]);
       return {
         data: {
-          urls: partNumbers.map((n) => ({ partNumber: n, url: `https://storage.test/${uploadId}/${n}` })),
+          urls: partNumbers.map((n) => ({
+            partNumber: n,
+            url: `https://storage.test/${uploadId}/${n}`,
+          })),
           expiresAt: FUTURE,
         },
         etag: null,
@@ -104,7 +112,9 @@ describe("MultipartUpload", () => {
 
     expect(result.status).toBe("uploaded_unverified");
     expect(maxActive).toBe(3);
-    expect([...uploaded].sort((a, b) => a - b)).toEqual(Array.from({ length: partCount }, (_, i) => i + 1));
+    expect([...uploaded].sort((a, b) => a - b)).toEqual(
+      Array.from({ length: partCount }, (_, i) => i + 1),
+    );
     expect(batches.every((b) => b.length >= 1 && b.length <= 10)).toBe(true);
     expect(new Set(batches.flat()).size).toBe(partCount);
     expect(batches.length).toBeLessThanOrEqual(6);

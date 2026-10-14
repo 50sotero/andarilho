@@ -32,7 +32,12 @@ describe("validateIntake", () => {
   });
 
   it("requires a video or photos", () => {
-    const plan: CandidateFile = { name: "plan.pdf", size: MiB, type: "application/pdf", mediaKind: "floor_plan" };
+    const plan: CandidateFile = {
+      name: "plan.pdf",
+      size: MiB,
+      type: "application/pdf",
+      mediaKind: "floor_plan",
+    };
     expect(codes(validateIntake([plan]))).toContain("NO_CAPTURE_MEDIA");
     expect(codes(validateIntake([]))).toContain("NO_CAPTURE_MEDIA");
   });
@@ -44,9 +49,9 @@ describe("validateIntake", () => {
   });
 
   it("allows only one video", () => {
-    expect(codes(validateIntake([video(), video({ name: "b.mov", type: "video/quicktime" })]))).toContain(
-      "TOO_MANY_VIDEOS",
-    );
+    expect(
+      codes(validateIntake([video(), video({ name: "b.mov", type: "video/quicktime" })])),
+    ).toContain("TOO_MANY_VIDEOS");
   });
 
   it("treats video duration over 5 minutes as advisory", () => {
@@ -77,7 +82,9 @@ describe("validateIntake", () => {
     });
     expect(validateIntake([video(), plan(20 * MiB)]).ok).toBe(true);
     expect(codes(validateIntake([video(), plan(20 * MiB + 1)]))).toContain("FLOOR_PLAN_TOO_LARGE");
-    expect(codes(validateIntake([video(), plan(1), plan(1, "b.png")]))).toContain("TOO_MANY_FLOOR_PLANS");
+    expect(codes(validateIntake([video(), plan(1), plan(1, "b.png")]))).toContain(
+      "TOO_MANY_FLOOR_PLANS",
+    );
   });
 
   it("rejects empty files and unsupported types", () => {
@@ -85,11 +92,16 @@ describe("validateIntake", () => {
     expect(codes(validateIntake([video({ name: "walk.webm", type: "video/webm" })]))).toContain(
       "UNSUPPORTED_TYPE",
     );
-    expect(codes(validateIntake([video(), photo(1, { name: "x.heic", type: "image/heic" })]))).toContain(
-      "UNSUPPORTED_TYPE",
-    );
     expect(
-      codes(validateIntake([video(), { name: "plan.svg", size: 10, type: "image/svg+xml", mediaKind: "floor_plan" }])),
+      codes(validateIntake([video(), photo(1, { name: "x.heic", type: "image/heic" })])),
+    ).toContain("UNSUPPORTED_TYPE");
+    expect(
+      codes(
+        validateIntake([
+          video(),
+          { name: "plan.svg", size: 10, type: "image/svg+xml", mediaKind: "floor_plan" },
+        ]),
+      ),
     ).toContain("UNSUPPORTED_TYPE");
   });
 });
@@ -105,7 +117,11 @@ describe("type hints", () => {
   it("derives a declared content type from the extension when the browser reports none", () => {
     expect(declaredContentType({ name: "a.MOV", type: "" }, "video")).toBe("video/quicktime");
     expect(declaredContentType({ name: "a.jpeg", type: "" }, "photo")).toBe("image/jpeg");
-    expect(declaredContentType({ name: "a.png", type: "image/png" }, "floor_plan")).toBe("image/png");
-    expect(declaredContentType({ name: "a.bin", type: "" }, "video")).toBe("application/octet-stream");
+    expect(declaredContentType({ name: "a.png", type: "image/png" }, "floor_plan")).toBe(
+      "image/png",
+    );
+    expect(declaredContentType({ name: "a.bin", type: "" }, "video")).toBe(
+      "application/octet-stream",
+    );
   });
 });

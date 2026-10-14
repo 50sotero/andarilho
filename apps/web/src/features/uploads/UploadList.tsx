@@ -24,7 +24,9 @@ const PHASE_LABEL: Record<UploadProgress["phase"], string> = {
   failed: "Failed",
 };
 
-function verificationLabel(row: UploadRowView): { text: string; tone: "good" | "warn" | "bad" | "neutral" } | null {
+function verificationLabel(
+  row: UploadRowView,
+): { text: string; tone: "good" | "warn" | "bad" | "neutral" } | null {
   switch (row.serverStatus) {
     case "verified":
       return { text: "Verified", tone: "good" };
@@ -57,7 +59,9 @@ export function UploadList({
       {rows.map((row) => {
         const { progress } = row;
         const percent =
-          progress.totalBytes > 0 ? Math.floor((progress.uploadedBytes / progress.totalBytes) * 100) : 0;
+          progress.totalBytes > 0
+            ? Math.floor((progress.uploadedBytes / progress.totalBytes) * 100)
+            : 0;
         const verification = verificationLabel(row);
         const active =
           progress.phase === "uploading" ||
@@ -77,19 +81,33 @@ export function UploadList({
                 <StatusBadge tone={progress.phase === "failed" ? "bad" : "neutral"}>
                   {PHASE_LABEL[progress.phase]}
                 </StatusBadge>
-                {verification ? <StatusBadge tone={verification.tone}>{verification.text}</StatusBadge> : null}
+                {verification ? (
+                  <StatusBadge tone={verification.tone}>{verification.text}</StatusBadge>
+                ) : null}
                 {active ? (
-                  <Button variant="secondary" onClick={() => onPause(row.id)} aria-label={`Pause ${row.name}`}>
+                  <Button
+                    variant="secondary"
+                    onClick={() => onPause(row.id)}
+                    aria-label={`Pause ${row.name}`}
+                  >
                     Pause
                   </Button>
                 ) : null}
                 {progress.phase === "paused" || progress.phase === "failed" ? (
-                  <Button variant="secondary" onClick={() => onResume(row.id)} aria-label={`Resume ${row.name}`}>
+                  <Button
+                    variant="secondary"
+                    onClick={() => onResume(row.id)}
+                    aria-label={`Resume ${row.name}`}
+                  >
                     Resume
                   </Button>
                 ) : null}
                 {row.serverStatus !== "verified" ? (
-                  <Button variant="ghost" onClick={() => onRemove(row.id)} aria-label={`Remove ${row.name}`}>
+                  <Button
+                    variant="ghost"
+                    onClick={() => onRemove(row.id)}
+                    aria-label={`Remove ${row.name}`}
+                  >
                     Remove
                   </Button>
                 ) : null}
@@ -105,7 +123,9 @@ export function UploadList({
             </progress>
             <p className="text-xs text-stone-600 dark:text-stone-400">
               {formatBytes(progress.uploadedBytes)} of {formatBytes(progress.totalBytes)}
-              {progress.partCount > 0 ? ` · part ${progress.completedParts} of ${progress.partCount}` : ""}
+              {progress.partCount > 0
+                ? ` · part ${progress.completedParts} of ${progress.partCount}`
+                : ""}
             </p>
             {row.rejectionCode ? (
               <p className="text-xs text-red-700 dark:text-red-300">

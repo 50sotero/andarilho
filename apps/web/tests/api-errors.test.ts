@@ -1,8 +1,17 @@
 import { describe, expect, it, vi } from "vitest";
 import { createApiClient } from "@/lib/api/client";
-import { ApiError, apiErrorFromResponse, friendlyFromErrorBody, toFriendlyError } from "@/lib/api/errors";
+import {
+  ApiError,
+  apiErrorFromResponse,
+  friendlyFromErrorBody,
+  toFriendlyError,
+} from "@/lib/api/errors";
 
-function envelope(status: number, error: Record<string, unknown>, headers: Record<string, string> = {}) {
+function envelope(
+  status: number,
+  error: Record<string, unknown>,
+  headers: Record<string, string> = {},
+) {
   return new Response(JSON.stringify({ error }), {
     status,
     headers: { "Content-Type": "application/json", ...headers },
@@ -32,14 +41,20 @@ describe("apiErrorFromResponse", () => {
 
   it("reads Retry-After", async () => {
     const err = await apiErrorFromResponse(
-      envelope(429, { code: "RATE_LIMITED", message: "Slow down.", retryable: true }, { "Retry-After": "12" }),
+      envelope(
+        429,
+        { code: "RATE_LIMITED", message: "Slow down.", retryable: true },
+        { "Retry-After": "12" },
+      ),
     );
     expect(err.retryAfterSeconds).toBe(12);
     expect(toFriendlyError(err).suggestedAction).toBe("Wait about 12 seconds and try again.");
   });
 
   it("falls back for non-envelope bodies", async () => {
-    const err = await apiErrorFromResponse(new Response("<html>bad gateway</html>", { status: 502 }));
+    const err = await apiErrorFromResponse(
+      new Response("<html>bad gateway</html>", { status: 502 }),
+    );
     expect(err.code).toBe("SERVER_ERROR");
     expect(err.retryable).toBe(true);
     expect(err.message).not.toContain("html");
@@ -65,16 +80,20 @@ describe("toFriendlyError", () => {
 
   it("uses a fallback action when the API gives none", () => {
     const friendly = toFriendlyError(
-      new ApiError(409, { code: "ACTIVE_RUN_EXISTS", message: "A run is active.", retryable: false }),
+      new ApiError(409, {
+        code: "ACTIVE_RUN_EXISTS",
+        message: "A run is active.",
+        retryable: false,
+      }),
     );
     expect(friendly.title).toBe("A reconstruction is already running");
     expect(friendly.suggestedAction).toMatch(/cancel/i);
   });
 
   it("handles unknown codes, network errors and arbitrary values", () => {
-    expect(toFriendlyError(new ApiError(500, { code: "WEIRD", message: "x", retryable: true })).title).toBe(
-      "Something went wrong",
-    );
+    expect(
+      toFriendlyError(new ApiError(500, { code: "WEIRD", message: "x", retryable: true })).title,
+    ).toBe("Something went wrong");
     expect(toFriendlyError(new TypeError("Failed to fetch"))).toMatchObject({
       title: "Network problem",
       retryable: true,
@@ -87,10 +106,13 @@ describe("api client", () => {
   it("always calls the same-origin proxy with the right headers", async () => {
     const fetchMock = vi.fn(
       async (_input: string, _init?: RequestInit) =>
-        new Response(JSON.stringify({ runId: "r", jobId: "j", state: "queued", stage: "validating" }), {
-          status: 202,
-          headers: { ETag: '"2"' },
-        }),
+        new Response(
+          JSON.stringify({ runId: "r", jobId: "j", state: "queued", stage: "validating" }),
+          {
+            status: 202,
+            headers: { ETag: '"2"' },
+          },
+        ),
     );
     const client = createApiClient(fetchMock);
     const result = await client.submitRun(
@@ -104,15 +126,22 @@ describe("api client", () => {
     expect(headers["Idempotency-Key"]).toBe("idem-1");
     expect(headers["Content-Type"]).toBe("application/json");
     expect(init!.credentials).toBe("same-origin");
-    expect(result).toEqual({ data: { runId: "r", jobId: "j", state: "queued", stage: "validating" }, etag: '"2"' });
+    expect(result).toEqual({
+      data: { runId: "r", jobId: "j", state: "queued", stage: "validating" },
+      etag: '"2"',
+    });
   });
 
   it("sends If-Match and handles 204", async () => {
-    const fetchMock = vi.fn(async (_input: string, _init?: RequestInit) => new Response(null, { status: 204 }));
+    const fetchMock = vi.fn(
+      async (_input: string, _init?: RequestInit) => new Response(null, { status: 204 }),
+    );
     const client = createApiClient(fetchMock);
     await client.revokeShare("s1");
     await client.renameProject("p1", "New", '"7"').catch(() => undefined);
-    expect((fetchMock.mock.calls[1]![1]!.headers as Record<string, string>)["If-Match"]).toBe('"7"');
+    expect((fetchMock.mock.calls[1]![1]!.headers as Record<string, string>)["If-Match"]).toBe(
+      '"7"',
+    );
   });
 
   it("omits empty query values", async () => {

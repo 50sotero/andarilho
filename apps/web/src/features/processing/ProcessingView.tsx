@@ -17,14 +17,15 @@ import {
   type StageView,
 } from "./stages";
 
-const STAGE_BADGE: Record<StageView, { text: string; tone: "good" | "warn" | "bad" | "neutral" }> = {
-  done: { text: "Done", tone: "good" },
-  active: { text: "In progress", tone: "warn" },
-  waiting: { text: "Queued", tone: "neutral" },
-  failed: { text: "Failed", tone: "bad" },
-  cancelled: { text: "Cancelled", tone: "neutral" },
-  pending: { text: "Not started", tone: "neutral" },
-};
+const STAGE_BADGE: Record<StageView, { text: string; tone: "good" | "warn" | "bad" | "neutral" }> =
+  {
+    done: { text: "Done", tone: "good" },
+    active: { text: "In progress", tone: "warn" },
+    waiting: { text: "Queued", tone: "neutral" },
+    failed: { text: "Failed", tone: "bad" },
+    cancelled: { text: "Cancelled", tone: "neutral" },
+    pending: { text: "Not started", tone: "neutral" },
+  };
 
 const MAX_EVENTS = 200;
 
@@ -63,7 +64,10 @@ export function ProcessingView({
   const [actionError, setActionError] = useState<FriendlyError | null>(null);
   const [busy, setBusy] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
-  const cursorRef = useRef<{ jobId: string | null; after: number | null }>({ jobId: null, after: null });
+  const cursorRef = useRef<{ jobId: string | null; after: number | null }>({
+    jobId: null,
+    after: null,
+  });
   const retryIntentRef = useRef<{ runId: string; key: string } | null>(null);
 
   const run = pickRun(detail, preferredJobId);
@@ -143,7 +147,8 @@ export function ProcessingView({
       ? formatStageProgress(latestEvent.progress)
       : null;
   const runError = run?.error ?? job?.error ?? null;
-  const friendlyRunError = runError && run?.status === "failed" ? friendlyFromErrorBody(runError) : null;
+  const friendlyRunError =
+    runError && run?.status === "failed" ? friendlyFromErrorBody(runError) : null;
   const base = `/projects/${encodeURIComponent(projectId)}`;
 
   if (!detail) {
@@ -173,7 +178,13 @@ export function ProcessingView({
           <h2 className="text-lg font-semibold">Run status</h2>
           <StatusBadge
             tone={
-              run.status === "succeeded" ? "good" : run.status === "failed" ? "bad" : run.status === "cancelled" ? "neutral" : "warn"
+              run.status === "succeeded"
+                ? "good"
+                : run.status === "failed"
+                  ? "bad"
+                  : run.status === "cancelled"
+                    ? "neutral"
+                    : "warn"
             }
           >
             {run.status}
@@ -195,7 +206,9 @@ export function ProcessingView({
               reliable.
             </p>
           ) : null}
-          {run.cancelRequested && !terminal ? <p>Cancellation requested. Stopping work...</p> : null}
+          {run.cancelRequested && !terminal ? (
+            <p>Cancellation requested. Stopping work...</p>
+          ) : null}
           {run.status === "succeeded" ? (
             <p>Processing finished. Review the scale, floor and walls before walking or sharing.</p>
           ) : null}
@@ -246,7 +259,8 @@ export function ProcessingView({
               </Button>
             )
           ) : null}
-          {(run.status === "failed" && (run.error?.retryable ?? true)) || run.status === "cancelled" ? (
+          {(run.status === "failed" && (run.error?.retryable ?? true)) ||
+          run.status === "cancelled" ? (
             <Button onClick={() => void retry()} disabled={busy}>
               {busy ? "Starting..." : "Retry with the same inputs"}
             </Button>
@@ -289,7 +303,10 @@ export function ProcessingView({
       {events.length > 0 ? (
         <Card>
           <h2 className="text-lg font-semibold">Activity</h2>
-          <ol className="mt-3 max-h-72 space-y-1 overflow-y-auto text-sm" aria-label="Processing events">
+          <ol
+            className="mt-3 max-h-72 space-y-1 overflow-y-auto text-sm"
+            aria-label="Processing events"
+          >
             {events.map((event) => (
               <li key={event.id} className="flex gap-2">
                 <time className="shrink-0 text-stone-500" dateTime={event.createdAt}>
@@ -297,14 +314,18 @@ export function ProcessingView({
                 </time>
                 <span>
                   {stageLabel(event.stage)}: {event.message ?? event.state}
-                  {formatStageProgress(event.progress) ? ` (${formatStageProgress(event.progress)})` : ""}
+                  {formatStageProgress(event.progress)
+                    ? ` (${formatStageProgress(event.progress)})`
+                    : ""}
                 </span>
               </li>
             ))}
           </ol>
         </Card>
       ) : null}
-      <p className="text-xs text-stone-500">Run {run.id} · job {currentJobId ?? "none"}</p>
+      <p className="text-xs text-stone-500">
+        Run {run.id} · job {currentJobId ?? "none"}
+      </p>
     </div>
   );
 }

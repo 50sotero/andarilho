@@ -33,12 +33,7 @@ export interface Project {
 export type MediaKind = "video" | "photo" | "floor_plan";
 
 export type UploadStatus =
-  | "initiated"
-  | "uploaded_unverified"
-  | "verified"
-  | "rejected"
-  | "aborted"
-  | "expired";
+  "initiated" | "uploaded_unverified" | "verified" | "rejected" | "aborted" | "expired";
 
 export interface Upload {
   id: string;

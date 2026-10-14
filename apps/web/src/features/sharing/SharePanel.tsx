@@ -150,8 +150,8 @@ export function SharePanel({
           <div className="space-y-1 text-stone-700 dark:text-stone-300">
             <p>
               Publishing creates an <strong>unlisted link</strong>. It is not searchable, but{" "}
-              <strong>anyone who has the link can view the scene</strong> &mdash; including
-              people it is forwarded to. Original video, photos and floor plan are never shared.
+              <strong>anyone who has the link can view the scene</strong> &mdash; including people
+              it is forwarded to. Original video, photos and floor plan are never shared.
             </p>
             <p>
               You can revoke a link at any time. Revocation stops new visits, but it cannot recall
@@ -221,7 +221,11 @@ export function SharePanel({
                     confirmRevoke === share.id ? (
                       <div className="flex items-center gap-2">
                         <span>Stop this link working?</span>
-                        <Button variant="danger" onClick={() => void revoke(share.id)} disabled={busy}>
+                        <Button
+                          variant="danger"
+                          onClick={() => void revoke(share.id)}
+                          disabled={busy}
+                        >
                           Revoke
                         </Button>
                         <Button variant="ghost" onClick={() => setConfirmRevoke(null)}>

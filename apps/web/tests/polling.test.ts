@@ -18,7 +18,9 @@ describe("nextPollDelay", () => {
 
   it("backs off exponentially while hidden, capped", () => {
     expect(nextPollDelay({ ...base, visible: false, hiddenPolls: 0 })).toBe(POLL_HIDDEN_BASE_MS);
-    expect(nextPollDelay({ ...base, visible: false, hiddenPolls: 1 })).toBe(POLL_HIDDEN_BASE_MS * 2);
+    expect(nextPollDelay({ ...base, visible: false, hiddenPolls: 1 })).toBe(
+      POLL_HIDDEN_BASE_MS * 2,
+    );
     expect(nextPollDelay({ ...base, visible: false, hiddenPolls: 10 })).toBe(POLL_MAX_MS);
   });
 

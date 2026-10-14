@@ -86,8 +86,12 @@ export function ProjectList() {
               </p>
             </div>
             <div className="flex gap-2">
-              {project.lifecycle === "deleting" ? <StatusBadge tone="warn">Deleting</StatusBadge> : null}
-              {project.publishedRevisionId ? <StatusBadge tone="good">Published</StatusBadge> : null}
+              {project.lifecycle === "deleting" ? (
+                <StatusBadge tone="warn">Deleting</StatusBadge>
+              ) : null}
+              {project.publishedRevisionId ? (
+                <StatusBadge tone="good">Published</StatusBadge>
+              ) : null}
               {project.role !== "owner" ? <StatusBadge>{project.role}</StatusBadge> : null}
             </div>
           </li>

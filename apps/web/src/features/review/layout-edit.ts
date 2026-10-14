@@ -54,7 +54,9 @@ export function movePoint(layout: Layout, sel: Selection, p: Point): Layout {
 export function pointOf(layout: Layout, sel: Selection): Point | null {
   switch (sel.kind) {
     case "floorCorner":
-      return (layout.floors[sel.floor]?.polygons[sel.ring]?.[sel.index] as Point | undefined) ?? null;
+      return (
+        (layout.floors[sel.floor]?.polygons[sel.ring]?.[sel.index] as Point | undefined) ?? null
+      );
     case "wallEnd":
       return (layout.walls?.[sel.index]?.[sel.end] as Point | undefined) ?? null;
     case "obstacleCorner":
@@ -136,7 +138,12 @@ export function addObstacle(layout: Layout, center: Point): Layout {
     {
       id: uniqueId("obstacle", allIds(layout)),
       floorId,
-      footprint: [r([x - 0.5, z - 0.5]), r([x + 0.5, z - 0.5]), r([x + 0.5, z + 0.5]), r([x - 0.5, z + 0.5])],
+      footprint: [
+        r([x - 0.5, z - 0.5]),
+        r([x + 0.5, z - 0.5]),
+        r([x + 0.5, z + 0.5]),
+        r([x - 0.5, z + 0.5]),
+      ],
       height: 0.8,
       provenance: "user",
     },
@@ -159,13 +166,22 @@ export function addLandmark(layout: Layout, center: Point): Layout {
 }
 
 /** Inserts a corner at the midpoint of the edge after the given corner. */
-export function insertFloorCorner(layout: Layout, floor: number, ring: number, index: number): Layout {
+export function insertFloorCorner(
+  layout: Layout,
+  floor: number,
+  ring: number,
+  index: number,
+): Layout {
   const pts = layout.floors[floor]?.polygons[ring];
   if (!pts || pts.length < 2) return layout;
   const a = pts[index]!;
   const b = pts[(index + 1) % pts.length]!;
   const next = clone(layout);
-  next.floors[floor]!.polygons[ring]!.splice(index + 1, 0, r([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]));
+  next.floors[floor]!.polygons[ring]!.splice(
+    index + 1,
+    0,
+    r([(a[0] + b[0]) / 2, (a[1] + b[1]) / 2]),
+  );
   return next;
 }
 
@@ -221,7 +237,10 @@ export function updateField(
         // Keep the start fixed and move the end along the wall direction.
         const len = distance(w.start, w.end) || 1;
         const k = num / len;
-        w.end = r([w.start[0] + (w.end[0] - w.start[0]) * k, w.start[1] + (w.end[1] - w.start[1]) * k]);
+        w.end = r([
+          w.start[0] + (w.end[0] - w.start[0]) * k,
+          w.start[1] + (w.end[1] - w.start[1]) * k,
+        ]);
       }
       return next;
     }
@@ -229,7 +248,8 @@ export function updateField(
       const o = next.openings?.[sel.index];
       if (!o) return layout;
       if (field === "state") o.state = value === "closed" ? "closed" : "open";
-      else if (field === "offset" || field === "width" || field === "bottom" || field === "top") o[field] = num;
+      else if (field === "offset" || field === "width" || field === "bottom" || field === "top")
+        o[field] = num;
       return next;
     }
     case "obstacle":

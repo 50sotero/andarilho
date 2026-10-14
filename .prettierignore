@@ -6,5 +6,6 @@ README.md
 **/coverage
 services/
 packages/scene-contract/scene.schema.json
+packages/scene-contract/layout.schema.json
 packages/scene-contract/scene.ts
 packages/viewer/public/fixtures/

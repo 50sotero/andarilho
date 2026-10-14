@@ -102,7 +102,10 @@ const ERROR_COPY: Record<string, { title: string; action: string }> = {
     title: "Not found",
     action: "It may have been deleted, or you may not have access.",
   },
-  VALIDATION_FAILED: { title: "Some input wasn't accepted", action: "Check the form and try again." },
+  VALIDATION_FAILED: {
+    title: "Some input wasn't accepted",
+    action: "Check the form and try again.",
+  },
   VERSION_CONFLICT: {
     title: "This changed since you loaded it",
     action: "Reload to get the latest version, then apply your edit again.",
@@ -119,7 +122,10 @@ const ERROR_COPY: Record<string, { title: string; action: string }> = {
     title: "This project is being deleted",
     action: "No further changes can be made to it.",
   },
-  INVALID_STATE: { title: "That action isn't available right now", action: "Reload and try again." },
+  INVALID_STATE: {
+    title: "That action isn't available right now",
+    action: "Reload and try again.",
+  },
   PRECONDITION_REQUIRED: { title: "Please reload", action: "Reload the page, then try again." },
   PAYLOAD_TOO_LARGE: { title: "Too large", action: "Use smaller or fewer files." },
   QUOTA_EXCEEDED: {

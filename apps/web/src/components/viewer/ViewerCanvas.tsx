@@ -144,9 +144,15 @@ export default function ViewerCanvas({
     let disposed = false;
     let engine: EngineAdapter | null = null;
     try {
-      engine = startEngine(container, envelope, qualityRef.current, `3D walkthrough of ${title}`, (next) => {
-        if (!disposed) setView(next);
-      });
+      engine = startEngine(
+        container,
+        envelope,
+        qualityRef.current,
+        `3D walkthrough of ${title}`,
+        (next) => {
+          if (!disposed) setView(next);
+        },
+      );
       engineRef.current = engine;
       if (overlayRef.current) engine.setCollisionOverlay(true);
     } catch {
@@ -185,7 +191,8 @@ export default function ViewerCanvas({
 
   let statusText = "";
   if (view.kind === "loading") {
-    const pct = view.renderFraction != null ? ` (${Math.round(view.renderFraction * 100)}% downloaded)` : "";
+    const pct =
+      view.renderFraction != null ? ` (${Math.round(view.renderFraction * 100)}% downloaded)` : "";
     statusText = `Loading${pct}: ${view.steps.map((s) => `${s.label} ${s.status}`).join(", ")}.`;
   } else if (view.kind === "ready") {
     statusText = view.walkable

@@ -91,7 +91,10 @@ export function errorResponse(
   );
 }
 
-async function readBoundedBody(request: Request, limit: number): Promise<ArrayBuffer | "too_large"> {
+async function readBoundedBody(
+  request: Request,
+  limit: number,
+): Promise<ArrayBuffer | "too_large"> {
   const declared = request.headers.get("content-length");
   if (declared && Number(declared) > limit) return "too_large";
   if (!request.body) return new ArrayBuffer(0);

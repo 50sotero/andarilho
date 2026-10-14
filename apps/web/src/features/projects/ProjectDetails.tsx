@@ -151,7 +151,8 @@ export function ProjectDetails({ projectId }: { projectId: string }) {
           {latestRun ? (
             <div className="mt-1 space-y-2 text-sm">
               <p>
-                Latest run: <StatusBadge tone={runTone(latestRun.status)}>{latestRun.status}</StatusBadge>
+                Latest run:{" "}
+                <StatusBadge tone={runTone(latestRun.status)}>{latestRun.status}</StatusBadge>
                 {latestRun.currentStage ? ` · stage ${latestRun.currentStage}` : null}
               </p>
               <Link href={`${base}/processing`} className={linkButtonClass}>

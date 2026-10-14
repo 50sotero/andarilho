@@ -29,7 +29,8 @@ export function PublicScene({ token }: { token: string }) {
         (err: unknown) => {
           if (signal?.cancelled) return;
           setProblem(
-            err instanceof ApiError && (err.status === 404 || err.status === 410 || err.status === 403)
+            err instanceof ApiError &&
+              (err.status === 404 || err.status === 410 || err.status === 403)
               ? "unavailable"
               : "error",
           );
@@ -75,6 +76,10 @@ export function PublicScene({ token }: { token: string }) {
   }
   if (!envelope) return <p aria-live="polite">Opening the shared scene...</p>;
   return (
-    <ViewerClient envelope={envelope} title="the shared place" onRecoverableError={onRecoverableError} />
+    <ViewerClient
+      envelope={envelope}
+      title="the shared place"
+      onRecoverableError={onRecoverableError}
+    />
   );
 }

@@ -114,7 +114,11 @@ describe("backend proxy handler", () => {
     );
     expect(evil.status).toBe(403);
     expect((await evil.json()).error.code).toBe("CROSS_ORIGIN_REJECTED");
-    const missing = await handle(req("v1/projects/x", { method: "DELETE" }), ["v1", "projects", "x"]);
+    const missing = await handle(req("v1/projects/x", { method: "DELETE" }), [
+      "v1",
+      "projects",
+      "x",
+    ]);
     expect(missing.status).toBe(403);
     expect(fetchMock).not.toHaveBeenCalled();
   });
@@ -216,17 +220,19 @@ describe("backend proxy handler", () => {
     const { handle } = setup({
       fetch: async () => new Response(null, { status: 204 }),
     });
-    const res = await handle(
-      req("v1/shares/s1", { method: "DELETE", headers: { Origin: APP } }),
-      ["v1", "shares", "s1"],
-    );
+    const res = await handle(req("v1/shares/s1", { method: "DELETE", headers: { Origin: APP } }), [
+      "v1",
+      "shares",
+      "s1",
+    ]);
     expect(res.status).toBe(204);
     expect(await res.text()).toBe("");
   });
 
   it("does not follow or expose upstream redirects", async () => {
     const { handle } = setup({
-      fetch: async () => new Response(null, { status: 302, headers: { Location: "http://internal/" } }),
+      fetch: async () =>
+        new Response(null, { status: 302, headers: { Location: "http://internal/" } }),
     });
     const res = await handle(req("v1/projects"), ["v1", "projects"]);
     expect(res.status).toBe(502);

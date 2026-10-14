@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { safeNextPath } from "@/lib/auth/safe-redirect";
-import { calibrationFactor, isSelfIntersecting, layoutProblems, scaleLayout } from "@/features/review/geometry";
+import {
+  calibrationFactor,
+  isSelfIntersecting,
+  layoutProblems,
+  scaleLayout,
+} from "@/features/review/geometry";
 import { addOpening, movePoint, removeSelected } from "@/features/review/layout-edit";
 import { formatStageProgress, stageStates } from "@/features/processing/stages";
 import { expiryFromDays } from "@/features/sharing/SharePanel";
@@ -14,7 +19,16 @@ describe("safeNextPath", () => {
     expect(safeNextPath("/projects/abc?x=1#h")).toBe("/projects/abc?x=1#h");
   });
   it("rejects open-redirect attempts", () => {
-    for (const bad of ["https://evil.test", "//evil.test", "/\\evil.test", "javascript:alert(1)", "evil", "/\u0000x", null, ""]) {
+    for (const bad of [
+      "https://evil.test",
+      "//evil.test",
+      "/\\evil.test",
+      "javascript:alert(1)",
+      "evil",
+      "/\u0000x",
+      null,
+      "",
+    ]) {
       expect(safeNextPath(bad as string | null)).toBe("/projects");
     }
   });
@@ -25,13 +39,32 @@ describe("layout geometry", () => {
     expect(layoutProblems(layout)).toEqual([]);
   });
   it("detects self-intersection", () => {
-    expect(isSelfIntersecting([[0, 0], [1, 1], [1, 0], [0, 1]])).toBe(true);
-    expect(isSelfIntersecting([[0, 0], [1, 0], [1, 1], [0, 1]])).toBe(false);
+    expect(
+      isSelfIntersecting([
+        [0, 0],
+        [1, 1],
+        [1, 0],
+        [0, 1],
+      ]),
+    ).toBe(true);
+    expect(
+      isSelfIntersecting([
+        [0, 0],
+        [1, 0],
+        [1, 1],
+        [0, 1],
+      ]),
+    ).toBe(false);
   });
   it("flags a spawn outside the floor and a bad wall", () => {
     let edited = movePoint(layout, { kind: "spawn" }, [100, 100]);
-    edited = { ...edited, walls: edited.walls!.map((w, i) => (i === 0 ? { ...w, thickness: -1 } : w)) };
-    const messages = layoutProblems(edited).map((p) => p.message).join(" ");
+    edited = {
+      ...edited,
+      walls: edited.walls!.map((w, i) => (i === 0 ? { ...w, thickness: -1 } : w)),
+    };
+    const messages = layoutProblems(edited)
+      .map((p) => p.message)
+      .join(" ");
     expect(messages).toMatch(/spawn/i);
     expect(messages).toMatch(/thickness/i);
   });

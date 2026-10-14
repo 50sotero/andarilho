@@ -73,7 +73,10 @@ export function pointInPolygon(p: Point, ring: readonly Point[]): boolean {
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i, i += 1) {
     const a = ring[i]!;
     const b = ring[j]!;
-    if (a[1] > p[1] !== b[1] > p[1] && p[0] < ((b[0] - a[0]) * (p[1] - a[1])) / (b[1] - a[1]) + a[0]) {
+    if (
+      a[1] > p[1] !== b[1] > p[1] &&
+      p[0] < ((b[0] - a[0]) * (p[1] - a[1])) / (b[1] - a[1]) + a[0]
+    ) {
       inside = !inside;
     }
   }
@@ -98,11 +101,13 @@ export function layoutProblems(layout: Layout): LayoutProblem[] {
     });
   }
   for (const wall of layout.walls ?? []) {
-    if (!(wall.thickness > 0)) problems.push({ message: `Wall ${wall.id} needs a positive thickness.` });
+    if (!(wall.thickness > 0))
+      problems.push({ message: `Wall ${wall.id} needs a positive thickness.` });
     if (!(wall.height > 0) || wall.height > 20) {
       problems.push({ message: `Wall ${wall.id} height must be between 0 and 20 m.` });
     }
-    if (distance(wall.start, wall.end) < 0.01) problems.push({ message: `Wall ${wall.id} has no length.` });
+    if (distance(wall.start, wall.end) < 0.01)
+      problems.push({ message: `Wall ${wall.id} has no length.` });
   }
   const walls = new Map((layout.walls ?? []).map((w) => [w.id, w]));
   for (const opening of layout.openings ?? []) {
@@ -123,7 +128,8 @@ export function layoutProblems(layout: Layout): LayoutProblem[] {
     if (obstacle.footprint.length < 3 || polygonArea(obstacle.footprint as Point[]) < 1e-4) {
       problems.push({ message: `Obstacle ${obstacle.id} footprint is degenerate.` });
     }
-    if (!(obstacle.height > 0)) problems.push({ message: `Obstacle ${obstacle.id} needs a positive height.` });
+    if (!(obstacle.height > 0))
+      problems.push({ message: `Obstacle ${obstacle.id} needs a positive height.` });
   }
   if (!floorIds.has(layout.spawn.floorId)) {
     problems.push({ message: "The spawn point must be on an existing floor." });
@@ -149,8 +155,17 @@ export function scaleLayout(layout: Layout, factor: number): Layout {
       polygons: f.polygons.map((r) => r.map(s)),
       holes: f.holes?.map((r) => r.map(s)),
     })),
-    walls: layout.walls?.map((w) => ({ ...w, start: s(w.start), end: s(w.end), thickness: w.thickness * factor })),
-    openings: layout.openings?.map((o) => ({ ...o, offset: o.offset * factor, width: o.width * factor })),
+    walls: layout.walls?.map((w) => ({
+      ...w,
+      start: s(w.start),
+      end: s(w.end),
+      thickness: w.thickness * factor,
+    })),
+    openings: layout.openings?.map((o) => ({
+      ...o,
+      offset: o.offset * factor,
+      width: o.width * factor,
+    })),
     obstacles: layout.obstacles?.map((o) => ({ ...o, footprint: o.footprint.map(s) })),
     landmarks: layout.landmarks?.map((l) => ({
       ...l,
@@ -158,14 +173,19 @@ export function scaleLayout(layout: Layout, factor: number): Layout {
     })),
     spawn: {
       ...layout.spawn,
-      feet: [layout.spawn.feet[0] * factor, layout.spawn.feet[1] * factor, layout.spawn.feet[2] * factor],
+      feet: [
+        layout.spawn.feet[0] * factor,
+        layout.spawn.feet[1] * factor,
+        layout.spawn.feet[2] * factor,
+      ],
     },
   };
 }
 
 /** Scale factor so that a measured length becomes the known real length. */
 export function calibrationFactor(measured: number, known: number): number | null {
-  if (!(measured > 0) || !(known > 0) || !Number.isFinite(measured) || !Number.isFinite(known)) return null;
+  if (!(measured > 0) || !(known > 0) || !Number.isFinite(measured) || !Number.isFinite(known))
+    return null;
   return known / measured;
 }
 

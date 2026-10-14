@@ -77,8 +77,7 @@ export const fetchPutPart: PutPart = async (url, body, signal) => {
     cache: "no-store",
   });
   if (!response.ok) {
-    const retryable =
-      response.status >= 500 || response.status === 408 || response.status === 429;
+    const retryable = response.status >= 500 || response.status === 408 || response.status === 429;
     // 403 typically means the signed URL expired: refresh it and retry.
     throw new StoragePutError(
       response.status,
@@ -98,13 +97,7 @@ export const fetchPutPart: PutPart = async (url, body, signal) => {
 };
 
 export type UploadPhase =
-  | "idle"
-  | "initializing"
-  | "uploading"
-  | "paused"
-  | "completing"
-  | "completed"
-  | "failed";
+  "idle" | "initializing" | "uploading" | "paused" | "completing" | "completed" | "failed";
 
 export interface UploadProgress {
   phase: UploadPhase;

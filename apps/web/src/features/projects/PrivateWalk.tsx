@@ -108,8 +108,8 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
         <p aria-live="polite">Preparing a private viewing link...</p>
       ) : null}
       <p className="text-sm text-stone-600 dark:text-stone-400">
-        This private view is visible only to project members. Asset links expire after a few
-        minutes and are refreshed automatically.
+        This private view is visible only to project members. Asset links expire after a few minutes
+        and are refreshed automatically.
       </p>
     </div>
   );

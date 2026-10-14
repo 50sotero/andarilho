@@ -69,8 +69,8 @@ export function DeleteProjectDialog({
         </ul>
         <p>
           Cleanup finishes in the background and may take a while. People who already downloaded a
-          shared scene keep their copy, and database backups expire on their own schedule.
-          This cannot be undone.
+          shared scene keep their copy, and database backups expire on their own schedule. This
+          cannot be undone.
         </p>
       </div>
       <div className="mt-4 space-y-1">

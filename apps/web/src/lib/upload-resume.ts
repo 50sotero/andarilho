@@ -199,7 +199,11 @@ export function remainingParts(
 }
 
 /** Byte range [start, end) for a 1-based part number. */
-export function partRange(partNumber: number, partSize: number, fileSize: number): [number, number] {
+export function partRange(
+  partNumber: number,
+  partSize: number,
+  fileSize: number,
+): [number, number] {
   const start = (partNumber - 1) * partSize;
   return [start, Math.min(start + partSize, fileSize)];
 }

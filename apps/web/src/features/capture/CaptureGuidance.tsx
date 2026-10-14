@@ -31,8 +31,7 @@ export function CaptureGuidance({ headingLevel = 2 }: { headingLevel?: 2 | 3 }) 
         </ul>
         <p className="mt-2">
           These are starting limits, not reconstruction guarantees. Areas the camera never saw
-          cannot be reconstructed, and rooms that were not filmed connected may come out
-          separate.
+          cannot be reconstructed, and rooms that were not filmed connected may come out separate.
         </p>
       </div>
     </div>

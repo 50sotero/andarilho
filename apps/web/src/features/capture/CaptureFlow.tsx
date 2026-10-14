@@ -137,8 +137,10 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
         durationSeconds: videoDuration,
       });
     }
-    for (const p of photos) list.push({ name: p.name, size: p.size, type: p.type, mediaKind: "photo" });
-    if (plan) list.push({ name: plan.name, size: plan.size, type: plan.type, mediaKind: "floor_plan" });
+    for (const p of photos)
+      list.push({ name: p.name, size: p.size, type: p.type, mediaKind: "photo" });
+    if (plan)
+      list.push({ name: plan.name, size: plan.size, type: plan.type, mediaKind: "floor_plan" });
     return list;
   }, [video, videoDuration, photos, plan]);
 
@@ -342,7 +344,11 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
       }
       const { data: run } = await api.submitRun(
         projectId,
-        { captureSetId: intent.captureSetId, quality, includeSupplementaryPhotos: includeSupplementary },
+        {
+          captureSetId: intent.captureSetId,
+          quality,
+          includeSupplementaryPhotos: includeSupplementary,
+        },
         intent.key,
       );
       router.push(
@@ -394,7 +400,9 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
               onChange={(e) => void onVideoChange(e.target.files?.[0] ?? null)}
               className="block w-full text-sm"
             />
-            <p className="text-xs text-stone-600 dark:text-stone-400">One MP4 or MOV, up to 5 minutes.</p>
+            <p className="text-xs text-stone-600 dark:text-stone-400">
+              One MP4 or MOV, up to 5 minutes.
+            </p>
           </div>
           <div className="space-y-1">
             <label htmlFor={ids.photos} className="block text-sm font-medium">
@@ -421,7 +429,9 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
               onChange={(e) => setPlan(e.target.files?.[0] ?? null)}
               className="block w-full text-sm"
             />
-            <p className="text-xs text-stone-600 dark:text-stone-400">PNG, JPEG or PDF, up to 20 MiB.</p>
+            <p className="text-xs text-stone-600 dark:text-stone-400">
+              PNG, JPEG or PDF, up to 20 MiB.
+            </p>
           </div>
         </div>
 
@@ -450,8 +460,8 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
           ) : null}
         </div>
         <p className="mt-2 text-xs text-stone-600 dark:text-stone-400">
-          File types are checked again on the server; a file can still be rejected after upload.
-          If a previous upload was interrupted, select the same file again to resume it.
+          File types are checked again on the server; a file can still be rejected after upload. If
+          a previous upload was interrupted, select the same file again to resume it.
         </p>
         <Button
           className="mt-4"

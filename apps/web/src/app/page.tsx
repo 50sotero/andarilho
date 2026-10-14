@@ -12,8 +12,14 @@ const STEPS: readonly [string, string][] = [
     "Process",
     "Camera positions are recovered and the visual scene is trained. If a capture cannot be connected, you get a clear reason and a suggested fix.",
   ],
-  ["Review", "Confirm scale and orientation, and trace the walkable floor, walls, doors and obstacles."],
-  ["Walk", "Explore privately with collision, then publish a specific revision with a revocable link."],
+  [
+    "Review",
+    "Confirm scale and orientation, and trace the walkable floor, walls, doors and obstacles.",
+  ],
+  [
+    "Walk",
+    "Explore privately with collision, then publish a specific revision with a revocable link.",
+  ],
   ["Control", "Revoke links or delete the project, including its original capture, at any time."],
 ];
 
@@ -23,9 +29,9 @@ export default function HomePage() {
       <section className="space-y-4">
         <h1 className="text-4xl font-bold tracking-tight">Capture a place. Step inside.</h1>
         <p className="max-w-2xl text-lg text-stone-700 dark:text-stone-300">
-          Andarilho turns a continuous walkthrough video and overlapping photos of a real place
-          into a walkable 3D scene in your browser. A floor plan is optional and helps establish
-          scale and align rooms.
+          Andarilho turns a continuous walkthrough video and overlapping photos of a real place into
+          a walkable 3D scene in your browser. A floor plan is optional and helps establish scale
+          and align rooms.
         </p>
         <div className="flex gap-3">
           <Link href="/projects/new" className={primaryLinkClass}>

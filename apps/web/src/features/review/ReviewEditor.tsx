@@ -100,7 +100,9 @@ function SelectionPanel({
   const field = (name: string, value: number | string) =>
     onChange(updateField(layout, selection, name, value));
   const wall =
-    selection.kind === "wall" || selection.kind === "wallEnd" ? layout.walls?.[selection.index] : undefined;
+    selection.kind === "wall" || selection.kind === "wallEnd"
+      ? layout.walls?.[selection.index]
+      : undefined;
   const opening = selection.kind === "opening" ? layout.openings?.[selection.index] : undefined;
   const obstacle =
     selection.kind === "obstacle" || selection.kind === "obstacleCorner"
@@ -125,16 +127,47 @@ function SelectionPanel({
             min={0.01}
             onChange={(v) => field("length", v)}
           />
-          <NumberField label="Thickness" value={wall.thickness} min={0.01} onChange={(v) => field("thickness", v)} />
-          <NumberField label="Height" value={wall.height} min={0.1} step={0.05} onChange={(v) => field("height", v)} />
+          <NumberField
+            label="Thickness"
+            value={wall.thickness}
+            min={0.01}
+            onChange={(v) => field("thickness", v)}
+          />
+          <NumberField
+            label="Height"
+            value={wall.height}
+            min={0.1}
+            step={0.05}
+            onChange={(v) => field("height", v)}
+          />
         </div>
       ) : null}
       {opening ? (
         <div className="grid grid-cols-2 gap-2">
-          <NumberField label="Offset from wall start" value={opening.offset} min={0} onChange={(v) => field("offset", v)} />
-          <NumberField label="Width" value={opening.width} min={0.05} onChange={(v) => field("width", v)} />
-          <NumberField label="Bottom" value={opening.bottom ?? 0} min={0} onChange={(v) => field("bottom", v)} />
-          <NumberField label="Top" value={opening.top} min={0.1} onChange={(v) => field("top", v)} />
+          <NumberField
+            label="Offset from wall start"
+            value={opening.offset}
+            min={0}
+            onChange={(v) => field("offset", v)}
+          />
+          <NumberField
+            label="Width"
+            value={opening.width}
+            min={0.05}
+            onChange={(v) => field("width", v)}
+          />
+          <NumberField
+            label="Bottom"
+            value={opening.bottom ?? 0}
+            min={0}
+            onChange={(v) => field("bottom", v)}
+          />
+          <NumberField
+            label="Top"
+            value={opening.top}
+            min={0.1}
+            onChange={(v) => field("top", v)}
+          />
           <div className="col-span-2 flex items-center gap-2 text-sm">
             <input
               id={`closed-${opening.id}`}
@@ -147,7 +180,13 @@ function SelectionPanel({
         </div>
       ) : null}
       {obstacle ? (
-        <NumberField label="Obstacle height" value={obstacle.height} min={0.01} step={0.05} onChange={(v) => field("height", v)} />
+        <NumberField
+          label="Obstacle height"
+          value={obstacle.height}
+          min={0.01}
+          step={0.05}
+          onChange={(v) => field("height", v)}
+        />
       ) : null}
       {selection.kind === "spawn" ? (
         <NumberField
@@ -160,7 +199,11 @@ function SelectionPanel({
       ) : null}
       {landmark ? (
         <div className="grid grid-cols-2 gap-2">
-          <NumberField label="Height (Y)" value={landmark.worldPoint[1]} onChange={(v) => field("y", v)} />
+          <NumberField
+            label="Height (Y)"
+            value={landmark.worldPoint[1]}
+            onChange={(v) => field("y", v)}
+          />
           <NumberField
             label="Uncertainty"
             value={landmark.uncertainty ?? 0}
@@ -204,7 +247,11 @@ function CalibrationPanel({
   const walls = layout.walls ?? [];
   const landmarks = layout.landmarks ?? [];
   const options: { value: string; label: string; length: number }[] = [
-    ...walls.map((w) => ({ value: `wall:${w.id}`, label: `Wall ${w.id}`, length: distance(w.start, w.end) })),
+    ...walls.map((w) => ({
+      value: `wall:${w.id}`,
+      label: `Wall ${w.id}`,
+      length: distance(w.start, w.end),
+    })),
   ];
   for (let i = 0; i < landmarks.length; i += 1) {
     for (let j = i + 1; j < landmarks.length; j += 1) {
@@ -235,7 +282,12 @@ function CalibrationPanel({
         <label htmlFor={refId} className="block text-xs font-medium">
           Reference
         </label>
-        <select id={refId} value={reference} onChange={(e) => setReference(e.target.value)} className={inputClass}>
+        <select
+          id={refId}
+          value={reference}
+          onChange={(e) => setReference(e.target.value)}
+          className={inputClass}
+        >
           <option value="">Choose...</option>
           {options.map((o) => (
             <option key={o.value} value={o.value}>
@@ -348,7 +400,8 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   const revision = scene?.revision ?? null;
 
   // 3D preview of the current packaged revision (with collision overlay toggle).
-  const revisionId = revision?.manifest && revision.validationState === "valid" ? revision.id : null;
+  const revisionId =
+    revision?.manifest && revision.validationState === "valid" ? revision.id : null;
   useEffect(() => {
     if (!sceneId || !revisionId) return;
     let active = true;
@@ -436,7 +489,10 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
 
   const problems = layoutProblems(layout);
   const canApprove =
-    !dirty && revision.validationState === "valid" && revision.approvalState !== "approved" && !busy;
+    !dirty &&
+    revision.validationState === "valid" &&
+    revision.approvalState !== "approved" &&
+    !busy;
 
   return (
     <div className="space-y-6">
@@ -517,7 +573,12 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
               Fit to view
             </Button>
             <span className="flex items-center gap-1 text-sm">
-              <input id={overlayId} type="checkbox" checked={overlay} onChange={(e) => setOverlay(e.target.checked)} />
+              <input
+                id={overlayId}
+                type="checkbox"
+                checked={overlay}
+                onChange={(e) => setOverlay(e.target.checked)}
+              />
               <label htmlFor={overlayId}>Highlight collision</label>
             </span>
           </div>
@@ -595,7 +656,10 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
                       {lm.id}: ({lm.worldPoint.map((v) => v.toFixed(2)).join(", ")}) m
                       {lm.uncertainty != null ? ` ± ${lm.uncertainty} m` : ""}
                     </span>
-                    <Button variant="ghost" onClick={() => setSelection({ kind: "landmark", index: i })}>
+                    <Button
+                      variant="ghost"
+                      onClick={() => setSelection({ kind: "landmark", index: i })}
+                    >
                       Edit
                     </Button>
                   </li>
@@ -609,14 +673,20 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
       <Card>
         <h2 className="text-lg font-semibold">3D check</h2>
         <p className="mt-1 text-sm text-stone-700 dark:text-stone-300">
-          Walk the current saved revision and turn on the collision overlay to confirm walls,
-          doors and obstacles line up with the captured scene.
+          Walk the current saved revision and turn on the collision overlay to confirm walls, doors
+          and obstacles line up with the captured scene.
         </p>
         <div className="mt-3">
           {envelope ? (
-            <ViewerClient envelope={envelope} title={detail?.project.title ?? "this place"} allowCollisionOverlay />
+            <ViewerClient
+              envelope={envelope}
+              title={detail?.project.title ?? "this place"}
+              allowCollisionOverlay
+            />
           ) : (
-            <p className="text-sm">The 3D preview is available once this revision has been packaged and validated.</p>
+            <p className="text-sm">
+              The 3D preview is available once this revision has been packaged and validated.
+            </p>
           )}
         </div>
       </Card>

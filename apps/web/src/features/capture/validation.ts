@@ -92,14 +92,20 @@ export function extensionOf(name: string): string {
 }
 
 /** Accepts when either the extension or the reported MIME type is allowed for the kind. */
-export function isAcceptedType(file: Pick<CandidateFile, "name" | "type">, kind: MediaKind): boolean {
+export function isAcceptedType(
+  file: Pick<CandidateFile, "name" | "type">,
+  kind: MediaKind,
+): boolean {
   const rule = TYPE_RULES[kind];
   const mime = file.type.toLowerCase();
   return rule.extensions.includes(extensionOf(file.name)) || rule.mimeTypes.includes(mime);
 }
 
 /** The content type to declare to the API (a hint; the server verifies). */
-export function declaredContentType(file: Pick<CandidateFile, "name" | "type">, kind: MediaKind): string {
+export function declaredContentType(
+  file: Pick<CandidateFile, "name" | "type">,
+  kind: MediaKind,
+): string {
   const rule = TYPE_RULES[kind];
   const mime = file.type.toLowerCase();
   if (rule.mimeTypes.includes(mime)) return mime;

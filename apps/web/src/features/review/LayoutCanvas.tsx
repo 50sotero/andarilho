@@ -86,7 +86,12 @@ export function LayoutCanvas({
     onChange(movePoint(layout, sel, [p[0] + d[0], p[1] + d[1]]));
   }
 
-  function handle(sel: Selection, p: Point, color: string, shape: "circle" | "square" | "diamond" = "circle") {
+  function handle(
+    sel: Selection,
+    p: Point,
+    color: string,
+    shape: "circle" | "square" | "diamond" = "circle",
+  ) {
     const selected = sameSelection(selection, sel);
     const label = `${describeSelection(layout, sel)} at x ${p[0].toFixed(2)} m, z ${p[1].toFixed(2)} m`;
     const common = {
@@ -122,7 +127,10 @@ export function LayoutCanvas({
   const spawn: Point = [layout.spawn.feet[0], layout.spawn.feet[2]];
   // Camera forward is -Z at yaw 0; yaw rotates about +Y.
   const yaw = layout.spawn.yawRadians;
-  const arrow: Point = [spawn[0] - Math.sin(yaw) * handleR * 4, spawn[1] - Math.cos(yaw) * handleR * 4];
+  const arrow: Point = [
+    spawn[0] - Math.sin(yaw) * handleR * 4,
+    spawn[1] - Math.cos(yaw) * handleR * 4,
+  ];
 
   return (
     <svg
@@ -141,7 +149,13 @@ export function LayoutCanvas({
           <path d="M 1 0 L 0 0 0 1" fill="none" stroke="#e7e5e4" strokeWidth={stroke} />
         </pattern>
       </defs>
-      <rect x={viewBox.minX} y={viewBox.minY} width={viewBox.width} height={viewBox.height} fill="url(#grid-1m)" />
+      <rect
+        x={viewBox.minX}
+        y={viewBox.minY}
+        width={viewBox.width}
+        height={viewBox.height}
+        fill="url(#grid-1m)"
+      />
 
       {layout.floors.map((floor, fi) =>
         floor.polygons.map((ring, ri) => (
@@ -178,7 +192,13 @@ export function LayoutCanvas({
           y1={w.start[1]}
           x2={w.end[0]}
           y2={w.end[1]}
-          stroke={sameSelection(selection, { kind: "wall", index: wi }) ? "#ca8a04" : showOverlay ? "#dc2626" : "#1c1917"}
+          stroke={
+            sameSelection(selection, { kind: "wall", index: wi })
+              ? "#ca8a04"
+              : showOverlay
+                ? "#dc2626"
+                : "#1c1917"
+          }
           strokeWidth={Math.max(w.thickness, stroke * 3)}
           strokeLinecap="square"
           onPointerDown={(e) => {
@@ -217,7 +237,11 @@ export function LayoutCanvas({
         floor.polygons.map((ring, ri) =>
           ring.map((p, pi) => (
             <g key={`${floor.id}-${ri}-${pi}`}>
-              {handle({ kind: "floorCorner", floor: fi, ring: ri, index: pi }, p as Point, "#14b8a6")}
+              {handle(
+                { kind: "floorCorner", floor: fi, ring: ri, index: pi },
+                p as Point,
+                "#14b8a6",
+              )}
             </g>
           )),
         ),
@@ -230,15 +254,29 @@ export function LayoutCanvas({
       ))}
       {(layout.obstacles ?? []).map((ob, oi) =>
         ob.footprint.map((p, ci) => (
-          <g key={`${ob.id}-${ci}`}>{handle({ kind: "obstacleCorner", index: oi, corner: ci }, p as Point, "#f59e0b")}</g>
+          <g key={`${ob.id}-${ci}`}>
+            {handle({ kind: "obstacleCorner", index: oi, corner: ci }, p as Point, "#f59e0b")}
+          </g>
         )),
       )}
       {(layout.landmarks ?? []).map((lm, li) => (
         <g key={lm.id}>
-          {handle({ kind: "landmark", index: li }, [lm.worldPoint[0], lm.worldPoint[2]], "#6366f1", "diamond")}
+          {handle(
+            { kind: "landmark", index: li },
+            [lm.worldPoint[0], lm.worldPoint[2]],
+            "#6366f1",
+            "diamond",
+          )}
         </g>
       ))}
-      <line x1={spawn[0]} y1={spawn[1]} x2={arrow[0]} y2={arrow[1]} stroke="#be123c" strokeWidth={stroke * 3} />
+      <line
+        x1={spawn[0]}
+        y1={spawn[1]}
+        x2={arrow[0]}
+        y2={arrow[1]}
+        stroke="#be123c"
+        strokeWidth={stroke * 3}
+      />
       {handle({ kind: "spawn" }, spawn, "#e11d48")}
     </svg>
   );
