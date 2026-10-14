@@ -73,7 +73,11 @@ def write_bundle(
     """
     bounds = outputs["proposalBounds"]
     layout = rectangle_layout(
-        bounds["minXZ"], bounds["maxXZ"], elevation=bounds["floorY"], height=bounds["height"]
+        bounds["minXZ"],
+        bounds["maxXZ"],
+        elevation=bounds["floorY"],
+        height=bounds["height"],
+        spawn=outputs.get("proposalSpawn"),
     )
     findings = [f.as_dict() for f in validate_layout(layout)]
     if findings:
@@ -94,6 +98,7 @@ def write_bundle(
         files[prefix + poster_path.name] = poster_path
         poster = asset_entry(prefix + poster_path.name, poster_path, "webp")
     quality = {k: v for k, v in (outputs.get("coverage") or {}).items() if k != "registeredRatio"}
+    quality["warnings"] = [*quality.get("warnings", []), *(outputs.get("frameWarnings") or [])]
     manifest = build_manifest(
         scene_id=str(uuid.uuid4()),
         scene_revision_id=revision_id,
@@ -194,6 +199,8 @@ def run_smoke(video: Path, out: Path, quality: str, max_seconds: int) -> dict[st
         started = time.monotonic()
         result = STAGES[stage](ctx)
         outputs = {**outputs, **dict(result.outputs)}
+        if "frame" in result.manifest:
+            report["frame"] = result.manifest["frame"]
         report["stages"].append({"stage": stage, "seconds": round(time.monotonic() - started, 1)})
     bundle = write_bundle(
         store,

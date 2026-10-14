@@ -397,11 +397,25 @@ def layout_bounds(layout: Mapping[str, Any], pad: float = 0.05) -> dict[str, lis
 
 
 def rectangle_layout(
-    min_xz: Sequence[float], max_xz: Sequence[float], *, elevation: float, height: float
+    min_xz: Sequence[float],
+    max_xz: Sequence[float],
+    *,
+    elevation: float,
+    height: float,
+    spawn: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """A single-room proposal: rectangle floor with four walls and a centered spawn."""
+    """A single-room proposal: rectangle floor with four walls.
+
+    The spawn is ``spawn`` (feet and yaw, such as where the capture walk started)
+    when it lies on the floor, else the rectangle's centre facing -Z.
+    """
     x0, z0 = (float(v) for v in min_xz)
     x1, z1 = (float(v) for v in max_xz)
+    feet, yaw = [(x0 + x1) / 2, elevation, (z0 + z1) / 2], 0.0
+    if spawn is not None:
+        sx, sz = float(spawn["feet"][0]), float(spawn["feet"][2])
+        if x0 < sx < x1 and z0 < sz < z1:
+            feet, yaw = [sx, elevation, sz], float(spawn["yawRadians"])
     corners = [[x0, z0], [x1, z0], [x1, z1], [x0, z1]]
     walls = []
     for i, name in enumerate(("north", "east", "south", "west")):
@@ -424,9 +438,5 @@ def rectangle_layout(
         "openings": [],
         "obstacles": [],
         "landmarks": [],
-        "spawn": {
-            "feet": [(x0 + x1) / 2, elevation, (z0 + z1) / 2],
-            "yawRadians": 0.0,
-            "floorId": "floor-0",
-        },
+        "spawn": {"feet": feet, "yawRadians": yaw, "floorId": "floor-0"},
     }

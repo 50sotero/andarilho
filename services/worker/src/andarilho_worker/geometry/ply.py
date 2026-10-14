@@ -165,6 +165,7 @@ class CleanedPly:
     dropped: int  # splats removed because a value was NaN or infinite
     center: list[float]  # median position subtracted from every splat
     positions: np.ndarray  # (count, 3) float64 positions as written
+    opacity: np.ndarray  # (count,) float32 opacity in [0, 1] (the stored logit, activated)
 
 
 def clean_splat_ply_file(
@@ -183,6 +184,7 @@ def clean_splat_ply_file(
                         shape=(layout.count,))  # fmt: skip
     axes = ("x", "y", "z")
     positions = np.empty((layout.count, 3), dtype=np.float64)
+    logits = np.empty(layout.count, dtype=np.float32)
     kept = 0
     for start in range(0, layout.count, chunk):
         part = records[start : start + chunk]
@@ -190,8 +192,10 @@ def clean_splat_ply_file(
         n = int(mask.sum())
         for axis, name in enumerate(axes):
             positions[kept : kept + n, axis] = part[name][mask]
+        logits[kept : kept + n] = part["opacity"][mask]
         kept += n
     positions = positions[:kept]
+    opacity = (0.5 * (1.0 + np.tanh(0.5 * logits[:kept]))).astype(np.float32)  # sigmoid
     center = np.median(positions, axis=0) if kept else np.zeros(3)
     written = 0
     with dst.open("wb") as fh:
@@ -205,7 +209,7 @@ def clean_splat_ply_file(
             out.tofile(fh)  # parse_header only yields little-endian types
             written += len(out)
     del records, part  # release the map so the caller can delete the source
-    return CleanedPly(kept, layout.count - kept, [float(v) for v in center], positions)
+    return CleanedPly(kept, layout.count - kept, [float(v) for v in center], positions, opacity)
 
 
 def splat_dtype() -> np.dtype:

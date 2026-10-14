@@ -317,6 +317,63 @@ def test_reconstruct_reports_disconnected_capture(db, seed, store, settings):
     assert error["suggestedAction"] and "details" in error
 
 
+class FakeColmapRegistering(FakeColmap):
+    """Registers every frame in one model, then undistorts it (images + sparse files)."""
+
+    def run(self, argv, *, timeout, check_cancelled=None, **kw):
+        argv = [str(a) for a in argv]
+        if argv[:2] == ["colmap", "mapper"]:
+            images = sorted(Path(argv[argv.index("--image_path") + 1]).rglob("*.jpg"))
+            model = Path(argv[argv.index("--output_path") + 1]) / "0"
+            model.mkdir(parents=True)
+            blob = struct.pack("<Q", len(images))
+            for i, image in enumerate(images):
+                name = image.relative_to(image.parent.parent).as_posix()
+                # identity rotation, camera i at x = i (t = -centre)
+                blob += struct.pack("<I7dI", i + 1, 1.0, 0, 0, 0, -float(i), 0, 0, 1)
+                blob += name.encode() + bytes(1) + struct.pack("<Q", 0)
+            (model / "images.bin").write_bytes(blob)
+            (model / "points3D.bin").write_bytes(struct.pack("<Q", 0))
+        elif argv[:2] == ["colmap", "image_undistorter"]:
+            out = Path(argv[argv.index("--output_path") + 1])
+            model = Path(argv[argv.index("--input_path") + 1])
+            (out / "images").mkdir(parents=True)
+            (out / "sparse").mkdir()
+            for item in model.iterdir():
+                (out / "sparse" / item.name).write_bytes(item.read_bytes())
+        return RunResult(tuple(argv), 0, "", "", 0.01)
+
+
+def test_reconstruct_records_the_camera_path_in_walk_order(db, seed, store, settings):
+    from andarilho_worker.stages import STAGES
+
+    settings_gpu = Settings(**{**settings.__dict__, "worker_capability": "gpu"})
+    sup = Supervisor(db, store, settings_gpu, runner=FakeColmapRegistering([]), stages=STAGES)
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, quality="preview", first_stage="camera_reconstruction",
+                              capability="gpu")  # fmt: skip
+    names = [f"00/frame_{i:05d}.jpg" for i in range(40, 0, -1)]  # not in walk order
+    prefix = f"tenants/{pid}/runs/{run_id}/attempts/preparing/1/images/"
+    for name in names:
+        store.put_bytes(prefix + name, b"\xff\xd8\xff")
+    seed.exec(
+        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
+        json.dumps({"outputs": {"framesPrefix": prefix, "frameNames": names, "quality": "preview"}}),
+        job_id,
+    )  # fmt: skip
+    assert sup.execute(queue.claim(db, "gpu-worker", "gpu")) == "succeeded"
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'training'")[
+        "input_manifest"
+    ]["outputs"]
+    record = json.loads(store.get_bytes(outputs["camerasKey"]))
+    assert record["frame"] == "colmap"
+    cameras = record["cameras"]
+    assert [c["name"] for c in cameras] == sorted(names)
+    assert cameras[0]["center"] == pytest.approx([0, 0, 0])
+    assert cameras[-1]["center"] == pytest.approx([39, 0, 0])
+    assert cameras[0]["forward"] == pytest.approx([0, 0, 1])
+
+
 def test_put_immutable_never_replaces_committed_bytes(tmp_path):
     from andarilho_worker.artifacts import LocalObjectStore, put_immutable
     from andarilho_worker.errors import StageError
@@ -438,6 +495,68 @@ def test_sog_compression_drops_the_bands_above_the_recipe_sh_degree(
     compression = result["result_manifest"]["compression"]
     assert compression["format"] == "sog" and compression["shDegree"] == 1
     assert compression["bytes"] == len(b"PK\x03\x04 sog")
+
+
+def test_normalize_levels_the_scene_on_the_floor_under_the_walk_and_spawns_at_its_start(
+    db, seed, store, settings, monkeypatch
+):
+    import math
+
+    from andarilho_worker.geometry.ply import SplatCloud, write_splat_ply
+    from andarilho_worker.geometry.synthetic import synthetic_splats
+    from andarilho_worker.stages import STAGES
+    from andarilho_worker.stages import normalize as normalize_mod
+    from andarilho_worker.validation import similarity_matrix_problem
+
+    monkeypatch.setattr(normalize_mod, "tool_available", lambda name: False)
+    # The synthetic two-room scene as a trainer exports it: Z up (world y -> z).
+    world = synthetic_splats(normalize_mod.synthetic_layout()).data.copy()
+    world["y"], world["z"] = -world["z"].copy(), world["y"].copy()
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, quality="preview", first_stage="normalizing")
+    prefix = f"tenants/{pid}/runs/{run_id}/attempts"
+    store.put_bytes(f"{prefix}/training/1/scene.ply", write_splat_ply(SplatCloud(world)))
+    # A walk from x = 3 to x = 1 at 1.5 m, facing -X. COLMAP frame for an identity
+    # dataparser transform: colmap (x, y, z) = export (x, -z, y).
+    cameras = [
+        {"name": f"00/frame_{i:05d}.jpg", "center": [3.0 - 0.2 * i, -1.5, 0.0],
+         "forward": [-1.0, 0.0, 0.0]}
+        for i in range(11)
+    ]  # fmt: skip
+    store.put_bytes(f"{prefix}/camera/1/cameras.json", json.dumps({"cameras": cameras}).encode())
+    store.put_bytes(
+        f"{prefix}/training/1/dataparser_transforms.json",
+        json.dumps(
+            {"transform": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]], "scale": 1.0}
+        ).encode(),
+    )
+    seed.exec(
+        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
+        json.dumps({"outputs": {
+            "plyKey": f"{prefix}/training/1/scene.ply", "quality": "preview",
+            "camerasKey": f"{prefix}/camera/1/cameras.json",
+            "dataparserTransformsKey": f"{prefix}/training/1/dataparser_transforms.json",
+        }}), job_id,
+    )  # fmt: skip
+    sup = Supervisor(db, store, settings, stages=STAGES)
+    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
+    job = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
+    outputs = job["input_manifest"]["outputs"]
+    assert similarity_matrix_problem(outputs["worldFromDecodedRender"]) is None
+    assert outputs["proposalBounds"]["floorY"] == 0.0
+    assert outputs["proposalSpawn"]["yawRadians"] == pytest.approx(math.pi / 2, abs=0.02)
+    assert outputs["frameWarnings"] == []
+    result = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'normalizing'")
+    frame = result["result_manifest"]["frame"]
+    assert frame["method"] == "floor_plane"
+    assert frame["tiltDegrees"] < 1.0
+    assert frame["metersPerUnit"] == pytest.approx(1.0, rel=0.03)
+
+    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
+    revision = seed.one("SELECT layout FROM scene_revisions WHERE run_id = %s", run_id)
+    spawn = revision["layout"]["spawn"]
+    assert spawn["feet"] == pytest.approx(outputs["proposalSpawn"]["feet"])
+    assert spawn["yawRadians"] == pytest.approx(math.pi / 2, abs=0.02)
 
 
 def test_normalize_streams_the_export_instead_of_reading_it_inline(

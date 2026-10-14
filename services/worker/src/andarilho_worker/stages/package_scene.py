@@ -135,6 +135,9 @@ def run(ctx: StageContext) -> StageResult:
             "disconnectedComponents": 0,
             "warnings": ["Synthetic scene: no capture was reconstructed."],
         }
+        frame_warnings = list(out.get("frameWarnings") or [])
+        if frame_warnings:
+            quality = {**quality, "warnings": [*quality.get("warnings", []), *frame_warnings]}
         poster_source, poster_format = out.get("posterKey"), "webp"
     ctx.progress("Packaging scene files.")
     source = ctx.store.head(source_key)

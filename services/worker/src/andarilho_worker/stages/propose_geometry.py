@@ -5,8 +5,9 @@ Layout source, in priority order:
 1. a user layout from ``scene_revisions.layout`` when the job carries a
    ``scene_revision_id`` (layout-save pipeline);
 2. the synthetic recipe's bundled two-room layout;
-3. a single-room rectangle proposal from the normalized splat bounds (robust
-   percentiles in the world frame).
+3. a single-room rectangle proposal around the capture's camera path, with the
+   spawn where the walk started (older runs: robust splat percentiles and a
+   centred spawn).
 
 For an initial run the stage idempotently creates the ``scenes`` row (unique
 ``run_id``) and revision 1 through a fenced write, so every later artifact can be
@@ -93,7 +94,11 @@ def run(ctx: StageContext) -> StageResult:
     else:
         bounds = ctx.output("proposalBounds")
         layout = rectangle_layout(
-            bounds["minXZ"], bounds["maxXZ"], elevation=bounds["floorY"], height=bounds["height"]
+            bounds["minXZ"],
+            bounds["maxXZ"],
+            elevation=bounds["floorY"],
+            height=bounds["height"],
+            spawn=ctx.outputs().get("proposalSpawn"),
         )
         source = "proposal"
     findings = [f.as_dict() for f in validate_layout(layout)]

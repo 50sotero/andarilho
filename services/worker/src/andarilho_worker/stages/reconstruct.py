@@ -8,6 +8,7 @@ second component is reported as ``DISCONNECTED_CAPTURE``.
 
 from __future__ import annotations
 
+import json
 import shutil
 import struct
 import tarfile
@@ -50,6 +51,42 @@ def read_points3d(path: Path, limit: int = 2_000_000) -> np.ndarray:
         offset += 8 + track * 8
         out.append((x, y, z))
     return np.array(out, dtype=np.float64).reshape(-1, 3)
+
+
+def _rotation(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
+    return np.array([
+        [1 - 2 * qy * qy - 2 * qz * qz, 2 * qx * qy - 2 * qw * qz, 2 * qz * qx + 2 * qw * qy],
+        [2 * qx * qy + 2 * qw * qz, 1 - 2 * qx * qx - 2 * qz * qz, 2 * qy * qz - 2 * qw * qx],
+        [2 * qz * qx - 2 * qw * qy, 2 * qy * qz + 2 * qw * qx, 1 - 2 * qx * qx - 2 * qy * qy],
+    ])  # fmt: skip
+
+
+def read_camera_poses(path: Path) -> list[dict[str, object]]:
+    """Registered cameras of a COLMAP images.bin: name, world centre, viewing direction.
+
+    COLMAP stores world-to-camera ``(q, t)``; the centre is ``-R^T t`` and the camera
+    looks along ``R^T (0, 0, 1)`` (OpenCV convention). Sorted by name, which is the
+    walk order for extracted frames.
+    """
+    data = path.read_bytes()
+    (count,) = struct.unpack_from("<Q", data, 0)
+    offset = 8
+    cameras: list[dict[str, object]] = []
+    for _ in range(count):
+        _image_id, qw, qx, qy, qz, tx, ty, tz, _camera_id = struct.unpack_from(
+            "<I7dI", data, offset
+        )
+        offset += 4 + 7 * 8 + 4
+        end = data.index(b"\x00", offset)
+        name = data[offset:end].decode("utf-8")
+        offset = end + 1
+        (points,) = struct.unpack_from("<Q", data, offset)
+        offset += 8 + points * 24
+        rotation = _rotation(qw, qx, qy, qz)
+        center = -rotation.T @ np.array([tx, ty, tz])
+        forward = rotation.T @ np.array([0.0, 0.0, 1.0])
+        cameras.append({"name": name, "center": center.tolist(), "forward": forward.tolist()})
+    return sorted(cameras, key=lambda c: str(c["name"]))
 
 
 def list_models(sparse: Path) -> list[SparseModel]:
@@ -186,6 +223,14 @@ def run(ctx: StageContext) -> StageResult:
         tar.add(undistorted / "sparse", arcname="sparse")
     dataset_key = ctx.attempt_key("dataset.tar")
     ctx.store.put_file(dataset_key, tar_path, "application/x-tar")
+    # The camera path (in COLMAP's frame) places the floor, up and spawn later on.
+    cameras = read_camera_poses(dataset_sparse / "images.bin")
+    cameras_key = ctx.attempt_key("cameras.json")
+    ctx.store.put_bytes(
+        cameras_key,
+        json.dumps({"frame": "colmap", "cameras": cameras}).encode(),
+        "application/json",
+    )
     bounds = None
     if len(points):
         lo, hi = np.percentile(points, 2, axis=0), np.percentile(points, 98, axis=0)
@@ -193,5 +238,5 @@ def run(ctx: StageContext) -> StageResult:
     return finish(
         ctx,
         {"quality": quality, "sparsePoints": int(len(points)), "sparseBounds": bounds},
-        outputs={"datasetKey": dataset_key, "coverage": quality},
+        outputs={"datasetKey": dataset_key, "camerasKey": cameras_key, "coverage": quality},
     )

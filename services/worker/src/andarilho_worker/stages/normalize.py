@@ -1,11 +1,15 @@
 """``normalizing``: clean and recenter the exported splats; produce the render asset.
 
 Transform chain (README section 9): the exported PLY is in Nerfstudio's
-dataparser frame (Z up). Recentering is *baked* into the splat positions (a pure
-translation needs no orientation/covariance/SH update). The remaining
-Z-up -> Y-up proper rotation is recorded as ``worldFromDecodedRender`` (column
-major, ``THREE.Matrix4.fromArray`` compatible) and applied by the viewer at
-runtime. Scale is ``estimated`` until a user measurement exists.
+dataparser frame (Z up, poses scaled into a unit cube). Recentering is *baked*
+into the splat positions (a pure translation needs no orientation/covariance/SH
+update). The rest is recorded as ``worldFromDecodedRender`` (column major,
+``THREE.Matrix4.fromArray`` compatible) and applied by the viewer at runtime: a
+proper rotation that levels the floor found under the camera path and turns Z up
+into Y up, a uniform scale that puts the cameras at a walking person's height
+(nominal meters), and a translation that puts that floor at y = 0
+(``geometry.frame``). Scale is ``estimated`` until a user measurement exists.
+Runs without a recorded camera path keep the plain Z-up -> Y-up rotation.
 
 The synthetic recipe instead renders a splat cloud directly in the canonical
 world frame from the bundled synthetic layout, so its matrix is identity.
@@ -22,7 +26,18 @@ import numpy as np
 
 from andarilho_worker.artifacts import MAX_RENDER_BYTES
 from andarilho_worker.errors import StageError
-from andarilho_worker.geometry.ply import PlyError, clean_splat_ply_file, write_splat_ply
+from andarilho_worker.geometry.frame import (
+    CameraPath,
+    FrameEstimate,
+    colmap_to_export,
+    estimate_frame,
+)
+from andarilho_worker.geometry.ply import (
+    CleanedPly,
+    PlyError,
+    clean_splat_ply_file,
+    write_splat_ply,
+)
 from andarilho_worker.geometry.synthetic import synthetic_splats
 from andarilho_worker.manifest import IDENTITY_MATRIX
 from andarilho_worker.recipes import render_argv
@@ -40,6 +55,8 @@ BOUNDS_SAMPLE = 2_000_000
 SOG_MAX_SECONDS = 900
 # Splatfacto's default; a recipe without renderShDegree keeps every band.
 TRAINED_SH_DEGREE = 3
+# Only confident splats place the floor: translucent ones are mostly floaters.
+FLOOR_MIN_OPACITY = 0.8
 
 
 def synthetic_layout() -> dict[str, Any]:
@@ -51,6 +68,30 @@ def apply_matrix(m: list[float], points: np.ndarray) -> np.ndarray:
     mat = np.array(m, dtype=np.float64).reshape(4, 4).T  # column-major -> row-major
     homo = np.column_stack([points, np.ones(len(points))])
     return (homo @ mat.T)[:, :3]
+
+
+def camera_frame(ctx: StageContext, cleaned: CleanedPly) -> FrameEstimate | None:
+    """The canonical frame from the recorded camera path, or None for older runs."""
+    outputs = ctx.outputs()
+    if not outputs.get("camerasKey") or not outputs.get("dataparserTransformsKey"):
+        return None
+    record = json.loads(ctx.store.get_bytes(str(outputs["camerasKey"])))
+    dataparser = json.loads(ctx.store.get_bytes(str(outputs["dataparserTransformsKey"])))
+    try:
+        path = CameraPath.from_record(record["cameras"])
+        transform, scale = dataparser["transform"], float(dataparser["scale"])
+        exported = CameraPath(
+            colmap_to_export(path.centers, transform, scale, cleaned.center),
+            colmap_to_export(path.forwards, transform, scale, cleaned.center, directions=True),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise StageError("EXPORT_INVALID", "The camera path could not be read.") from exc
+    if len(exported.centers) == 0 or not (scale > 0 and np.isfinite(exported.centers).all()):
+        raise StageError("EXPORT_INVALID", "The camera path could not be read.")
+    opaque = cleaned.positions[cleaned.opacity > FLOOR_MIN_OPACITY]
+    if len(opaque) < MIN_SPLATS:
+        opaque = cleaned.positions
+    return estimate_frame(opaque, exported, seed=int(ctx.params.get("seed", 0)))
 
 
 def run(ctx: StageContext) -> StageResult:
@@ -120,6 +161,34 @@ def run(ctx: StageContext) -> StageResult:
             reason = "timeout" if isinstance(exc, ProcessTimeout) else "failed"
             compression = {"format": "ply", "reason": reason}
         compression["seconds"] = round(time.monotonic() - started, 1)
+    ctx.progress("Finding the floor and the walking height.")
+    frame = camera_frame(ctx, cleaned)
+    result: dict[str, Any] = {
+        "splats": cleaned.count,
+        "dropped": cleaned.dropped,
+        "recenteredBy": cleaned.center,
+        "compression": compression,
+    }
+    outputs: dict[str, Any] = {
+        "renderKey": render_key,
+        "renderFormat": render_format,
+        "archivePlyKey": archive_key,
+        "scaleStatus": "estimated",
+    }
+    if frame is not None:
+        result["frame"] = frame.summary()
+        outputs |= {
+            "worldFromDecodedRender": frame.matrix,
+            "proposalBounds": {
+                "minXZ": frame.min_xz,
+                "maxXZ": frame.max_xz,
+                "floorY": 0.0,
+                "height": frame.height,
+            },
+            "proposalSpawn": {"feet": frame.spawn_feet, "yawRadians": frame.spawn_yaw},
+            "frameWarnings": frame.warnings,
+        }
+        return finish(ctx, result, outputs=outputs)
     # Percentile bounds from an evenly strided sample keep this step small for huge clouds.
     sample = cleaned.positions[:: max(1, cleaned.count // BOUNDS_SAMPLE)]
     world = apply_matrix(Z_UP_TO_Y_UP, sample)
@@ -127,25 +196,13 @@ def run(ctx: StageContext) -> StageResult:
     hi = np.percentile(world, 95, axis=0)
     floor_y = float(np.percentile(world[:, 1], 2))
     ceiling = float(np.percentile(world[:, 1], 98))
-    return finish(
-        ctx,
-        {
-            "splats": cleaned.count,
-            "dropped": cleaned.dropped,
-            "recenteredBy": cleaned.center,
-            "compression": compression,
+    outputs |= {
+        "worldFromDecodedRender": Z_UP_TO_Y_UP,
+        "proposalBounds": {
+            "minXZ": [float(lo[0]), float(lo[2])],
+            "maxXZ": [float(hi[0]), float(hi[2])],
+            "floorY": floor_y,
+            "height": max(2.2, min(4.0, ceiling - floor_y)),
         },
-        outputs={
-            "renderKey": render_key,
-            "renderFormat": render_format,
-            "archivePlyKey": archive_key,
-            "worldFromDecodedRender": Z_UP_TO_Y_UP,
-            "scaleStatus": "estimated",
-            "proposalBounds": {
-                "minXZ": [float(lo[0]), float(lo[2])],
-                "maxXZ": [float(hi[0]), float(hi[2])],
-                "floorY": floor_y,
-                "height": max(2.2, min(4.0, ceiling - floor_y)),
-            },
-        },
-    )
+    }
+    return finish(ctx, result, outputs=outputs)
