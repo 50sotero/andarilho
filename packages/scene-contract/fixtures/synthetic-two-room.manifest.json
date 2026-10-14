@@ -1,0 +1,62 @@
+{
+  "schemaVersion": "1.0",
+  "sceneId": "fixture-scene",
+  "sceneRevisionId": "fixture-revision",
+  "revision": 1,
+  "runId": "fixture-run",
+  "renderMode": "gaussian",
+  "units": "m",
+  "upAxis": "+Y",
+  "cameraForward": "-Z",
+  "scaleStatus": "user_measured",
+  "worldFromDecodedRender": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+  "geometrySpace": "world",
+  "bounds": {
+    "min": [-4.1, -0.05, -2.6],
+    "max": [4.1, 2.65, 2.6]
+  },
+  "spawn": {
+    "feet": [2, 0, 0],
+    "yawRadians": 1.5707963267948966,
+    "floorId": "floor-0"
+  },
+  "floors": [
+    {
+      "id": "floor-0",
+      "elevation": 0
+    }
+  ],
+  "assets": {
+    "render": {
+      "key": "tenants/fixture-project/scenes/fixture-revision/scene.ply",
+      "format": "ply",
+      "bytes": 190539,
+      "sha256": "c86b0accdf03980178fcd11f262d951fc1ebc38c1fff7cdb84d1fb365a0f35ef"
+    },
+    "collision": {
+      "key": "tenants/fixture-project/scenes/fixture-revision/collision.glb",
+      "format": "glb",
+      "bytes": 7008,
+      "sha256": "76f09ecbe81a4c85f1a3c379d488019009808b4e325a3c6cd7c09b5134f5508f"
+    }
+  },
+  "navigation": {
+    "mode": "approved_collision",
+    "layoutRevision": 1,
+    "approved": true,
+    "playerRadius": 0.25,
+    "playerHeight": 1.7,
+    "eyeHeight": 1.6
+  },
+  "quality": {
+    "registeredViews": 0,
+    "selectedViews": 0,
+    "disconnectedComponents": 0,
+    "warnings": ["Synthetic fixture: no capture was reconstructed."]
+  },
+  "provenance": {
+    "recipeDigest": "synthetic-fixture-v1",
+    "captureSetId": "fixture-capture",
+    "geometrySource": "synthetic_fixture"
+  }
+}

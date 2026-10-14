@@ -1,0 +1,224 @@
+"""Recipe, coverage-gate and media-stage tests with fake external tools (no FFmpeg/COLMAP/GPU)."""
+
+from __future__ import annotations
+
+import json
+import struct
+from pathlib import Path
+
+import pytest
+
+from andarilho_worker import queue
+from andarilho_worker.errors import StageError
+from andarilho_worker.recipes import ARGV, RECIPES, recipe_for, render_argv
+from andarilho_worker.runner import RunResult
+from andarilho_worker.settings import Settings
+from andarilho_worker.stages import prepare as prepare_mod
+from andarilho_worker.stages.reconstruct import SparseModel, coverage_gate
+from andarilho_worker.supervisor import Supervisor
+
+
+def test_recipes_stage_order_and_capabilities():
+    synthetic = recipe_for("synthetic")
+    assert synthetic.stage_names() == [
+        "validating", "preparing", "normalizing", "geometry_proposal", "packaging",
+        "scene_validation",
+    ]  # fmt: skip
+    assert {s.capability for s in synthetic.stages} == {"cpu"}
+    preview = recipe_for("preview")
+    caps = {s.stage: s.capability for s in preview.stages}
+    assert caps["camera_reconstruction"] == caps["training"] == "gpu"
+    assert caps["preparing"] == "cpu"
+    assert preview.next_stage("training").stage == "normalizing"
+    assert preview.next_stage("scene_validation") is None
+    assert preview.next_stage("geometry_proposal", layout_pipeline=True).stage == "packaging"
+    digests = {r.digest for r in RECIPES.values()}
+    assert len(digests) == 3 and all(d.startswith("sha256:") for d in digests)
+    assert recipe_for("preview").digest == recipe_for("preview").digest
+    with pytest.raises(KeyError):
+        recipe_for("ultra")
+
+
+def test_argv_templates_are_pinned():
+    argv = render_argv("ffprobe", input=Path("/scratch/x.mp4"))
+    assert argv[0] == "ffprobe" and argv[-1].endswith("x.mp4")
+    with pytest.raises(KeyError):
+        render_argv("ffprobe", input="a", extra="--evil")
+    with pytest.raises(KeyError):
+        render_argv("ns_train", data="d")
+    train = render_argv("ns_train", data="d", output_dir="o", timestamp="t", iterations=10,
+                        save_steps=5, seed=1)  # fmt: skip
+    assert "--max-num-iterations" in train and "--viewer.quit-on-train-completion" in train
+    assert all(isinstance(t, tuple) for t in ARGV.values())
+
+
+def test_coverage_gate_codes():
+    def models(*counts):
+        return [SparseModel(Path(f"m{i}"), c, 100) for i, c in enumerate(counts)]
+
+    with pytest.raises(StageError) as e:
+        coverage_gate([], 50, min_views=30, min_ratio=0.8)
+    assert e.value.code == "CAMERA_REGISTRATION_FAILED"
+    with pytest.raises(StageError) as e:
+        coverage_gate(models(25, 25), 50, min_views=30, min_ratio=0.8)
+    assert e.value.code == "DISCONNECTED_CAPTURE"
+    with pytest.raises(StageError) as e:
+        coverage_gate(models(20), 22, min_views=30, min_ratio=0.8)
+    assert e.value.code == "INSUFFICIENT_OVERLAP"
+    with pytest.raises(StageError) as e:
+        coverage_gate(models(60, 2), 100, min_views=30, min_ratio=0.8)
+    assert e.value.code == "INSUFFICIENT_OVERLAP"
+    quality = coverage_gate(models(95, 2), 100, min_views=30, min_ratio=0.8)
+    assert quality["registeredViews"] == 95 and quality["disconnectedComponents"] == 1
+
+
+def test_settings_from_env(tmp_path):
+    s = Settings.from_env({"DATABASE_URL": "postgresql://x", "WORKER_CAPABILITY": "gpu",
+                           "WORKER_MAX_CONCURRENCY": "2", "WORKER_SCRATCH_DIR": str(tmp_path)})  # fmt: skip
+    assert s.worker_capability == "gpu" and s.worker_max_concurrency == 2
+    assert s.worker_id
+    with pytest.raises(ValueError):
+        Settings.from_env({"DATABASE_URL": "x", "WORKER_CAPABILITY": "tpu"})
+    with pytest.raises(ValueError):
+        Settings.from_env({"DATABASE_URL": "postgresql://a:local-password@h/d", "APP_ENV": "production",
+                           "S3_ACCESS_KEY_ID": "local-development-only"})  # fmt: skip
+
+
+class FakeMediaRunner:
+    """Stands in for ffprobe/ffmpeg: records argv and writes plausible outputs."""
+
+    def __init__(self, codec: str = "h264", duration: float = 10.0) -> None:
+        self.calls: list[list[str]] = []
+        self.codec, self.duration = codec, duration
+
+    def run(self, argv, *, timeout, check_cancelled=None, **kw):
+        argv = [str(a) for a in argv]
+        self.calls.append(argv)
+        if check_cancelled:
+            check_cancelled()
+        stdout = ""
+        if argv[0] == "ffprobe":
+            stdout = json.dumps({
+                "streams": [{"codec_type": "video", "codec_name": self.codec, "width": 1920,
+                             "height": 1080, "avg_frame_rate": "30/1", "duration": str(self.duration)},
+                            {"codec_type": "audio", "codec_name": "aac"}],
+                "format": {"duration": str(self.duration), "start_time": "0"},
+            })  # fmt: skip
+        elif argv[0] == "ffmpeg":
+            out = Path(argv[-1])
+            if "%05d" in out.name:
+                count = int(argv[argv.index("-frames:v") + 1])
+                for i in range(1, count + 1):
+                    (out.parent / out.name.replace("%05d", f"{i:05d}")).write_bytes(b"\xff\xd8\xff")
+            else:
+                out.write_bytes(b"\xff\xd8\xff")
+        return RunResult(tuple(argv), 0, stdout, "", 0.01)
+
+
+def _preparing_job(seed, store, pid, *, codec="h264"):
+    run_id, job_id = seed.run(pid, quality="preview", first_stage="preparing")
+    inputs = []
+    for kind, data in (
+        ("video", b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64),
+        ("photo", b"\xff\xd8\xff" + b"\x00" * 64),
+    ):
+        uid = f"{kind}-0000"
+        key = f"tenants/{pid}/originals/{uid}"
+        store.put_bytes(key, data)
+        import hashlib
+
+        inputs.append({"uploadId": uid, "mediaKind": kind, "key": key, "storageVersion": None,
+                       "sha256": hashlib.sha256(data).hexdigest(), "bytes": len(data)})  # fmt: skip
+    seed.exec(
+        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
+        json.dumps({"outputs": {"inputs": inputs, "quality": "preview"}}), job_id,
+    )  # fmt: skip
+    return run_id, job_id
+
+
+def test_prepare_extracts_bounded_frames_and_strips_metadata(
+    db, seed, store, settings, monkeypatch
+):
+    monkeypatch.setattr(prepare_mod, "tool_available", lambda name: True)
+    fake = FakeMediaRunner()
+    sup = Supervisor(db, store, settings, runner=fake)
+    pid = seed.project()
+    run_id, _ = _preparing_job(seed, store, pid)
+    job = queue.claim(db, "w", "cpu")
+    assert sup.execute(job) == "succeeded"
+    ffmpeg = [c for c in fake.calls if c[0] == "ffmpeg"]
+    video_call = ffmpeg[0]
+    assert "-an" in video_call and video_call[video_call.index("-map_metadata") + 1] == "-1"
+    assert any("min(1600,iw)" in a for a in video_call)
+    assert int(video_call[video_call.index("-frames:v") + 1]) == 20  # 10 s at 2 fps
+    nxt = seed.one(
+        "SELECT stage, capability, input_manifest FROM jobs WHERE stage = 'camera_reconstruction'"
+    )
+    assert nxt["capability"] == "gpu"
+    outputs = nxt["input_manifest"]["outputs"]
+    assert outputs["frameCount"] == 21
+    source_map = json.loads(store.get_bytes(outputs["sourceMapKey"]))
+    assert source_map["00/frame_00003.jpg"] == {"uploadId": "video-0000", "timestampSeconds": 1.0}
+    assert source_map["photos/photo_00000.jpg"]["photo"] is True
+    assert len(store.list_keys(outputs["framesPrefix"])) == 21
+
+
+def test_prepare_rejects_unsupported_codec(db, seed, store, settings, monkeypatch):
+    monkeypatch.setattr(prepare_mod, "tool_available", lambda name: True)
+    sup = Supervisor(db, store, settings, runner=FakeMediaRunner(codec="vp9"))
+    pid = seed.project()
+    run_id, _ = _preparing_job(seed, store, pid)
+    job = queue.claim(db, "w", "cpu")
+    assert sup.execute(job) == "failed"
+    run = seed.one("SELECT status, error FROM reconstruction_runs WHERE id = %s", run_id)
+    assert run["status"] == "failed" and run["error"]["code"] == "UNSUPPORTED_MEDIA"
+    assert seed.one("SELECT state FROM usage_ledger")["state"] == "released"
+
+
+def test_plan_frames_caps_total():
+    fps, budget = prepare_mod.plan_frames([600.0], 100, fps=2, cap=400)
+    assert budget == 300 and fps == pytest.approx(0.5)
+    assert prepare_mod.plan_frames([60.0], 0, fps=2, cap=400) == (2, 400)
+
+
+def _images_bin(path: Path, count: int) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    (path / "images.bin").write_bytes(struct.pack("<Q", count))
+    (path / "points3D.bin").write_bytes(struct.pack("<Q", 0))
+
+
+class FakeColmap:
+    def __init__(self, components: list[int]) -> None:
+        self.components = components
+
+    def run(self, argv, *, timeout, check_cancelled=None, **kw):
+        argv = [str(a) for a in argv]
+        if argv[:2] == ["colmap", "mapper"]:
+            sparse = Path(argv[argv.index("--output_path") + 1])
+            for i, count in enumerate(self.components):
+                _images_bin(sparse / str(i), count)
+        return RunResult(tuple(argv), 0, "", "", 0.01)
+
+
+def test_reconstruct_reports_disconnected_capture(db, seed, store, settings):
+    from andarilho_worker.stages import STAGES
+
+    settings_gpu = Settings(**{**settings.__dict__, "worker_capability": "gpu"})
+    sup = Supervisor(db, store, settings_gpu, runner=FakeColmap([25, 25]), stages=STAGES)
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, quality="preview", first_stage="camera_reconstruction",
+                              capability="gpu")  # fmt: skip
+    names = [f"00/frame_{i:05d}.jpg" for i in range(50)]
+    prefix = f"tenants/{pid}/runs/{run_id}/attempts/preparing/1/images/"
+    for name in names:
+        store.put_bytes(prefix + name, b"\xff\xd8\xff")
+    seed.exec(
+        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
+        json.dumps({"outputs": {"framesPrefix": prefix, "frameNames": names, "quality": "preview"}}),
+        job_id,
+    )  # fmt: skip
+    job = queue.claim(db, "gpu-worker", "gpu")
+    assert sup.execute(job) == "failed"
+    error = seed.one("SELECT error FROM reconstruction_runs WHERE id = %s", run_id)["error"]
+    assert error["code"] == "DISCONNECTED_CAPTURE"
+    assert error["suggestedAction"] and "details" in error

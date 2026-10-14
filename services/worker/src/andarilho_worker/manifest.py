@@ -1,0 +1,107 @@
+"""Persistent scene manifest construction (README section 10)."""
+
+from __future__ import annotations
+
+import hashlib
+from collections.abc import Mapping, Sequence
+from typing import Any
+
+from andarilho_worker.contracts import SCHEMA_VERSION
+from andarilho_worker.geometry.layout import layout_bounds
+
+IDENTITY_MATRIX = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
+
+
+def scene_prefix(project_id: str, scene_revision_id: str) -> str:
+    return f"tenants/{project_id}/scenes/{scene_revision_id}/"
+
+
+def asset_entry(key: str, data: bytes, fmt: str) -> dict[str, Any]:
+    return {
+        "key": key,
+        "format": fmt,
+        "bytes": len(data),
+        "sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def _clean_number(v: float) -> float | int:
+    """Render integral floats as ints so JSON output is stable and compact."""
+    f = float(v)
+    return int(f) if f.is_integer() else f
+
+
+def navigation_for(geometry_source: str, layout_revision: int) -> dict[str, Any]:
+    approved = geometry_source in ("user_confirmed_trace", "synthetic_fixture")
+    return {
+        "mode": "approved_collision" if approved else "inspection_only",
+        "layoutRevision": layout_revision,
+        "approved": approved,
+        "playerRadius": 0.25,
+        "playerHeight": 1.7,
+        "eyeHeight": 1.6,
+    }
+
+
+def build_manifest(
+    *,
+    scene_id: str,
+    scene_revision_id: str,
+    revision: int,
+    run_id: str,
+    layout: Mapping[str, Any],
+    layout_revision: int,
+    render: Mapping[str, Any],
+    collision: Mapping[str, Any],
+    poster: Mapping[str, Any] | None,
+    world_from_decoded_render: Sequence[float],
+    scale_status: str,
+    geometry_source: str,
+    recipe_digest: str,
+    capture_set_id: str,
+    quality: Mapping[str, Any],
+) -> dict[str, Any]:
+    spawn = layout["spawn"]
+    assets: dict[str, Any] = {"render": dict(render), "collision": dict(collision)}
+    if poster is not None:
+        assets["poster"] = dict(poster)
+    bounds = layout_bounds(layout)
+    return {
+        "schemaVersion": SCHEMA_VERSION,
+        "sceneId": scene_id,
+        "sceneRevisionId": scene_revision_id,
+        "revision": revision,
+        "runId": run_id,
+        "renderMode": "gaussian",
+        "units": "m",
+        "upAxis": "+Y",
+        "cameraForward": "-Z",
+        "scaleStatus": scale_status,
+        "worldFromDecodedRender": [_clean_number(v) for v in world_from_decoded_render],
+        "geometrySpace": "world",
+        "bounds": {
+            "min": [_clean_number(v) for v in bounds["min"]],
+            "max": [_clean_number(v) for v in bounds["max"]],
+        },
+        "spawn": {
+            "feet": [_clean_number(v) for v in spawn["feet"]],
+            "yawRadians": spawn["yawRadians"],
+            "floorId": spawn["floorId"],
+        },
+        "floors": [
+            {"id": f["id"], "elevation": _clean_number(f["elevation"])} for f in layout["floors"]
+        ],
+        "assets": assets,
+        "navigation": navigation_for(geometry_source, layout_revision),
+        "quality": {
+            "registeredViews": int(quality.get("registeredViews", 0)),
+            "selectedViews": int(quality.get("selectedViews", 0)),
+            "disconnectedComponents": int(quality.get("disconnectedComponents", 0)),
+            "warnings": list(quality.get("warnings", []))[:100],
+        },
+        "provenance": {
+            "recipeDigest": recipe_digest,
+            "captureSetId": capture_set_id,
+            "geometrySource": geometry_source,
+        },
+    }

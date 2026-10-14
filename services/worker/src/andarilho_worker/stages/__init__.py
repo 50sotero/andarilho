@@ -1,0 +1,30 @@
+"""Stage registry: canonical stage name -> stage function."""
+
+from __future__ import annotations
+
+from andarilho_worker.stages import (
+    cleanup,
+    inspect_upload,
+    normalize,
+    package_scene,
+    prepare,
+    propose_geometry,
+    reconstruct,
+    train,
+    validate,
+    validate_scene,
+)
+from andarilho_worker.stages.base import Stage
+
+STAGES: dict[str, Stage] = {
+    "validating": validate.run,
+    "preparing": prepare.run,
+    "camera_reconstruction": reconstruct.run,
+    "training": train.run,
+    "normalizing": normalize.run,
+    "geometry_proposal": propose_geometry.run,
+    "packaging": package_scene.run,
+    "scene_validation": validate_scene.run,
+    "upload_inspection": inspect_upload.run,
+    "project_cleanup": cleanup.run,
+}
