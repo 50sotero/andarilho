@@ -1,0 +1,231 @@
+/**
+ * Local resume state for multipart uploads (README section 7, step 4).
+ *
+ * The browser cannot reopen a file after reload, so the user re-selects it;
+ * we match it to a persisted record by a fingerprint built from the file's
+ * name, size and lastModified (a hint, not a content hash). Storage access is
+ * always wrapped in try/catch: private windows and blocked storage must not
+ * break uploading, they only disable resume.
+ */
+
+export const RESUME_STORAGE_PREFIX = "andarilho:upload:";
+export const RESUME_RECORD_VERSION = 1;
+
+export interface FileIdentity {
+  name: string;
+  size: number;
+  lastModified: number;
+}
+
+export interface CompletedPartRecord {
+  partNumber: number;
+  etag: string;
+}
+
+export interface UploadResumeRecord {
+  version: typeof RESUME_RECORD_VERSION;
+  uploadId: string;
+  projectId: string;
+  fingerprint: string;
+  partSize: number;
+  partCount: number;
+  completedParts: CompletedPartRecord[];
+  expiresAt: string;
+}
+
+/** Minimal Storage subset so tests can inject fakes. */
+export interface KeyValueStorage {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+  readonly length: number;
+  key(index: number): string | null;
+}
+
+export function fileFingerprint(file: FileIdentity): string {
+  return `v1:${file.size}:${file.lastModified}:${encodeURIComponent(file.name)}`;
+}
+
+export function resumeKey(projectId: string, fingerprint: string): string {
+  return `${RESUME_STORAGE_PREFIX}${projectId}:${fingerprint}`;
+}
+
+export function getDefaultStorage(): KeyValueStorage | null {
+  try {
+    if (typeof window === "undefined") return null;
+    return window.localStorage;
+  } catch {
+    return null;
+  }
+}
+
+function isPositiveInt(value: unknown): value is number {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
+}
+
+/** Validates an untrusted parsed record. Returns null when it is malformed. */
+export function parseResumeRecord(raw: unknown): UploadResumeRecord | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (r.version !== RESUME_RECORD_VERSION) return null;
+  if (typeof r.uploadId !== "string" || !r.uploadId) return null;
+  if (typeof r.projectId !== "string" || !r.projectId) return null;
+  if (typeof r.fingerprint !== "string" || !r.fingerprint) return null;
+  if (!isPositiveInt(r.partSize) || !isPositiveInt(r.partCount)) return null;
+  if (typeof r.expiresAt !== "string" || Number.isNaN(Date.parse(r.expiresAt))) return null;
+  if (!Array.isArray(r.completedParts)) return null;
+  const parts: CompletedPartRecord[] = [];
+  const seen = new Set<number>();
+  for (const p of r.completedParts) {
+    if (!p || typeof p !== "object") return null;
+    const part = p as Record<string, unknown>;
+    if (!isPositiveInt(part.partNumber) || part.partNumber > r.partCount) return null;
+    if (typeof part.etag !== "string" || !part.etag) return null;
+    if (seen.has(part.partNumber)) continue;
+    seen.add(part.partNumber);
+    parts.push({ partNumber: part.partNumber, etag: part.etag });
+  }
+  parts.sort((a, b) => a.partNumber - b.partNumber);
+  return {
+    version: RESUME_RECORD_VERSION,
+    uploadId: r.uploadId,
+    projectId: r.projectId,
+    fingerprint: r.fingerprint,
+    partSize: r.partSize,
+    partCount: r.partCount,
+    completedParts: parts,
+    expiresAt: r.expiresAt,
+  };
+}
+
+/** Records within this margin of expiry are treated as expired (time to finish uploading). */
+export const EXPIRY_SAFETY_MARGIN_MS = 5 * 60 * 1000;
+
+export function isExpired(record: UploadResumeRecord, now: number = Date.now()): boolean {
+  return Date.parse(record.expiresAt) - EXPIRY_SAFETY_MARGIN_MS <= now;
+}
+
+export function saveResumeRecord(
+  record: UploadResumeRecord,
+  storage: KeyValueStorage | null = getDefaultStorage(),
+): boolean {
+  if (!storage) return false;
+  try {
+    storage.setItem(resumeKey(record.projectId, record.fingerprint), JSON.stringify(record));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function removeResumeRecord(
+  projectId: string,
+  fingerprint: string,
+  storage: KeyValueStorage | null = getDefaultStorage(),
+): void {
+  if (!storage) return;
+  try {
+    storage.removeItem(resumeKey(projectId, fingerprint));
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Loads a record for this project/file. Corrupted, mismatched or expired
+ * records are deleted and ignored.
+ */
+export function loadResumeRecord(
+  projectId: string,
+  file: FileIdentity,
+  options: { storage?: KeyValueStorage | null; now?: number } = {},
+): UploadResumeRecord | null {
+  const storage = options.storage === undefined ? getDefaultStorage() : options.storage;
+  if (!storage) return null;
+  const fingerprint = fileFingerprint(file);
+  const key = resumeKey(projectId, fingerprint);
+  let text: string | null;
+  try {
+    text = storage.getItem(key);
+  } catch {
+    return null;
+  }
+  if (!text) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    removeResumeRecord(projectId, fingerprint, storage);
+    return null;
+  }
+  const record = parseResumeRecord(parsed);
+  const expectedParts = record ? Math.ceil(file.size / record.partSize) : 0;
+  if (
+    !record ||
+    record.projectId !== projectId ||
+    record.fingerprint !== fingerprint ||
+    expectedParts !== record.partCount ||
+    isExpired(record, options.now)
+  ) {
+    removeResumeRecord(projectId, fingerprint, storage);
+    return null;
+  }
+  return record;
+}
+
+/** Returns a new record with this part marked complete (idempotent). */
+export function withCompletedPart(
+  record: UploadResumeRecord,
+  part: CompletedPartRecord,
+): UploadResumeRecord {
+  const others = record.completedParts.filter((p) => p.partNumber !== part.partNumber);
+  return {
+    ...record,
+    completedParts: [...others, part].sort((a, b) => a.partNumber - b.partNumber),
+  };
+}
+
+/** Part numbers (1-based, ascending) that still need uploading. */
+export function remainingParts(
+  partCount: number,
+  completed: readonly { partNumber: number }[],
+): number[] {
+  const done = new Set(completed.map((p) => p.partNumber));
+  const out: number[] = [];
+  for (let n = 1; n <= partCount; n += 1) {
+    if (!done.has(n)) out.push(n);
+  }
+  return out;
+}
+
+/** Byte range [start, end) for a 1-based part number. */
+export function partRange(partNumber: number, partSize: number, fileSize: number): [number, number] {
+  const start = (partNumber - 1) * partSize;
+  return [start, Math.min(start + partSize, fileSize)];
+}
+
+/** Removes expired or corrupted records for any project. Returns the number removed. */
+export function pruneResumeRecords(
+  storage: KeyValueStorage | null = getDefaultStorage(),
+  now: number = Date.now(),
+): number {
+  if (!storage) return 0;
+  const doomed: string[] = [];
+  try {
+    for (let i = 0; i < storage.length; i += 1) {
+      const key = storage.key(i);
+      if (!key || !key.startsWith(RESUME_STORAGE_PREFIX)) continue;
+      let record: UploadResumeRecord | null = null;
+      try {
+        record = parseResumeRecord(JSON.parse(storage.getItem(key) ?? "null"));
+      } catch {
+        record = null;
+      }
+      if (!record || isExpired(record, now)) doomed.push(key);
+    }
+    for (const key of doomed) storage.removeItem(key);
+  } catch {
+    return 0;
+  }
+  return doomed.length;
+}
