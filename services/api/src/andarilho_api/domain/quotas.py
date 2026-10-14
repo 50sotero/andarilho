@@ -67,8 +67,8 @@ def check_upload(
         Upload.project_id == project_id,
         or_(
             Upload.status.in_(COUNTED_STATUSES),
-            # A rejected upload holds quota until the worker deletes its stored object.
-            and_(Upload.status == "rejected", Upload.immutable_key.is_not(None)),
+            # Rejected or removed uploads hold quota until the worker deletes their bytes.
+            and_(Upload.status.in_(("rejected", "aborted")), Upload.immutable_key.is_not(None)),
         ),
         not_(and_(Upload.status == "initiated", Upload.expires_at <= func.now())),
     )

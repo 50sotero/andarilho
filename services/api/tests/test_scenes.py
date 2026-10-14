@@ -378,3 +378,15 @@ def test_revoking_newest_share_keeps_older_live_link_published(client, auth, db,
     db.refresh(project)
     # The older revision's link still works, so the project stays published on it.
     assert project.published_revision_id == old.id
+
+
+def test_viewer_project_detail_uses_the_published_scene(client, auth, db, setup):
+    db.add(ProjectMember(project_id=uuid.UUID(setup["pid"]), subject="viewer-v", role="viewer"))
+    db.commit()
+    url = f"/v1/projects/{setup['pid']}"
+    assert client.get(url, headers=auth("viewer-v")).json()["scene"] is None  # nothing published
+    db.get(Project, uuid.UUID(setup["pid"])).published_revision_id = uuid.UUID(setup["revisionId"])
+    db.commit()
+    newer = scene(db, setup["pid"])  # a newer draft scene becomes the active draft
+    assert client.get(url, headers=auth()).json()["scene"]["id"] == newer["sceneId"]
+    assert client.get(url, headers=auth("viewer-v")).json()["scene"]["id"] == setup["sceneId"]

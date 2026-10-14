@@ -136,14 +136,20 @@ def _project_detail(db: Session, project: Project, role: str) -> dict[str, Any]:
         ).scalars():
             jobs_by_run.setdefault(job.run_id, []).append(job)  # type: ignore[arg-type]
 
-    scene = None
-    if project.active_draft_revision_id is not None:
-        scene = db.execute(
+    def scene_of(revision_id: uuid.UUID | None) -> Scene | None:
+        if revision_id is None:
+            return None
+        return db.execute(
             select(Scene)
             .join(SceneRevision, SceneRevision.scene_id == Scene.id)
-            .where(SceneRevision.id == project.active_draft_revision_id, Scene.project_id == pid)
+            .where(SceneRevision.id == revision_id, Scene.project_id == pid)
         ).scalar_one_or_none()
-    if scene is None:
+
+    # Viewers only walk the published revision, so their scene is the one it belongs to,
+    # even when a newer draft scene exists.
+    viewer = role == "viewer"
+    scene = scene_of(project.published_revision_id if viewer else project.active_draft_revision_id)
+    if scene is None and not viewer:
         scene = db.execute(
             select(Scene)
             .where(Scene.project_id == pid)

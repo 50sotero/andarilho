@@ -278,3 +278,50 @@ def test_expired_upload_rejects_parts_and_frees_quota(client, auth, db, settings
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "UPLOAD_EXPIRED"
     assert _init(client, auth, pid, size=10).status_code == 201
+
+
+def _run(client, auth, pid, capture_set_id, key):
+    return client.post(
+        f"/v1/projects/{pid}/runs",
+        json={"captureSetId": capture_set_id, "quality": "preview"},
+        headers=auth(**{"Idempotency-Key": key}),
+    )
+
+
+def test_remove_unused_verified_upload(client, auth, db, settings):
+    pid = create_project(client, auth)["id"]
+    video = verified_upload(db, pid, size=settings.upload_max_total_bytes)
+    assert _init(client, auth, pid, size=10).status_code == 413
+    cs = client.post(
+        f"/v1/projects/{pid}/capture-sets", json={"uploadIds": [video]}, headers=auth()
+    )
+    assert cs.status_code == 201
+    assert client.delete(f"/v1/uploads/{video}", headers=auth()).status_code == 204
+    row = db.get(Upload, uuid.UUID(video))
+    db.refresh(row)
+    assert row.status == "aborted" and row.immutable_key is not None
+    job = db.execute(select(Job).where(Job.upload_id == row.id)).scalar_one()
+    assert job.stage == "upload_cleanup" and job.input_manifest["key"] == row.immutable_key
+    # Quota is released once the worker has deleted the bytes, not before.
+    assert _init(client, auth, pid, size=10).status_code == 413
+    row.immutable_key = None
+    db.commit()
+    assert _init(client, auth, pid, size=10).status_code == 201
+    # A capture set made before the removal can no longer start a run.
+    started = _run(client, auth, pid, cs.json()["id"], "key-removed-1")
+    assert started.status_code == 409
+    assert started.json()["error"]["code"] == "INVALID_STATE"
+
+
+def test_upload_backing_a_run_cannot_be_removed(client, auth, db):
+    pid = create_project(client, auth)["id"]
+    video = verified_upload(db, pid)
+    cs = client.post(
+        f"/v1/projects/{pid}/capture-sets", json={"uploadIds": [video]}, headers=auth()
+    )
+    assert _run(client, auth, pid, cs.json()["id"], "key-backing-1").status_code == 202
+    response = client.delete(f"/v1/uploads/{video}", headers=auth())
+    assert response.status_code == 409
+    row = db.get(Upload, uuid.UUID(video))
+    db.refresh(row)
+    assert row.status == "verified"

@@ -52,7 +52,10 @@ def _inspect(ctx: StageContext, upload: dict[str, Any]) -> dict[str, Any]:
     key, version = upload["immutable_key"], upload["storage_version"]
     head = ctx.store.head(key, version)
     if head is None:
-        raise StageError("MISSING_INPUT")
+        # Nothing left to verify: either a previous attempt already deleted these
+        # rejected bytes and its database commit was lost, or the object vanished.
+        # Finalizing as rejected keeps the upload from staying unverified forever.
+        raise Rejected("INVALID_MEDIA", "stored object is missing")
     if head.size <= 0 or head.size > MAX_INSPECT_BYTES:
         raise Rejected("INVALID_MEDIA", "size out of range")
     if head.size != upload["expected_bytes"]:

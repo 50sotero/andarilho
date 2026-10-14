@@ -191,6 +191,35 @@ def test_calibration_scales_render_transform_without_compounding(db, seed, sup):
     assert m3["worldFromDecodedRender"] == matrix
 
 
+def test_older_scene_revision_never_takes_the_active_draft_back(db, seed, sup):
+    pid = seed.project()
+    old_run, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    old = seed.one("SELECT * FROM scene_revisions WHERE run_id = %s", old_run)
+    new_run, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    new = seed.one("SELECT id FROM scene_revisions WHERE run_id = %s", new_run)
+    active = "SELECT active_draft_revision_id AS a FROM projects WHERE id = %s"
+    assert seed.one(active, pid)["a"] == new["id"]
+    # A layout revision of the older scene finishes after the newer scene exists.
+    rev2 = str(uuid.uuid4())
+    seed.exec(
+        "INSERT INTO scene_revisions (id, scene_id, project_id, run_id, base_revision_id, revision, "
+        "layout_revision, layout, validation_state, approval_state, created_by) "
+        "VALUES (%s, %s, %s, %s, %s, 2, 2, %s, 'pending', 'draft', 'user-1')",
+        rev2, old["scene_id"], pid, old_run, old["id"], Jsonb(old["layout"]),
+    )  # fmt: skip
+    seed.job(
+        pid, "geometry_proposal",
+        {"sceneRevisionId": rev2, "sceneId": str(old["scene_id"]), "baseRevisionId": str(old["id"]),
+         "layoutRevision": 2, "layoutSource": "user"},
+        run_id=old_run, scene_revision_id=rev2,
+    )  # fmt: skip
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    assert seed.one("SELECT validation_state AS v FROM scene_revisions WHERE id = %s", rev2)["v"] == "valid"
+    assert seed.one(active, pid)["a"] == new["id"]
+
+
 def test_invalid_layout_rejected_at_geometry_stage(db, seed, sup):
     pid = seed.project()
     run_id, _ = seed.run(pid, quality="synthetic")
@@ -378,6 +407,33 @@ def test_inspection_rejects_pdf_with_too_many_pages(db, seed, store, sup):
     uid = make_upload(seed, store, pid, many, "floor_plan")
     drain(db, sup)
     assert seed.one("SELECT status FROM uploads WHERE id = %s", uid)["status"] == "rejected"
+
+
+def test_inspection_finalizes_when_rejected_object_is_already_gone(db, seed, store, sup):
+    # A previous attempt deleted the rejected bytes but lost its commit: the retry
+    # must still finalize the upload instead of failing on the missing object.
+    pid = seed.project()
+    uid = make_upload(seed, store, pid, SVG, "photo")
+    key = seed.one("SELECT immutable_key FROM uploads WHERE id = %s", uid)["immutable_key"]
+    store.delete_prefix(key)
+    assert drain(db, sup) == [("upload_inspection", "succeeded")]
+    row = seed.one("SELECT status, rejection_code, immutable_key FROM uploads WHERE id = %s", uid)
+    assert row["status"] == "rejected" and row["immutable_key"] is None
+
+
+def test_upload_cleanup_deletes_removed_bytes_and_releases_the_key(db, seed, store, sup):
+    pid = seed.project()
+    uid = make_upload(seed, store, pid, JPEG, "photo")
+    assert drain(db, sup) == [("upload_inspection", "succeeded")]
+    key = seed.one("SELECT immutable_key FROM uploads WHERE id = %s", uid)["immutable_key"]
+    seed.exec("UPDATE uploads SET status = 'aborted' WHERE id = %s", uid)  # as the API does
+    for _ in range(2):  # a duplicate or retried job is harmless
+        seed.job(pid, "upload_cleanup", {"uploadId": uid, "projectId": pid, "key": key},
+                 upload_id=uid)  # fmt: skip
+    assert drain(db, sup) == [("upload_cleanup", "succeeded")] * 2
+    assert store.list_keys(f"tenants/{pid}/originals/") == []
+    row = seed.one("SELECT status, immutable_key FROM uploads WHERE id = %s", uid)
+    assert row["status"] == "aborted" and row["immutable_key"] is None
 
 
 def test_inspection_verify_is_conditional(db, seed, store, settings):

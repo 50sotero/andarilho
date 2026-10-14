@@ -37,7 +37,8 @@ TOOL_VERSIONS = {
     # Must match infra/Dockerfile.worker-gpu; verify each tool's --help in that image.
     "colmap": "3.12.5",
     "nerfstudio": "1.1.5",
-    "gsplat": "1.5.3",
+    "gsplat": "1.4.0",  # the exact version nerfstudio 1.1.5 requires
+    "torch": "2.7.1+cu128",
     "splat-transform": "1.4.0",
     "ffmpeg": "debian-bookworm",
 }

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from andarilho_worker.stages import (
     cleanup,
+    cleanup_upload,
     inspect_upload,
     normalize,
     package_scene,
@@ -27,4 +28,5 @@ STAGES: dict[str, Stage] = {
     "scene_validation": validate_scene.run,
     "upload_inspection": inspect_upload.run,
     "project_cleanup": cleanup.run,
+    "upload_cleanup": cleanup_upload.run,
 }

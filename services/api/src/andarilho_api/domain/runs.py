@@ -26,6 +26,7 @@ from andarilho_api.models import (
     Job,
     Project,
     ReconstructionRun,
+    Upload,
     UsageLedger,
 )
 from andarilho_api.settings import Settings
@@ -70,6 +71,25 @@ def submit_run(
     ).first()
     if active is not None:
         raise active_run_exists()
+
+    upload_ids = {uuid.UUID(str(item["uploadId"])) for item in capture_set.inputs}
+    if capture_set.floor_plan_upload_id is not None:
+        upload_ids.add(capture_set.floor_plan_upload_id)
+    if upload_ids:
+        usable = db.execute(
+            select(func.count()).where(
+                Upload.project_id == project.id,
+                Upload.id.in_(upload_ids),
+                Upload.status == "verified",
+            )
+        ).scalar_one()
+        if usable != len(upload_ids):
+            raise ApiError(
+                409,
+                "INVALID_STATE",
+                "This capture set includes a file that was removed.",
+                suggested_action="Create a new capture set from the current files.",
+            )
 
     recipe = get_recipe(quality)
     digest = recipe.digest

@@ -822,7 +822,7 @@ Use `/v1`, JSON bodies, UUID resource IDs, explicit authorization, and generated
 | `GET /v1/uploads/{id}` | Owned upload status and resumable part metadata. |
 | `POST /v1/uploads/{id}/parts` | Sign a bounded batch of allowed part numbers. |
 | `POST /v1/uploads/{id}/complete` | Verify/complete storage upload and enqueue inspection. |
-| `DELETE /v1/uploads/{id}` | Abort incomplete upload and release its reservation. |
+| `DELETE /v1/uploads/{id}` | Abort an incomplete upload and release its reservation, or remove a verified upload no active or succeeded run uses (its bytes are deleted by an `upload_cleanup` job, which then releases the quota). |
 | `POST /v1/projects/{id}/capture-sets` | Snapshot a verified input list and optional plan. |
 | `POST /v1/projects/{id}/runs` | Idempotently reserve budget and enqueue a reconstruction. |
 | `GET /v1/jobs/{id}` | State, stage progress, and a bounded event page after a cursor. |

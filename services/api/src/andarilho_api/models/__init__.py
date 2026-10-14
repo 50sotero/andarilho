@@ -57,7 +57,7 @@ RUN_STAGES = (
     "scene_validation",
 )
 # Internal maintenance stages that are not part of a reconstruction run.
-MAINTENANCE_STAGES = ("upload_inspection", "project_cleanup")
+MAINTENANCE_STAGES = ("upload_inspection", "project_cleanup", "upload_cleanup")
 JOB_STAGES = RUN_STAGES + MAINTENANCE_STAGES
 JOB_STATES = ("queued", "running", "retry_wait", "succeeded", "failed", "cancelled")
 TERMINAL_JOB_STATES = ("succeeded", "failed", "cancelled")
@@ -308,6 +308,9 @@ class Job(Base):
         ),
         CheckConstraint(
             "stage <> 'upload_inspection' OR upload_id IS NOT NULL", name="inspection_has_upload"
+        ),
+        CheckConstraint(
+            "stage <> 'upload_cleanup' OR upload_id IS NOT NULL", name="upload_cleanup_has_upload"
         ),
         CheckConstraint(
             "state <> 'running' OR (lease_owner IS NOT NULL AND lease_expires_at IS NOT NULL)",

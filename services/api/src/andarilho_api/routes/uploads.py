@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Response
+from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import Session
 
 from andarilho_api import serializers as ser
@@ -17,7 +18,13 @@ from andarilho_api.deps import get_settings_dep, get_storage, utcnow
 from andarilho_api.domain.membership import WRITERS, load_project, load_scoped, lock_row
 from andarilho_api.domain.quotas import check_upload
 from andarilho_api.errors import ApiError, invalid_state, validation_failed
-from andarilho_api.models import Job, Upload
+from andarilho_api.models import (
+    ACTIVE_RUN_STATUSES,
+    CaptureSet,
+    Job,
+    ReconstructionRun,
+    Upload,
+)
 from andarilho_api.schemas.api import EmptyBody, PartsRequest, UploadCreate
 from andarilho_api.settings import Settings
 from andarilho_api.storage import (
@@ -303,8 +310,13 @@ def delete_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store
     scoped = load_scoped(db, Upload, upload_id, subject, "upload")
     load_project(db, scoped.project_id, subject, roles=WRITERS, lock=True, require_active=True)
     upload = lock_row(db, Upload, scoped.id)
-    if upload.status in ("uploaded_unverified", "verified"):
-        raise invalid_state("This upload is already complete and cannot be aborted.")
+    if upload.status == "uploaded_unverified":
+        raise invalid_state(
+            "This upload is still being checked.", suggested_action="Try again in a moment."
+        )
+    if upload.status == "verified":
+        _remove_verified(db, upload)
+        return Response(status_code=204)
     if upload.status == "initiated":
         if upload.multipart_upload_id:
             try:
@@ -316,3 +328,61 @@ def delete_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store
         upload.updated_at = utcnow()
         db.commit()
     return Response(status_code=204)
+
+
+def _retained(db: Session, upload: Upload) -> bool:
+    """True when a capture set using this upload backs an active or succeeded run.
+
+    Those runs (and the scenes and retries built on them) read the original
+    bytes, so the upload stays until the project or its retention policy removes it.
+    """
+    uses_upload = or_(
+        CaptureSet.inputs.contains([{"uploadId": str(upload.id)}]),
+        CaptureSet.floor_plan_upload_id == upload.id,
+    )
+    return bool(
+        db.execute(
+            select(
+                exists().where(
+                    ReconstructionRun.project_id == upload.project_id,
+                    ReconstructionRun.capture_set_id == CaptureSet.id,
+                    ReconstructionRun.status.in_((*ACTIVE_RUN_STATUSES, "succeeded")),
+                    CaptureSet.project_id == upload.project_id,
+                    uses_upload,
+                )
+            )
+        ).scalar_one()
+    )
+
+
+def _remove_verified(db: Session, upload: Upload) -> None:
+    """Mark a verified, unused upload removed and queue the deletion of its bytes.
+
+    The upload keeps its immutable key (and its quota) until the fenced
+    ``upload_cleanup`` job has deleted every stored version, so a failed delete
+    is retried instead of leaving unaccounted objects behind.
+    """
+    if _retained(db, upload):
+        raise invalid_state(
+            "This file is used by a reconstruction and cannot be removed.",
+            suggested_action="Delete the project to remove its capture files.",
+        )
+    upload.status = "aborted"
+    upload.updated_at = utcnow()
+    db.add(
+        Job(
+            id=uuid.uuid4(),
+            project_id=upload.project_id,
+            upload_id=upload.id,
+            capability="cpu",
+            stage="upload_cleanup",
+            state="queued",
+            priority=5,
+            input_manifest={
+                "uploadId": str(upload.id),
+                "projectId": str(upload.project_id),
+                "key": upload.immutable_key,
+            },
+        )
+    )
+    db.commit()

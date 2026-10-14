@@ -128,9 +128,14 @@ def run(ctx: StageContext) -> StageResult:
                    OR (SELECT r.revision FROM scene_revisions r
                        WHERE r.id = p.active_draft_revision_id AND r.scene_id = %(scene)s)
                       <= %(num)s
-                   OR NOT EXISTS (SELECT 1 FROM scene_revisions r
-                                  WHERE r.id = p.active_draft_revision_id
-                                    AND r.scene_id = %(scene)s))
+                   -- The pointer is on another scene: take it over only when that
+                   -- scene is older, so a late older run never hides a newer scene.
+                   OR EXISTS (SELECT 1 FROM scene_revisions r
+                              JOIN scenes cur ON cur.id = r.scene_id
+                              JOIN scenes mine ON mine.id = %(scene)s
+                              WHERE r.id = p.active_draft_revision_id
+                                AND r.scene_id <> %(scene)s
+                                AND (cur.created_at, cur.id) < (mine.created_at, mine.id)))
             """,
             {"rev": revision_id, "scene": scene_id, "project": ctx.project_id,
              "num": revision_number},
