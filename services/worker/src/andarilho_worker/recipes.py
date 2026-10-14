@@ -114,7 +114,9 @@ ARGV: dict[str, tuple[str, ...]] = {
     "ns_export": (
         "ns-export", "gaussian-splat", "--load-config", "{config}", "--output-dir", "{output_dir}",
     ),
-    "splat_transform": ("splat-transform", "{input}", "{output}"),
+    # CPU SOG compression: deterministic, and it needs no Vulkan driver, which neither
+    # worker container has (WebGPU device creation fails without one).
+    "splat_transform": ("splat-transform", "--quiet", "--gpu", "cpu", "{input}", "{output}"),
 }  # fmt: skip
 
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")

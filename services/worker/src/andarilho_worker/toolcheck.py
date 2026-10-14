@@ -1,12 +1,14 @@
 """Check the pinned recipe's command-line options against the installed tools.
 
-Run inside the GPU image (``python -m andarilho_worker.toolcheck``); the image
-build does this so a recipe written for another tool version fails the build
-instead of failing a user's run. It needs no GPU: every check reads ``--help``.
+Run inside a worker image (``python -m andarilho_worker.toolcheck``, with
+``--only splat-transform`` in the CPU image); the image builds do this so a recipe
+written for another tool version fails the build instead of failing a user's
+run. It needs no GPU: every check reads ``--help``.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import subprocess
@@ -16,7 +18,7 @@ from collections.abc import Callable, Sequence
 from andarilho_worker.recipes import ARGV
 
 # Help commands whose combined output must list every ``--option`` of a template.
-# ffmpeg/ffprobe use single-dash options and splat-transform takes none.
+# ffmpeg/ffprobe use single-dash options.
 HELP: dict[str, tuple[tuple[str, ...], ...]] = {
     "colmap_feature_extractor": (("colmap", "feature_extractor", "-h"),),
     "colmap_sequential_matcher": (("colmap", "sequential_matcher", "-h"),),
@@ -29,6 +31,7 @@ HELP: dict[str, tuple[tuple[str, ...], ...]] = {
         ("ns-train", "splatfacto", "colmap", "--help"),
     ),
     "ns_export": (("ns-export", "gaussian-splat", "--help"),),
+    "splat_transform": (("splat-transform", "--help"),),
 }
 
 Runner = Callable[[Sequence[str]], str]
@@ -46,10 +49,18 @@ def options(template: Sequence[str]) -> list[str]:
     return [token for token in template if token.startswith("--")]
 
 
-def missing_options(run_help: Runner = _help_text) -> dict[str, list[str]]:
-    """Template name -> options its tool's help does not list (empty when all match)."""
+def missing_options(
+    run_help: Runner = _help_text, only: Sequence[str] | None = None
+) -> dict[str, list[str]]:
+    """Template name -> options its tool's help does not list (empty when all match).
+
+    ``only`` limits the check to templates run by those executables (an image that
+    installs only some of the tools, such as the CPU worker's splat-transform).
+    """
     missing: dict[str, list[str]] = {}
     for name, commands in HELP.items():
+        if only is not None and commands[0][0] not in only:
+            continue
         text = "\n".join(run_help(argv) for argv in commands)
         absent = [
             opt
@@ -61,12 +72,15 @@ def missing_options(run_help: Runner = _help_text) -> dict[str, list[str]]:
     return missing
 
 
-def main() -> int:
-    missing = missing_options()
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--only", nargs="+", metavar="EXECUTABLE", help="check only these tools")
+    args = parser.parse_args(argv)
+    missing = missing_options(only=args.only)
     for name, absent in missing.items():
         print(f"{name}: not accepted by the installed tool: {', '.join(absent)}", file=sys.stderr)
     if not missing:
-        print(f"recipe options match the installed tools ({len(HELP)} commands checked)")
+        print("recipe options match the installed tools")
     return 1 if missing else 0
 
 

@@ -2,7 +2,7 @@
   "generatedFrom": "services/worker/src/andarilho_worker/recipes.py",
   "preview": {
     "name": "preview-v1",
-    "digest": "sha256:b8e2dbb94c7a68095995b410091b0cd92173c0b6386880bbcd1c1c7484576d92",
+    "digest": "sha256:b897404c46fc860168f76851dee9bdddf2a04d1441860d383f8d35d35a0a4b9d",
     "stages": [
       {
         "stage": "validating",
@@ -54,7 +54,7 @@
   },
   "standard": {
     "name": "standard-v1",
-    "digest": "sha256:0650695d74965faad7c8cabfe6a755c67ea1d65af193b13bc5d6af5b0296bd7b",
+    "digest": "sha256:be51ef462ded099e6295eebde2acd6926ad26bd2b599fb093adb182304949b43",
     "stages": [
       {
         "stage": "validating",
@@ -106,7 +106,7 @@
   },
   "synthetic": {
     "name": "synthetic-v1",
-    "digest": "sha256:512c95de7864f81b601115d963196df162be6e5aea4c4a4124f4a4d34d3fbe0a",
+    "digest": "sha256:890091c8780c04af786b599ab292d0111e15f00fe9504d8e20944702972d285f",
     "stages": [
       {
         "stage": "validating",
