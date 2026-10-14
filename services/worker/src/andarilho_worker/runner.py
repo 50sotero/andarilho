@@ -34,6 +34,9 @@ ENV_ALLOWLIST = (
     "SYSTEMROOT", "SystemRoot", "COMSPEC", "PATHEXT", "WINDIR",
     "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES",
     "LD_LIBRARY_PATH", "XDG_CACHE_HOME", "TORCH_HOME", "HF_HOME", "QT_QPA_PLATFORM",
+    # Where the GPU image precompiled gsplat's CUDA kernels, and for which archs:
+    # without them every new container JIT-compiles the kernels during training.
+    "TORCH_EXTENSIONS_DIR", "TORCH_CUDA_ARCH_LIST",
 )  # fmt: skip
 
 _REDACTIONS: tuple[tuple[re.Pattern[str], str], ...] = (

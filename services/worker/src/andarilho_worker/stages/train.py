@@ -15,7 +15,7 @@ from pathlib import Path
 from andarilho_worker.errors import StageError
 from andarilho_worker.geometry.ply import PlyError, inspect_splat_ply_file
 from andarilho_worker.recipes import render_argv
-from andarilho_worker.runner import ProcessFailed
+from andarilho_worker.runner import ProcessFailed, minimal_env
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
 
@@ -60,7 +60,14 @@ def run(ctx: StageContext) -> StageResult:
     export = work / "export"
     try:
         ctx.progress("Exporting splats.")
-        ctx.run(render_argv("ns_export", config=config, output_dir=export))
+        # nerfstudio 1.1.5 loads its checkpoint with torch.load's default, which torch
+        # 2.6+ made weights_only=True; the checkpoint holds numpy scalars and is
+        # rejected. It was written moments ago by this job's own ns-train, so the full
+        # unpickler is restored for this one subprocess only.
+        ctx.run(
+            render_argv("ns_export", config=config, output_dir=export),
+            env=minimal_env({"TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD": "1"}),
+        )
     except ProcessFailed as exc:
         raise StageError("EXPORT_INVALID") from exc
     ply_path = find_one(export, "*.ply")
