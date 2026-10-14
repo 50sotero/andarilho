@@ -72,8 +72,7 @@ def submit_run(
         raise active_run_exists()
 
     recipe = get_recipe(quality)
-    document = recipe.document(settings.run_max_seconds)
-    digest = recipe.digest(settings.run_max_seconds)
+    digest = recipe.digest
     budget = recipe.budget(settings.run_max_seconds)
     run = ReconstructionRun(
         id=uuid.uuid4(),
@@ -107,7 +106,7 @@ def submit_run(
             "recipe": {
                 "name": recipe.name,
                 "digest": digest,
-                "stages": document["stages"],
+                "stages": list(recipe.stage_list),
                 "budget": budget,
                 "params": recipe.params,
             },

@@ -466,3 +466,31 @@ def test_worker_loop_processes_synthetic_run(db, seed, store, settings):
     thread.join(timeout=30)
     assert status == "succeeded"
     assert not thread.is_alive()
+
+
+def test_layout_revisions_are_not_limited_by_spent_run_budget(db, seed, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    rev = seed.one("SELECT * FROM scene_revisions")
+    seed.exec("UPDATE usage_ledger SET actual_cpu_seconds = 999999")
+    before = seed.one("SELECT actual_cpu_seconds, state FROM usage_ledger")
+    rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], copy.deepcopy(rev["layout"]))
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    assert (
+        seed.one("SELECT validation_state FROM scene_revisions WHERE id = %s", rev2)[
+            "validation_state"
+        ]
+        == "valid"
+    )
+    # The settled reconstruction ledger is not charged for layout processing.
+    assert seed.one("SELECT actual_cpu_seconds, state FROM usage_ledger") == before
+
+
+def test_run_with_unknown_recipe_digest_is_rejected(db, seed, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    seed.exec("UPDATE reconstruction_runs SET recipe_digest = 'sha256:stale' WHERE id = %s", run_id)
+    assert drain(db, sup) == [("validating", "failed")]
+    run = seed.one("SELECT status, error FROM reconstruction_runs WHERE id = %s", run_id)
+    assert run["status"] == "failed" and run["error"]["code"] == "RECIPE_MISMATCH"

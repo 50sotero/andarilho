@@ -145,6 +145,9 @@ function isRetryable(error: unknown): boolean {
   return error instanceof TypeError;
 }
 
+/** Server states meaning the bytes were already completed and frozen. */
+const COMPLETED_STATUSES = new Set<Upload["status"]>(["uploaded_unverified", "verified"]);
+
 export class MultipartUpload {
   readonly projectId: string;
   readonly file: UploadableFile;
@@ -239,7 +242,16 @@ export class MultipartUpload {
   private async run(signal: AbortSignal): Promise<Upload> {
     try {
       this.emit({ phase: "initializing", error: null });
-      const record = await this.initialize(signal);
+      const initialized = await this.initialize(signal);
+      if ("completedUpload" in initialized) {
+        // The server already completed this upload (e.g. the completion response was
+        // lost before a reload): treat it as done instead of uploading a duplicate.
+        removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+        this.record = null;
+        this.emit({ phase: "completed", uploadedBytes: this.file.size });
+        return initialized.completedUpload;
+      }
+      const record = initialized;
       this.record = record;
       this.emitPartProgress("uploading");
 
@@ -263,7 +275,9 @@ export class MultipartUpload {
     }
   }
 
-  private async initialize(signal: AbortSignal): Promise<UploadResumeRecord> {
+  private async initialize(
+    signal: AbortSignal,
+  ): Promise<UploadResumeRecord | { completedUpload: Upload }> {
     if (this.record) return this.record; // resuming within the same page session
 
     const saved = loadResumeRecord(this.projectId, this.file, {
@@ -273,6 +287,9 @@ export class MultipartUpload {
     if (saved) {
       try {
         const { data } = await this.api.getUpload(saved.uploadId, signal);
+        if (COMPLETED_STATUSES.has(data.upload.status)) {
+          return { completedUpload: data.upload };
+        }
         if (data.upload.status === "initiated") {
           // The server's part listing is authoritative; local ETags fill gaps only.
           const serverParts: CompletedPartRecord[] = data.completedParts.map((p) => ({

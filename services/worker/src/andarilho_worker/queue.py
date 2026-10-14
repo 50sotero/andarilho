@@ -299,7 +299,9 @@ def _clear_lease_sql(state: str) -> str:
 
 
 def add_usage(conn: psycopg.Connection, job: ClaimedJob, seconds: float) -> None:
-    if not job.run_id or seconds <= 0:
+    # Only reconstruction stages charge the run ledger; layout revisions run after
+    # it has settled and are tracked by per-stage metrics instead.
+    if not job.run_level or seconds <= 0:
         return
     column = "actual_gpu_seconds" if job.capability == "gpu" else "actual_cpu_seconds"
     conn.execute(

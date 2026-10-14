@@ -94,6 +94,10 @@ class Heartbeat:
                 return
 
 
+class RecipeMismatch(Exception):
+    """The run's recorded recipe digest is not the one this worker has pinned."""
+
+
 class Supervisor:
     def __init__(
         self,
@@ -161,22 +165,21 @@ class Supervisor:
         recipe = recipe_for(run["quality"])
         declared = (job.input_manifest.get("recipe") or {}).get("stages")
         pinned = [{"stage": s.stage, "capability": s.capability} for s in recipe.stages]
-        if (
-            declared
+        stages_differ = (
+            bool(declared)
             and [{"stage": d.get("stage"), "capability": d.get("capability")} for d in declared]
             != pinned
-        ):
-            # The worker's pinned recipe is authoritative; never follow an unknown stage list.
-            log.warning(
-                "run %s declares a stage list that differs from the pinned recipe", job.run_id
-            )
-        if run["recipe_digest"] != recipe.digest:
-            log.warning(
-                "run %s recipe digest %s differs from the worker's pinned %s",
+        )
+        if run["recipe_digest"] != recipe.digest or stages_differ:
+            # The run must record exactly the recipe that executes (provenance); a
+            # mismatch means API/worker version skew, so refuse rather than guess.
+            log.error(
+                "run %s recipe %s does not match the worker's pinned %s",
                 job.run_id,
                 run["recipe_digest"],
                 recipe.digest,
             )
+            raise RecipeMismatch(run["recipe_digest"])
         return recipe
 
     def _next(self, job: ClaimedJob, recipe: Recipe | None, result: StageResult) -> NextJob | None:
@@ -201,6 +204,8 @@ class Supervisor:
         recipe = None
         try:
             recipe = self._recipe(job)
+        except RecipeMismatch:
+            return self._fail(job, error_body("RECIPE_MISMATCH"), None, 0.0)
         except KeyError:
             return self._fail(job, error_body("INTERNAL_ERROR"), None, 0.0)
         if stage_fn is None:
@@ -209,9 +214,10 @@ class Supervisor:
         if recipe is not None and job.stage in recipe.stage_names():
             timeout = recipe.spec(job.stage).timeout_seconds
         timeout = min(timeout, self.settings.run_max_seconds)
-        if job.run_id:
-            # The run budget is a ceiling for the whole run, not per stage: subtract
-            # the seconds every earlier stage and attempt already consumed.
+        if job.run_level:
+            # The run budget is a ceiling for the whole reconstruction, not per stage:
+            # subtract what earlier stages and attempts consumed. Layout-revision jobs
+            # run after the reconstruction settled and keep only their stage timeout.
             remaining = self._remaining_run_seconds(job)
             if remaining <= 0:
                 return self._fail(job, error_body("BUDGET_EXHAUSTED"), None, 0.0)

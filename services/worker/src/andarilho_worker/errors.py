@@ -48,6 +48,10 @@ CATALOG: dict[str, tuple[str, str]] = {
         "Processing exceeded its time or resource budget.",
         "Try a shorter capture or the preview quality.",
     ),
+    "RECIPE_MISMATCH": (
+        "This run was created for a processing recipe this worker does not run.",
+        "Retry the run after the service update finishes.",
+    ),
     "GPU_REQUIRED": (
         "This stage needs a GPU worker, which is not available.",
         "Try again later.",

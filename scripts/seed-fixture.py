@@ -178,7 +178,7 @@ def seed(
                     capture_set_id=capture_set_id,
                     created_by=subject,
                     recipe_name=recipe.name,
-                    recipe_digest=recipe.digest(settings.run_max_seconds),
+                    recipe_digest=recipe.digest,
                     quality="synthetic",
                     include_supplementary_photos=False,
                     resource_budget=recipe.budget(settings.run_max_seconds),

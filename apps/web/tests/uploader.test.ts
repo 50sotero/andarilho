@@ -331,6 +331,44 @@ describe("MultipartUpload", () => {
     expect(storage.getItem(resumeKey("p1", fileFingerprint(file)))).toBeNull();
   });
 
+  it("treats an upload the server already completed as done after a reload", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const file = fakeFile(size);
+    saveResumeRecord(
+      {
+        version: 1,
+        uploadId: "u-done",
+        projectId: "p1",
+        fingerprint: fileFingerprint(file),
+        partSize: PART,
+        partCount: 2,
+        completedParts: [{ partNumber: 1, etag: '"x"' }],
+        expiresAt: FUTURE,
+      },
+      storage,
+    );
+    const { api } = fakeApi(size, {
+      getUpload: vi.fn(async () => ({
+        data: { upload: uploadRecord("u-done", "uploaded_unverified"), completedParts: [] },
+        etag: null,
+      })),
+    });
+    const putPart = vi.fn<PutPart>(async () => '"e"');
+    const upload = new MultipartUpload("p1", file, "video", "video/mp4", {
+      api,
+      putPart,
+      storage,
+    });
+    const result = await upload.start();
+    expect(result.id).toBe("u-done");
+    expect(upload.state.phase).toBe("completed");
+    expect(api.createUpload).not.toHaveBeenCalled();
+    expect(api.completeUpload).not.toHaveBeenCalled();
+    expect(putPart).not.toHaveBeenCalled();
+    expect(storage.getItem(resumeKey("p1", fileFingerprint(file)))).toBeNull();
+  });
+
   it("can resume in the same session after pause without re-initializing", async () => {
     const size = 3 * PART;
     const { api } = fakeApi(size);

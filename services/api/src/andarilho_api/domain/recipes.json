@@ -1,0 +1,138 @@
+{
+  "generatedFrom": "services/worker/src/andarilho_worker/recipes.py",
+  "preview": {
+    "name": "preview-v1",
+    "digest": "sha256:989b044d6c22ac068b7bebe14ccbcda071dfb3ae4e51cac7608b1c0051c2265a",
+    "stages": [
+      {
+        "stage": "validating",
+        "capability": "cpu"
+      },
+      {
+        "stage": "preparing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "camera_reconstruction",
+        "capability": "gpu"
+      },
+      {
+        "stage": "training",
+        "capability": "gpu"
+      },
+      {
+        "stage": "normalizing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "geometry_proposal",
+        "capability": "cpu"
+      },
+      {
+        "stage": "packaging",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_validation",
+        "capability": "cpu"
+      }
+    ],
+    "params": {
+      "maxFrames": 400,
+      "longEdge": 1600,
+      "maxVideos": 8,
+      "maxPhotos": 400,
+      "minRegisteredViews": 30,
+      "minRegisteredRatio": 0.8,
+      "sequentialOverlap": 10,
+      "seed": 42,
+      "fps": 2,
+      "iterations": 7000,
+      "saveSteps": 2000
+    }
+  },
+  "standard": {
+    "name": "standard-v1",
+    "digest": "sha256:c073426d017b0896bbaaaabdf56d8cfbccca272b9d40ed7bdb06a6438a9faf43",
+    "stages": [
+      {
+        "stage": "validating",
+        "capability": "cpu"
+      },
+      {
+        "stage": "preparing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "camera_reconstruction",
+        "capability": "gpu"
+      },
+      {
+        "stage": "training",
+        "capability": "gpu"
+      },
+      {
+        "stage": "normalizing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "geometry_proposal",
+        "capability": "cpu"
+      },
+      {
+        "stage": "packaging",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_validation",
+        "capability": "cpu"
+      }
+    ],
+    "params": {
+      "maxFrames": 400,
+      "longEdge": 1600,
+      "maxVideos": 8,
+      "maxPhotos": 400,
+      "minRegisteredViews": 30,
+      "minRegisteredRatio": 0.8,
+      "sequentialOverlap": 10,
+      "seed": 42,
+      "fps": 3,
+      "iterations": 30000,
+      "saveSteps": 5000
+    }
+  },
+  "synthetic": {
+    "name": "synthetic-v1",
+    "digest": "sha256:628a926813c92489784cdaeb86ce51c76180a235aeb1594de9b835082f2752c6",
+    "stages": [
+      {
+        "stage": "validating",
+        "capability": "cpu"
+      },
+      {
+        "stage": "preparing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "normalizing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "geometry_proposal",
+        "capability": "cpu"
+      },
+      {
+        "stage": "packaging",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_validation",
+        "capability": "cpu"
+      }
+    ],
+    "params": {
+      "fixture": "synthetic-two-room"
+    }
+  }
+}

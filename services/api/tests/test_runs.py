@@ -39,8 +39,8 @@ def test_submit_run_creates_run_job_ledger_atomically(client, auth, db, project)
     result = response.json()
     assert result["state"] == "queued" and result["stage"] == "validating"
     run = db.get(ReconstructionRun, uuid.UUID(result["runId"]))
-    assert run.recipe_name == "preview"
-    assert run.recipe_digest == RECIPES["preview"].digest(3600)
+    assert run.recipe_name == RECIPES["preview"].name == "preview-v1"
+    assert run.recipe_digest == RECIPES["preview"].digest
     assert run.resource_budget["maxSeconds"] == 3600
     job = db.get(Job, uuid.UUID(result["jobId"]))
     assert (job.stage, job.capability, job.state) == ("validating", "cpu", "queued")
