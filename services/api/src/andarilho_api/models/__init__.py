@@ -285,6 +285,8 @@ class Job(Base):
     )
     lease_owner: Mapped[str | None] = mapped_column(String(255))
     lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Start of the current attempt; the reaper charges a lost attempt's elapsed time.
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     fencing_token: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     input_manifest: Mapped[dict[str, Any]] = mapped_column(

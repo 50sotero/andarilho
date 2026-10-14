@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import UTC
+from datetime import UTC, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -32,7 +32,16 @@ from andarilho_api.errors import (
     validation_failed,
     version_conflict,
 )
-from andarilho_api.models import Job, Project, Scene, SceneRevision, ShareLink
+from andarilho_api.models import (
+    CaptureSet,
+    Job,
+    Project,
+    ReconstructionRun,
+    Scene,
+    SceneRevision,
+    ShareLink,
+    Upload,
+)
 from andarilho_api.ratelimit import RateLimiter
 from andarilho_api.schemas.api import LayoutSave, PublicDeliveryRequest, RevisionRef, ShareCreate
 from andarilho_api.settings import Settings
@@ -61,9 +70,35 @@ def _revision_of(db: Session, scene: Scene, revision_id: uuid.UUID) -> SceneRevi
     return revision
 
 
+def _floor_plan(db: Session, scene: Scene, store: Storage, ttl: int) -> dict | None:
+    """A short-lived private URL for the run's verified floor plan (review only)."""
+    upload = db.execute(
+        select(Upload)
+        .join(CaptureSet, CaptureSet.floor_plan_upload_id == Upload.id)
+        .join(ReconstructionRun, ReconstructionRun.capture_set_id == CaptureSet.id)
+        .where(
+            ReconstructionRun.id == scene.run_id,
+            ReconstructionRun.project_id == scene.project_id,
+            Upload.project_id == scene.project_id,
+            Upload.status == "verified",
+        )
+    ).scalar_one_or_none()
+    if upload is None or upload.immutable_key is None:
+        return None
+    return {
+        "uploadId": str(upload.id),
+        "contentType": upload.declared_content_type,
+        "url": store.presign_get(upload.immutable_key, ttl, upload.storage_version),
+        "expiresAt": (utcnow() + timedelta(seconds=ttl)).isoformat(),
+    }
+
+
 @router.get("/scenes/{scene_id}")
-def get_scene(scene_id: uuid.UUID, response: Response, subject: Subject, db: Db):
+def get_scene(
+    scene_id: uuid.UUID, response: Response, subject: Subject, db: Db, store: Store, config: Config
+):
     scene = load_scoped(db, Scene, scene_id, subject, "scene")
+    _, role = load_project(db, scene.project_id, subject)
     revisions = (
         db.execute(
             select(SceneRevision)
@@ -79,6 +114,10 @@ def get_scene(scene_id: uuid.UUID, response: Response, subject: Subject, db: Db)
         "scene": ser.scene(scene),
         "revision": ser.revision(current) if current else None,
         "revisions": [ser.revision_summary(r) for r in revisions],
+        # The original plan is private source material: owners/editors only.
+        "floorPlan": _floor_plan(db, scene, store, config.delivery_url_ttl_seconds)
+        if role in WRITERS
+        else None,
     }
 
 

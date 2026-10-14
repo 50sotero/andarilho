@@ -7,7 +7,7 @@ import { ViewerClient } from "@/components/viewer/ViewerClient";
 import { useProject } from "@/features/projects/use-project";
 import { api } from "@/lib/api/client";
 import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
-import type { DeliveryEnvelope, Layout, SceneDetail } from "@/lib/api/types";
+import type { DeliveryEnvelope, FloorPlanLink, Layout, SceneDetail } from "@/lib/api/types";
 import { usePolling } from "@/lib/use-polling";
 import {
   calibrationFactor,
@@ -19,7 +19,7 @@ import {
   type Point,
   type ViewBox,
 } from "./geometry";
-import { LayoutCanvas } from "./LayoutCanvas";
+import { LayoutCanvas, type PlanUnderlay } from "./LayoutCanvas";
 import {
   addLandmark,
   addObstacle,
@@ -233,6 +233,92 @@ function SelectionPanel({
   );
 }
 
+const IMAGE_PLAN_TYPES = new Set(["image/png", "image/jpeg"]);
+
+function FloorPlanPanel({
+  plan,
+  underlay,
+  defaults,
+  onChange,
+}: {
+  plan: FloorPlanLink;
+  underlay: PlanUnderlay | null;
+  defaults: PlanUnderlay;
+  onChange: (next: PlanUnderlay | null) => void;
+}) {
+  const id = useId();
+  if (!IMAGE_PLAN_TYPES.has(plan.contentType)) {
+    return (
+      <div>
+        <h3 className="text-sm font-semibold">Floor plan</h3>
+        <p className="mt-1 text-sm text-stone-600 dark:text-stone-400">
+          PDF plans cannot be traced in the editor yet.{" "}
+          <a className="underline" href={plan.url} target="_blank" rel="noreferrer noopener">
+            Open the plan
+          </a>{" "}
+          (private link, expires in a few minutes) and trace it by eye.
+        </p>
+      </div>
+    );
+  }
+  const current = underlay ?? defaults;
+  const field = (key: "x" | "z" | "width", label: string) => (
+    <label className="text-sm" htmlFor={`${id}-${key}`}>
+      {label}
+      <input
+        id={`${id}-${key}`}
+        type="number"
+        step="0.1"
+        className={inputClass}
+        value={current[key]}
+        disabled={!underlay}
+        onChange={(e) => {
+          const value = Number(e.target.value);
+          if (Number.isFinite(value) && (key !== "width" || value > 0)) {
+            onChange({ ...current, [key]: value });
+          }
+        }}
+      />
+    </label>
+  );
+  return (
+    <div>
+      <h3 className="text-sm font-semibold">Floor plan</h3>
+      <label className="mt-1 flex items-center gap-2 text-sm">
+        <input
+          type="checkbox"
+          checked={Boolean(underlay)}
+          onChange={(e) => onChange(e.target.checked ? { ...defaults, url: plan.url } : null)}
+        />
+        Show the plan under the layout for tracing
+      </label>
+      <p className="mt-1 text-xs text-stone-600 dark:text-stone-400">
+        The plan is private evidence: it is never part of a shared scene. Place it so that its walls
+        line up with the capture, then trace or calibrate against it.
+      </p>
+      <div className="mt-2 grid grid-cols-3 gap-2">
+        {field("x", "Left (m)")}
+        {field("z", "Top (m)")}
+        {field("width", "Width (m)")}
+      </div>
+      <label className="mt-2 block text-sm" htmlFor={`${id}-opacity`}>
+        Opacity
+        <input
+          id={`${id}-opacity`}
+          type="range"
+          min="0.1"
+          max="1"
+          step="0.05"
+          className="w-full"
+          value={current.opacity}
+          disabled={!underlay}
+          onChange={(e) => onChange({ ...current, opacity: Number(e.target.value) })}
+        />
+      </label>
+    </div>
+  );
+}
+
 function CalibrationPanel({
   layout,
   onApply,
@@ -342,6 +428,7 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [envelope, setEnvelope] = useState<DeliveryEnvelope | null>(null);
+  const [underlay, setUnderlay] = useState<PlanUnderlay | null>(null);
   const overlayId = useId();
 
   const loadScene = useCallback(
@@ -593,6 +680,9 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
             onSelect={setSelection}
             onChange={edit}
             showOverlay={overlay}
+            underlay={
+              underlay && scene?.floorPlan ? { ...underlay, url: scene.floorPlan.url } : null
+            }
           />
           <p className="mt-2 text-xs text-stone-600 dark:text-stone-400">
             Grid squares are 1 m in the layout&apos;s units. Teal: walkable floor; black: walls;
@@ -635,6 +725,22 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
               }}
             />
           </Card>
+          {scene?.floorPlan ? (
+            <Card>
+              <FloorPlanPanel
+                plan={scene.floorPlan}
+                underlay={underlay}
+                defaults={{
+                  url: scene.floorPlan.url,
+                  x: viewBox.minX,
+                  z: viewBox.minY,
+                  width: viewBox.width,
+                  opacity: 0.5,
+                }}
+                onChange={setUnderlay}
+              />
+            </Card>
+          ) : null}
           <Card>
             <CalibrationPanel
               layout={layout}

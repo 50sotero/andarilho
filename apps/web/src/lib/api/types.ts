@@ -196,6 +196,15 @@ export interface SceneDetail {
     approvalState: SceneRevision["approvalState"];
     createdAt: string;
   }[];
+  /** Private, short-lived link to the run's floor plan (owners/editors only). */
+  floorPlan: FloorPlanLink | null;
+}
+
+export interface FloorPlanLink {
+  uploadId: string;
+  contentType: string;
+  url: string;
+  expiresAt: string;
 }
 
 export interface LayoutSaved {

@@ -231,3 +231,18 @@ def test_project_deleting_blocks_commit(db, seed):
     with pytest.raises(Cancelled):
         queue.complete_job(db, job, result_manifest={}, next_job=NextJob("preparing", "cpu", {}))
     assert seed.one("SELECT count(*) AS n FROM jobs")["n"] == 1
+
+
+def test_reaper_charges_lost_attempts_to_the_run_budget(db, seed):
+    pid = seed.project()
+    seed.run(pid, max_attempts=3)
+    job = queue.claim(db, "w", "cpu")
+    # The attempt ran for ten minutes before its last lease lapsed.
+    seed.exec(
+        "UPDATE jobs SET started_at = now() - interval '11 minutes', "
+        "lease_expires_at = now() - interval '1 minute' WHERE id = %s",
+        job.id,
+    )
+    assert [o.state for o in queue.reap_expired(db)] == ["queued"]
+    used = seed.one("SELECT actual_cpu_seconds FROM usage_ledger")["actual_cpu_seconds"]
+    assert 595 <= used <= 605

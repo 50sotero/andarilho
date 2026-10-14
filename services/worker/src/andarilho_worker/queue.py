@@ -55,6 +55,7 @@ SET state = 'running',
     lease_expires_at = now() + interval '90 seconds',
     fencing_token = j.fencing_token + 1,
     attempts = j.attempts + 1,
+    started_at = now(),
     updated_at = now()
 FROM candidate
 WHERE j.id = candidate.id
@@ -583,10 +584,14 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
         rows = conn.execute(
             f"""
             WITH expired AS (
-              SELECT j.id,
+              SELECT j.id, j.capability,
                      CASE WHEN {CANCEL_COND} THEN 'cancelled'
                           WHEN j.attempts >= j.max_attempts THEN 'failed'
-                          ELSE 'queued' END AS outcome
+                          ELSE 'queued' END AS outcome,
+                     -- The lost attempt ran at least until its last renewed lease.
+                     GREATEST(1, CEIL(EXTRACT(EPOCH FROM
+                       (j.lease_expires_at - COALESCE(j.started_at, j.lease_expires_at)))))
+                       AS charge_seconds
               FROM jobs j
               WHERE j.state = 'running' AND j.lease_expires_at < now()
               FOR UPDATE OF j SKIP LOCKED
@@ -602,7 +607,8 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                 updated_at = now()
             FROM expired AS e
             WHERE j.id = e.id
-            RETURNING j.id, j.run_id, j.scene_revision_id, j.stage, j.state
+            RETURNING j.id, j.run_id, j.scene_revision_id, j.stage, j.state,
+                      e.capability, e.charge_seconds
             """,
             {"err": Jsonb(lost)},
         ).fetchall()
@@ -615,6 +621,15 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                 "cancelled": "Cancelled after the worker stopped.",
             }[row["state"]]
             _event(conn, job_id, row["stage"], row["state"], message)
+            if run_id and row["scene_revision_id"] is None:
+                # Charge the lost attempt so worker losses cannot multiply the run budget
+                # (the stale worker records nothing once its lease is gone).
+                gpu = row["capability"] == "gpu"
+                column = "actual_gpu_seconds" if gpu else "actual_cpu_seconds"
+                conn.execute(
+                    f"UPDATE usage_ledger SET {column} = {column} + %s WHERE run_id = %s",  # noqa: S608
+                    (int(row["charge_seconds"]), run_id),
+                )
             if run_id and row["state"] == "failed" and row["scene_revision_id"] is None:
                 fail_run(conn, run_id, lost)
             elif run_id and row["state"] == "cancelled":

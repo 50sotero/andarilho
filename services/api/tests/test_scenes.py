@@ -7,11 +7,21 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import pytest
-from factories import create_project, layout, scene
+from factories import create_project, layout, scene, verified_upload
 from sqlalchemy import select
 
 from andarilho_api.domain.canonical import sha256_hex
-from andarilho_api.models import AuditEvent, Job, Project, SceneRevision, ShareLink
+from andarilho_api.models import (
+    AuditEvent,
+    CaptureSet,
+    Job,
+    Project,
+    ProjectMember,
+    ReconstructionRun,
+    Scene,
+    SceneRevision,
+    ShareLink,
+)
 
 
 @pytest.fixture
@@ -303,3 +313,18 @@ def test_public_rate_limit_keys_on_nearest_forwarded_hop(settings):
     assert _client_key(request("203.0.113.9"), trusted) == "203.0.113.9"
     assert _client_key(request("6.6.6.6, 203.0.113.9"), trusted) == "203.0.113.9"
     assert _client_key(request("203.0.113.9"), settings) == "10.0.0.5"
+
+
+def test_floor_plan_is_private_to_owners_and_editors(client, auth, db, setup):
+    assert _get_scene(client, auth, setup["sceneId"]).json()["floorPlan"] is None
+    plan_id = verified_upload(db, setup["pid"], kind="floor_plan")
+    scene = db.get(Scene, uuid.UUID(setup["sceneId"]))
+    run = db.get(ReconstructionRun, scene.run_id)
+    db.get(CaptureSet, run.capture_set_id).floor_plan_upload_id = uuid.UUID(plan_id)
+    db.add(ProjectMember(project_id=uuid.UUID(setup["pid"]), subject="viewer-v", role="viewer"))
+    db.commit()
+
+    plan = _get_scene(client, auth, setup["sceneId"]).json()["floorPlan"]
+    assert plan["uploadId"] == plan_id and plan["contentType"] == "application/pdf"
+    assert f"originals/{plan_id}" in plan["url"] and plan["expiresAt"]
+    assert _get_scene(client, auth, setup["sceneId"], sub="viewer-v").json()["floorPlan"] is None

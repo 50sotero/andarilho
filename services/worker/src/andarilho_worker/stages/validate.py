@@ -94,5 +94,20 @@ def run(ctx: StageContext) -> StageResult:
             "captureSetId": str(capture["id"]),
             "quality": run_row["quality"],
             "inputs": selected,
+            # Private reference only: the plan is evidence for review/alignment and is
+            # never part of a viewer derivative or public share.
+            "floorPlan": next(
+                (
+                    {
+                        "uploadId": i["uploadId"],
+                        "key": i["key"],
+                        "sha256": i["sha256"],
+                        "contentType": i.get("contentType"),
+                    }
+                    for i in verified
+                    if i["mediaKind"] == "floor_plan"
+                ),
+                None,
+            ),  # fmt: skip
         },
     )

@@ -13,6 +13,15 @@ function sameSelection(a: Selection | null, b: Selection): boolean {
  * Interactive top-down SVG editor. Point handles are focusable buttons:
  * drag with a pointer, or move with arrow keys (Shift = 0.5 m, otherwise 0.05 m).
  */
+/** A floor-plan image placed under the editor, in layout meters ([x, z] of its top-left). */
+export interface PlanUnderlay {
+  url: string;
+  x: number;
+  z: number;
+  width: number;
+  opacity: number;
+}
+
 export function LayoutCanvas({
   layout,
   viewBox,
@@ -20,7 +29,9 @@ export function LayoutCanvas({
   onSelect,
   onChange,
   showOverlay,
+  underlay = null,
 }: {
+  underlay?: PlanUnderlay | null;
   layout: Layout;
   viewBox: ViewBox;
   selection: Selection | null;
@@ -156,6 +167,18 @@ export function LayoutCanvas({
         height={viewBox.height}
         fill="url(#grid-1m)"
       />
+      {underlay ? (
+        <image
+          href={underlay.url}
+          x={underlay.x}
+          y={underlay.z}
+          width={underlay.width}
+          opacity={underlay.opacity}
+          preserveAspectRatio="xMinYMin meet"
+          pointerEvents="none"
+          aria-hidden="true"
+        />
+      ) : null}
 
       {layout.floors.map((floor, fi) =>
         floor.polygons.map((ring, ri) => (
