@@ -293,3 +293,36 @@ def test_matcher_respects_photo_ordering(tmp_path, names, expected):
         ("a/1.jpg", "photos_1x1/q.jpg"),
         ("photos_1x1/p.jpg", "photos_1x1/q.jpg"),
     ]
+
+
+def test_normalize_streams_the_export_instead_of_reading_it_inline(
+    db, seed, store, settings, monkeypatch
+):
+    from andarilho_worker.geometry.ply import write_splat_ply
+    from andarilho_worker.geometry.synthetic import synthetic_splats
+    from andarilho_worker.stages import STAGES
+    from andarilho_worker.stages import normalize as normalize_mod
+
+    layout = normalize_mod.synthetic_layout()
+
+    monkeypatch.setattr(normalize_mod, "tool_available", lambda name: False)
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, quality="preview", first_stage="normalizing")
+    ply_key = f"tenants/{pid}/runs/{run_id}/attempts/training/1/scene.ply"
+    store.put_bytes(ply_key, write_splat_ply(synthetic_splats(layout)))
+    seed.exec(
+        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
+        json.dumps({"outputs": {"plyKey": ply_key, "quality": "preview"}}), job_id,
+    )  # fmt: skip
+    inline = store.get_bytes
+
+    def no_inline_export(key, *args, **kwargs):
+        assert key != ply_key, "large exports must not be read inline"
+        return inline(key, *args, **kwargs)
+
+    monkeypatch.setattr(store, "get_bytes", no_inline_export)
+    sup = Supervisor(db, store, settings, stages=STAGES)
+    job = queue.claim(db, "cpu-worker", "cpu")
+    assert sup.execute(job) == "succeeded"
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
+    assert outputs["input_manifest"]["outputs"]["renderFormat"] == "ply"

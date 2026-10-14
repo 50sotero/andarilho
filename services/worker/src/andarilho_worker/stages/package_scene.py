@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from andarilho_worker.artifacts import put_immutable, scene_prefix
+from andarilho_worker.artifacts import MAX_RENDER_BYTES, put_immutable, scene_prefix
 from andarilho_worker.errors import StageError
 from andarilho_worker.manifest import asset_entry, build_manifest
 from andarilho_worker.stages.base import StageContext, StageResult, finish
@@ -118,9 +118,15 @@ def run(ctx: StageContext) -> StageResult:
             "warnings": ["Synthetic scene: no capture was reconstructed."],
         }
     ctx.progress("Packaging scene files.")
-    render_bytes = ctx.store.get_bytes(source_key)
+    render_bytes = ctx.store.get_bytes(source_key, max_bytes=MAX_RENDER_BYTES)
     render_key = prefix + f"scene.{render_format}"
-    render_info = put_immutable(ctx.store, render_key, render_bytes, CONTENT_TYPES[render_format])
+    render_info = put_immutable(
+        ctx.store,
+        render_key,
+        render_bytes,
+        CONTENT_TYPES[render_format],
+        max_bytes=MAX_RENDER_BYTES,
+    )
     glb = ctx.store.get_bytes(str(ctx.output("collisionKey")))
     collision_key = prefix + "collision.glb"
     collision_info = put_immutable(ctx.store, collision_key, glb, "model/gltf-binary")

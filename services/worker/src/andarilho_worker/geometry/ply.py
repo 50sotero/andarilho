@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import mmap
+from collections.abc import Buffer, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -42,11 +43,12 @@ class SplatCloud:
         return np.column_stack([self.data["x"], self.data["y"], self.data["z"]]).astype(np.float64)
 
 
-def parse_header(blob: bytes) -> tuple[int, np.dtype, int]:
-    end = blob.find(b"end_header\n", 0, MAX_HEADER_BYTES)
-    if not blob.startswith(b"ply\n") or end < 0:
+def parse_header(blob: Buffer) -> tuple[int, np.dtype, int]:
+    head = bytes(blob[:MAX_HEADER_BYTES])  # works for bytes and memory maps alike
+    end = head.find(b"end_header\n")
+    if not head.startswith(b"ply\n") or end < 0:
         raise PlyError("not a PLY file")
-    header = blob[:end].decode("ascii", errors="strict").splitlines()
+    header = head[:end].decode("ascii", errors="strict").splitlines()
     data_offset = end + len(b"end_header\n")
     fmt = None
     elements: list[tuple[str, int, list[tuple[str, str]]]] = []
@@ -80,7 +82,7 @@ def parse_header(blob: bytes) -> tuple[int, np.dtype, int]:
     return count, dtype, data_offset
 
 
-def read_splat_ply(blob: bytes) -> SplatCloud:
+def read_splat_ply(blob: Buffer) -> SplatCloud:
     count, dtype, offset = parse_header(blob)
     need = offset + count * dtype.itemsize
     if len(blob) < need:
@@ -89,10 +91,14 @@ def read_splat_ply(blob: bytes) -> SplatCloud:
 
 
 def read_splat_ply_file(path: Path) -> SplatCloud:
-    return read_splat_ply(path.read_bytes())
+    """Parse a PLY on disk through a memory map, so large exports are never read inline."""
+    if path.stat().st_size == 0:
+        raise PlyError("not a PLY file")  # an empty file cannot be memory-mapped
+    with path.open("rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+        return read_splat_ply(mapped)
 
 
-def write_splat_ply(cloud: SplatCloud, *, comments: Sequence[str] = ()) -> bytes:
+def _ply_header(cloud: SplatCloud, comments: Sequence[str]) -> bytes:
     lines = ["ply", "format binary_little_endian 1.0"]
     lines += [f"comment {c}" for c in comments]
     lines.append(f"element vertex {cloud.count}")
@@ -102,8 +108,23 @@ def write_splat_ply(cloud: SplatCloud, *, comments: Sequence[str] = ()) -> bytes
         kind = cloud.data.dtype[name].newbyteorder("<").str
         lines.append(f"property {inverse[kind]} {name}")
     lines.append("end_header")
-    header = ("\n".join(lines) + "\n").encode("ascii")
-    return header + cloud.data.astype(cloud.data.dtype.newbyteorder("<")).tobytes()
+    return ("\n".join(lines) + "\n").encode("ascii")
+
+
+def _little_endian(cloud: SplatCloud) -> np.ndarray:
+    return cloud.data.astype(cloud.data.dtype.newbyteorder("<"), copy=False)
+
+
+def write_splat_ply(cloud: SplatCloud, *, comments: Sequence[str] = ()) -> bytes:
+    return _ply_header(cloud, comments) + _little_endian(cloud).tobytes()
+
+
+def write_splat_ply_file(cloud: SplatCloud, path: Path, *, comments: Sequence[str] = ()) -> int:
+    """Write a PLY straight to disk (no in-memory copy of a large cloud); return its size."""
+    with path.open("wb") as fh:
+        fh.write(_ply_header(cloud, comments))
+        _little_endian(cloud).tofile(fh)
+    return path.stat().st_size
 
 
 def drop_non_finite(cloud: SplatCloud) -> tuple[SplatCloud, int]:

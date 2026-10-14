@@ -9,7 +9,9 @@ import {
 import { addOpening, movePoint, removeSelected } from "@/features/review/layout-edit";
 import { canRetryRun, formatStageProgress, stageStates } from "@/features/processing/stages";
 import { expiryFromDays } from "@/features/sharing/SharePanel";
-import type { Layout, Run } from "@/lib/api/types";
+import { fallbackLayout } from "@/features/projects/PrivateWalk";
+import { rejectionMessage } from "@/features/uploads/UploadList";
+import type { DeliveryEnvelope, Layout, Run, SceneDetail } from "@/lib/api/types";
 import fixture from "@andarilho/scene-contract/fixtures/synthetic-two-room.layout.json";
 
 const layout = fixture as unknown as Layout;
@@ -126,5 +128,26 @@ describe("share expiry", () => {
   it("computes ISO expiry or null", () => {
     expect(expiryFromDays("", 0)).toBeNull();
     expect(expiryFromDays("1", 0)).toBe(new Date(86_400_000).toISOString());
+  });
+});
+
+describe("private walk fallback plan", () => {
+  const layout = fixture as unknown as Layout;
+  const scene = { revision: { id: "rev-2", layout } } as unknown as SceneDetail;
+  const envelopeFor = (id: string) => ({ sceneRevisionId: id }) as unknown as DeliveryEnvelope;
+
+  it("shows the draft plan only when the draft is the walked revision", () => {
+    expect(fallbackLayout(scene, envelopeFor("rev-2"))).toBe(layout);
+    expect(fallbackLayout(scene, envelopeFor("rev-1"))).toBeNull();
+    expect(fallbackLayout(scene, null)).toBe(layout);
+    expect(fallbackLayout(null, envelopeFor("rev-1"))).toBeNull();
+  });
+});
+
+describe("upload rejection message", () => {
+  it("tells the user to re-upload when our check failed, not that the file is bad", () => {
+    expect(rejectionMessage("INSPECTION_FAILED")).toMatch(/upload it again/);
+    expect(rejectionMessage("INSPECTION_FAILED")).not.toMatch(/undamaged/);
+    expect(rejectionMessage("UNSUPPORTED_MEDIA")).toMatch(/UNSUPPORTED_MEDIA.*undamaged/);
   });
 });

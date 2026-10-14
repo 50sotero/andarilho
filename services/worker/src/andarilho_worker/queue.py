@@ -395,6 +395,45 @@ def fail_revision(conn: psycopg.Connection, scene_revision_id: str | None) -> No
     )
 
 
+def fail_upload(conn: psycopg.Connection, project_id: str, upload_id: str | None) -> None:
+    """An inspection that failed for good rejects its upload instead of stranding it.
+
+    An ``uploaded_unverified`` upload holds quota, cannot be deleted and is polled
+    by the capture page, so it must not outlive its last inspection attempt. The
+    stored bytes are then removed by ``upload_cleanup``, which releases the quota.
+    """
+    if upload_id is None:
+        return
+    row = conn.execute(
+        """
+        UPDATE uploads SET status = 'rejected', rejection_code = 'INSPECTION_FAILED',
+               media_metadata = media_metadata || %s, updated_at = now()
+        WHERE id = %s AND project_id = %s AND status = 'uploaded_unverified'
+        RETURNING immutable_key
+        """,
+        (Jsonb({"rejectionReason": "the file could not be checked"}), upload_id, project_id),
+    ).fetchone()
+    if row is None or row["immutable_key"] is None:
+        return
+    conn.execute(
+        """
+        INSERT INTO jobs (id, project_id, upload_id, capability, stage, state, priority,
+                          attempts, max_attempts, fencing_token, available_at, input_manifest)
+        VALUES (%s, %s, %s, 'cpu', 'upload_cleanup', 'queued', 5, 0, 3, 0, now(), %s)
+        """,
+        (str(uuid.uuid4()), project_id, upload_id,
+         Jsonb({"uploadId": upload_id, "projectId": project_id, "key": row["immutable_key"]})),
+    )  # fmt: skip
+
+
+def fail_subject(conn: psycopg.Connection, job: ClaimedJob) -> None:
+    """Finalize what a non-run job was working on once it failed for good."""
+    if job.stage == "upload_inspection":
+        fail_upload(conn, job.project_id, job.upload_id)
+    else:
+        fail_revision(conn, job.scene_revision_id)
+
+
 def _insert_next(conn: psycopg.Connection, job: ClaimedJob, nxt: NextJob) -> bool:
     try:
         with conn.transaction():  # savepoint: a duplicate must not abort the completion
@@ -511,7 +550,7 @@ def fail_job(
         if job.run_level:
             fail_run(conn, job.run_id, error)  # type: ignore[arg-type]
         else:
-            fail_revision(conn, job.scene_revision_id)
+            fail_subject(conn, job)
     return "failed"
 
 
@@ -552,7 +591,7 @@ def retry_job(
             if job.run_level:
                 fail_run(conn, job.run_id, final)  # type: ignore[arg-type]
             else:
-                fail_revision(conn, job.scene_revision_id)
+                fail_subject(conn, job)
             return "failed"
         conn.execute(
             """
@@ -630,7 +669,8 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                 updated_at = now()
             FROM expired AS e
             WHERE j.id = e.id
-            RETURNING j.id, j.run_id, j.scene_revision_id, j.stage, j.state,
+            RETURNING j.id, j.project_id, j.run_id, j.upload_id, j.scene_revision_id, j.stage,
+                      j.state,
                       e.capability, e.charge_seconds
             """,
             {"err": Jsonb(lost)},
@@ -655,6 +695,9 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                 )
             if run_id and row["state"] == "failed" and row["scene_revision_id"] is None:
                 fail_run(conn, run_id, lost)
+            elif row["state"] == "failed" and row["stage"] == "upload_inspection":
+                upload_id = str(row["upload_id"]) if row["upload_id"] else None
+                fail_upload(conn, str(row["project_id"]), upload_id)
             elif row["state"] == "failed" and row["scene_revision_id"] is not None:
                 fail_revision(conn, str(row["scene_revision_id"]))
             elif run_id and row["state"] == "cancelled":

@@ -19,10 +19,13 @@ from andarilho_worker.geometry.layout import (
     validate_layout,
 )
 from andarilho_worker.geometry.ply import (
+    PlyError,
     drop_non_finite,
     read_splat_ply,
+    read_splat_ply_file,
     recenter,
     write_splat_ply,
+    write_splat_ply_file,
 )
 from andarilho_worker.geometry.polygon import triangulate
 from andarilho_worker.geometry.synthetic import synthetic_splats
@@ -184,3 +187,17 @@ def test_synthetic_splats_and_ply_roundtrip(layout):
     assert dropped == 1 and cleaned.count == cloud.count - 1
     centered, center = recenter(cleaned)
     assert np.allclose(np.median(centered.positions(), axis=0), 0, atol=1e-3)
+
+
+def test_ply_files_stream_through_disk(layout, tmp_path):
+    cloud = synthetic_splats(layout)
+    path = tmp_path / "scene.ply"
+    blob = write_splat_ply(cloud, comments=["c"])
+    assert write_splat_ply_file(cloud, path, comments=["c"]) == len(blob)
+    assert path.read_bytes() == blob
+    again = read_splat_ply_file(path)  # memory-mapped
+    assert np.array_equal(again.data, cloud.data)
+    empty = tmp_path / "empty.ply"
+    empty.write_bytes(b"")
+    with pytest.raises(PlyError):
+        read_splat_ply_file(empty)

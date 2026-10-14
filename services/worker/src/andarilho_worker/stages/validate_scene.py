@@ -19,7 +19,7 @@ from typing import Any
 
 from psycopg.types.json import Jsonb
 
-from andarilho_worker.artifacts import insert_artifact
+from andarilho_worker.artifacts import MAX_RENDER_BYTES, insert_artifact
 from andarilho_worker.errors import StageError
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 from andarilho_worker.validation import loads_strict, manifest_sha256, validate_scene
@@ -60,7 +60,11 @@ def run(ctx: StageContext) -> StageResult:
     findings = [
         f.as_dict()
         for f in validate_scene(
-            manifest, ctx.store.get_bytes, project_id=ctx.project_id, layout=revision["layout"]
+            manifest,
+            # Assets are bounded by the render limit, not the small inline-object limit.
+            lambda key: ctx.store.get_bytes(key, max_bytes=MAX_RENDER_BYTES),
+            project_id=ctx.project_id,
+            layout=revision["layout"],
         )
     ]
     if not findings and manifest.get("sceneRevisionId") != revision_id:

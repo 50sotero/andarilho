@@ -42,6 +42,15 @@ function verificationLabel(
   }
 }
 
+/** Why a file was rejected, with what to do next. */
+export function rejectionMessage(code: string): string {
+  if (code === "INSPECTION_FAILED") {
+    // Our check could not run to completion; the file itself may be fine.
+    return "This file could not be checked because of a temporary problem. Remove it and upload it again.";
+  }
+  return `The file was rejected (${code}). Check that it is a supported, undamaged file and try another.`;
+}
+
 export function UploadList({
   rows,
   onPause,
@@ -127,8 +136,7 @@ export function UploadList({
             </p>
             {row.rejectionCode ? (
               <p className="text-xs text-red-700 dark:text-red-300">
-                The file was rejected ({row.rejectionCode}). Check that it is a supported, undamaged
-                file and try another.
+                {rejectionMessage(row.rejectionCode)}
               </p>
             ) : null}
           </li>

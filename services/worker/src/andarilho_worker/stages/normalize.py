@@ -19,13 +19,15 @@ from typing import Any
 
 import numpy as np
 
+from andarilho_worker.artifacts import MAX_RENDER_BYTES
 from andarilho_worker.errors import StageError
 from andarilho_worker.geometry.ply import (
     PlyError,
     drop_non_finite,
-    read_splat_ply,
+    read_splat_ply_file,
     recenter,
     write_splat_ply,
+    write_splat_ply_file,
 )
 from andarilho_worker.geometry.synthetic import synthetic_splats
 from andarilho_worker.manifest import IDENTITY_MATRIX
@@ -67,19 +69,28 @@ def run(ctx: StageContext) -> StageResult:
                 "proposalBounds": None,
             },
         )
+    ply_key = str(ctx.output("plyKey"))
+    exported = ctx.store.head(ply_key)
+    if exported is None:
+        raise StageError("MISSING_INPUT", details={"missing": "exported splats"})
+    if exported.size > MAX_RENDER_BYTES:
+        raise StageError("BUDGET_EXHAUSTED", "The exported scene is too large to package.")
+    export = ctx.scratch / "export.ply"
+    # Streamed to scratch and memory-mapped: exports can exceed the inline object limit.
+    ctx.store.download(ply_key, export)
     try:
-        cloud = read_splat_ply(ctx.store.get_bytes(ctx.output("plyKey")))
+        cloud = read_splat_ply_file(export)
     except PlyError as exc:
         raise StageError("EXPORT_INVALID") from exc
     cloud, dropped = drop_non_finite(cloud)
     if cloud.count < MIN_SPLATS:
         raise StageError("EXPORT_INVALID", "Too few valid splats were produced.")
     cloud, center = recenter(cloud)
-    ply = write_splat_ply(cloud, comments=["andarilho normalized (recentered)"])
     work = ctx.scratch / "normalize"
     work.mkdir(parents=True, exist_ok=True)
     ply_path = work / "normalized.ply"
-    ply_path.write_bytes(ply)
+    write_splat_ply_file(cloud, ply_path, comments=["andarilho normalized (recentered)"])
+    export.unlink()  # the archive below replaces it; keep scratch use bounded
     archive_key = ctx.attempt_key("normalized.ply")
     ctx.store.put_file(archive_key, ply_path, "application/octet-stream")
     render_key, render_format = archive_key, "ply"

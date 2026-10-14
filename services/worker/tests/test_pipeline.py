@@ -439,6 +439,39 @@ def test_upload_cleanup_deletes_removed_bytes_and_releases_the_key(db, seed, sto
     assert row["status"] == "aborted" and row["immutable_key"] is None
 
 
+def test_inspection_out_of_retries_rejects_and_cleans_up(db, seed, store, settings):
+    stages = {**STAGES, "upload_inspection": _transient_stage}
+    sup = Supervisor(db, store, settings, stages=stages, delay_fn=lambda attempt: 0.0)
+    pid = seed.project()
+    uid = make_upload(seed, store, pid, JPEG, "photo")
+    seed.exec("UPDATE jobs SET max_attempts = 2 WHERE upload_id = %s", uid)
+    assert drain(db, sup) == [
+        ("upload_inspection", "retry_wait"),
+        ("upload_inspection", "failed"),
+        ("upload_cleanup", "succeeded"),
+    ]
+    row = seed.one("SELECT status, rejection_code, immutable_key FROM uploads WHERE id = %s", uid)
+    assert row["status"] == "rejected" and row["rejection_code"] == "INSPECTION_FAILED"
+    assert row["immutable_key"] is None  # bytes deleted, quota released
+    assert store.list_keys(f"tenants/{pid}/originals/") == []
+
+
+def test_reaped_inspection_out_of_attempts_rejects_the_upload(db, seed, store):
+    pid = seed.project()
+    uid = make_upload(seed, store, pid, JPEG, "photo")
+    seed.exec("UPDATE jobs SET max_attempts = 1 WHERE upload_id = %s", uid)
+    job = queue.claim(db, "lost-worker", "cpu")
+    assert job is not None and job.stage == "upload_inspection"
+    seed.exec("UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = %s",
+              job.id)  # fmt: skip
+    assert [o.state for o in queue.reap_expired(db)] == ["failed"]
+    row = seed.one("SELECT status, rejection_code FROM uploads WHERE id = %s", uid)
+    assert row["status"] == "rejected" and row["rejection_code"] == "INSPECTION_FAILED"
+    cleanup = seed.one("SELECT state FROM jobs WHERE upload_id = %s AND stage = 'upload_cleanup'",
+                       uid)  # fmt: skip
+    assert cleanup["state"] == "queued"  # its bytes (and quota) are released next
+
+
 def test_inspection_verify_is_conditional(db, seed, store, settings):
     def racing(ctx):
         result = inspect_mod.run(ctx)

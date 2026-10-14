@@ -318,8 +318,8 @@ def delete_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store
     if upload.status == "verified":
         _remove_verified(db, upload)
         return Response(status_code=204)
-    if upload.status == "aborted" and upload.immutable_key is not None:
-        # Removed earlier but its bytes are still stored (the cleanup job may have
+    if upload.status in ("aborted", "rejected") and upload.immutable_key is not None:
+        # Removed or rejected but its bytes are still stored (the cleanup job may have
         # run out of attempts): queue cleanup again unless one is still pending.
         _queue_cleanup(db, upload)
         db.commit()

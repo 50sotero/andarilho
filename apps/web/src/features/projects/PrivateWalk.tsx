@@ -7,7 +7,7 @@ import { ViewerClient } from "@/components/viewer/ViewerClient";
 import { LayoutPlan } from "@/features/review/LayoutPlan";
 import { api } from "@/lib/api/client";
 import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
-import type { DeliveryEnvelope, SceneDetail } from "@/lib/api/types";
+import type { DeliveryEnvelope, Layout, SceneDetail } from "@/lib/api/types";
 import { useProject } from "./use-project";
 
 const MAX_ENVELOPE_REFRESHES = 2;
@@ -20,6 +20,20 @@ export function walkableRevisionId(scene: SceneDetail): string | null {
     .filter((r) => r.validationState === "valid")
     .sort((a, b) => b.revision - a.revision);
   return valid[0]?.id ?? null;
+}
+
+/**
+ * The 2D plan shown beside (or instead of) the 3D walk. Only the current draft's
+ * layout is loaded, so it is offered only when the draft is the revision being walked;
+ * an older delivered revision has no matching plan here.
+ */
+export function fallbackLayout(
+  scene: SceneDetail | null,
+  envelope: DeliveryEnvelope | null,
+): Layout | null {
+  const draft = scene?.revision ?? null;
+  if (!draft) return null;
+  return !envelope || envelope.sceneRevisionId === draft.id ? draft.layout : null;
 }
 
 export function PrivateWalk({ projectId }: { projectId: string }) {
@@ -80,7 +94,7 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
   }, [fetchEnvelope]);
 
   const base = `/projects/${encodeURIComponent(projectId)}`;
-  const layout = scene?.revision?.layout ?? null;
+  const layout = fallbackLayout(scene, envelope);
   const title = detail?.project.title ?? "this place";
 
   if (detail && !detail.scene) {

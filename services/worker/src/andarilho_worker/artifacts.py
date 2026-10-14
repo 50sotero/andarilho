@@ -24,6 +24,10 @@ from andarilho_worker.errors import StageError, TransientError
 
 _KEY = re.compile(r"^tenants/[A-Za-z0-9_-]+/[A-Za-z0-9._/-]+$")
 MAX_INLINE_BYTES = 256 * 1024 * 1024
+# Render assets (splat PLY/SOG) may be far larger than other inline objects: a
+# 20-million-splat PLY with full spherical harmonics is about 4.6 GiB. The bound is
+# S3's single-PUT limit, which the conditional create in ``put_immutable`` relies on.
+MAX_RENDER_BYTES = 5 * 1024**3
 
 
 def check_key(key: str) -> str:
@@ -348,7 +352,14 @@ class S3ObjectStore:
         return aborted
 
 
-def put_immutable(store: ObjectStore, key: str, data: bytes, content_type: str) -> ObjectInfo:
+def put_immutable(
+    store: ObjectStore,
+    key: str,
+    data: bytes,
+    content_type: str,
+    *,
+    max_bytes: int = MAX_INLINE_BYTES,
+) -> ObjectInfo:
     """Write ``data`` once; an identical existing object is reused, a different one is an error.
 
     The create is atomic (conditional), so a stale attempt racing a retry can never
@@ -358,7 +369,7 @@ def put_immutable(store: ObjectStore, key: str, data: bytes, content_type: str) 
     if created is not None:
         return created
     existing = store.head(key)
-    current = store.get_bytes(key)
+    current = store.get_bytes(key, max_bytes=max(max_bytes, len(data)))
     if existing is not None and hashlib.sha256(current).digest() == hashlib.sha256(data).digest():
         return existing
     raise StageError("ARTIFACT_CONFLICT")
