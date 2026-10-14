@@ -13,7 +13,7 @@ import tarfile
 from pathlib import Path
 
 from andarilho_worker.errors import StageError
-from andarilho_worker.geometry.ply import PlyError, read_splat_ply_file
+from andarilho_worker.geometry.ply import PlyError, inspect_splat_ply_file
 from andarilho_worker.recipes import render_argv
 from andarilho_worker.runner import ProcessFailed
 from andarilho_worker.stages.base import StageContext, StageResult, finish
@@ -65,12 +65,12 @@ def run(ctx: StageContext) -> StageResult:
         raise StageError("EXPORT_INVALID") from exc
     ply_path = find_one(export, "*.ply")
     try:
-        cloud = read_splat_ply_file(ply_path)
+        splats = inspect_splat_ply_file(ply_path).count  # header and length; no record copy
     except PlyError as exc:
         raise StageError("EXPORT_INVALID") from exc
     ply_key = ctx.attempt_key("splat.ply")
     ctx.store.put_file(ply_key, ply_path, "application/octet-stream")
-    outputs_map = {"plyKey": ply_key, "splatCount": cloud.count}
+    outputs_map = {"plyKey": ply_key, "splatCount": splats}
     transforms = list(outputs.rglob("dataparser_transforms.json"))
     if transforms:
         key = ctx.attempt_key("dataparser_transforms.json")
@@ -78,4 +78,4 @@ def run(ctx: StageContext) -> StageResult:
         outputs_map["dataparserTransformsKey"] = key
     config_key = ctx.attempt_key("config.yml")
     ctx.store.put_file(config_key, config, "text/yaml")  # provenance only, never re-executed
-    return finish(ctx, {"splats": cloud.count, "configKey": config_key}, outputs=outputs_map)
+    return finish(ctx, {"splats": splats, "configKey": config_key}, outputs=outputs_map)

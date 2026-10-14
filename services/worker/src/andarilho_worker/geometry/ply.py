@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import mmap
-from collections.abc import Buffer, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +18,7 @@ REQUIRED = (
 SH_C0 = 0.28209479177387814
 MAX_HEADER_BYTES = 64 * 1024
 MAX_SPLATS = 20_000_000
+CHUNK_SPLATS = 1 << 20  # records per chunk when streaming a PLY on disk
 _TYPES = {
     "float": "<f4", "float32": "<f4", "double": "<f8", "float64": "<f8",
     "uchar": "u1", "uint8": "u1", "char": "i1", "int8": "i1",
@@ -43,8 +43,16 @@ class SplatCloud:
         return np.column_stack([self.data["x"], self.data["y"], self.data["z"]]).astype(np.float64)
 
 
-def parse_header(blob: Buffer) -> tuple[int, np.dtype, int]:
-    head = bytes(blob[:MAX_HEADER_BYTES])  # works for bytes and memory maps alike
+def parse_header(blob: bytes) -> tuple[int, np.dtype, int]:
+    try:
+        return _parse_header(blob[:MAX_HEADER_BYTES])
+    except PlyError:
+        raise
+    except (ValueError, IndexError) as exc:  # non-ASCII text, a bad count, a short line
+        raise PlyError("malformed PLY header") from exc
+
+
+def _parse_header(head: bytes) -> tuple[int, np.dtype, int]:
     end = head.find(b"end_header\n")
     if not head.startswith(b"ply\n") or end < 0:
         raise PlyError("not a PLY file")
@@ -82,7 +90,8 @@ def parse_header(blob: Buffer) -> tuple[int, np.dtype, int]:
     return count, dtype, data_offset
 
 
-def read_splat_ply(blob: Buffer) -> SplatCloud:
+def read_splat_ply(blob: bytes) -> SplatCloud:
+    """Parse a small in-memory PLY. Exports on disk go through the streaming functions below."""
     count, dtype, offset = parse_header(blob)
     need = offset + count * dtype.itemsize
     if len(blob) < need:
@@ -90,49 +99,36 @@ def read_splat_ply(blob: Buffer) -> SplatCloud:
     return SplatCloud(np.frombuffer(blob, dtype=dtype, count=count, offset=offset).copy())
 
 
-def read_splat_ply_file(path: Path) -> SplatCloud:
-    """Parse a PLY on disk through a memory map, so large exports are never read inline."""
-    if path.stat().st_size == 0:
-        raise PlyError("not a PLY file")  # an empty file cannot be memory-mapped
-    with path.open("rb") as fh, mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
-        return read_splat_ply(mapped)
-
-
-def _ply_header(cloud: SplatCloud, comments: Sequence[str]) -> bytes:
+def _ply_header(dtype: np.dtype, count: int, comments: Sequence[str]) -> bytes:
     lines = ["ply", "format binary_little_endian 1.0"]
     lines += [f"comment {c}" for c in comments]
-    lines.append(f"element vertex {cloud.count}")
+    lines.append(f"element vertex {count}")
     inverse = {"<f4": "float", "<f8": "double", "|u1": "uchar", "|i1": "char",
                "<i2": "short", "<u2": "ushort", "<i4": "int", "<u4": "uint"}  # fmt: skip
-    for name in cloud.data.dtype.names:
-        kind = cloud.data.dtype[name].newbyteorder("<").str
+    for name in dtype.names:
+        kind = dtype[name].newbyteorder("<").str
         lines.append(f"property {inverse[kind]} {name}")
     lines.append("end_header")
     return ("\n".join(lines) + "\n").encode("ascii")
 
 
-def _little_endian(cloud: SplatCloud) -> np.ndarray:
-    return cloud.data.astype(cloud.data.dtype.newbyteorder("<"), copy=False)
-
-
 def write_splat_ply(cloud: SplatCloud, *, comments: Sequence[str] = ()) -> bytes:
-    return _ply_header(cloud, comments) + _little_endian(cloud).tobytes()
+    little = cloud.data.astype(cloud.data.dtype.newbyteorder("<"), copy=False)
+    return _ply_header(cloud.data.dtype, cloud.count, comments) + little.tobytes()
 
 
-def write_splat_ply_file(cloud: SplatCloud, path: Path, *, comments: Sequence[str] = ()) -> int:
-    """Write a PLY straight to disk (no in-memory copy of a large cloud); return its size."""
-    with path.open("wb") as fh:
-        fh.write(_ply_header(cloud, comments))
-        _little_endian(cloud).tofile(fh)
-    return path.stat().st_size
+def _finite(records: np.ndarray) -> np.ndarray:
+    """Mask of records whose floating-point values are all finite."""
+    mask = np.ones(len(records), dtype=bool)
+    for name in records.dtype.names:
+        column = records[name]
+        if np.issubdtype(column.dtype, np.floating):
+            mask &= np.isfinite(column)
+    return mask
 
 
 def drop_non_finite(cloud: SplatCloud) -> tuple[SplatCloud, int]:
-    mask = np.ones(cloud.count, dtype=bool)
-    for name in cloud.data.dtype.names:
-        column = cloud.data[name]
-        if np.issubdtype(column.dtype, np.floating):
-            mask &= np.isfinite(column)
+    mask = _finite(cloud.data)
     return SplatCloud(cloud.data[mask]), int((~mask).sum())
 
 
@@ -143,6 +139,73 @@ def recenter(cloud: SplatCloud) -> tuple[SplatCloud, list[float]]:
     for axis, name in enumerate(("x", "y", "z")):
         data[name] = data[name] - center[axis]
     return SplatCloud(data), [float(v) for v in center]
+
+
+@dataclass(frozen=True)
+class PlyLayout:
+    """Where a validated PLY's splat records sit in its file."""
+
+    count: int
+    dtype: np.dtype
+    offset: int
+
+
+def inspect_splat_ply_file(path: Path) -> PlyLayout:
+    """Validate a PLY's header and length on disk without reading its records."""
+    with path.open("rb") as fh:
+        count, dtype, offset = parse_header(fh.read(MAX_HEADER_BYTES))
+    if path.stat().st_size < offset + count * dtype.itemsize:
+        raise PlyError("PLY truncated")
+    return PlyLayout(count, dtype, offset)
+
+
+@dataclass(frozen=True)
+class CleanedPly:
+    count: int  # splats written
+    dropped: int  # splats removed because a value was NaN or infinite
+    center: list[float]  # median position subtracted from every splat
+    positions: np.ndarray  # (count, 3) float64 positions as written
+
+
+def clean_splat_ply_file(
+    src: Path, dst: Path, *, comments: Sequence[str] = (), chunk: int = CHUNK_SPLATS
+) -> CleanedPly:
+    """``drop_non_finite`` + ``recenter`` for a PLY on disk, streamed to ``dst`` in chunks.
+
+    Records are read through a read-only memory map one chunk at a time: a first
+    pass keeps only the finite splats' positions (24 bytes each) for the median,
+    a second writes the filtered, recentered chunks. Memory stays near one chunk
+    plus those positions however large the export, and the output is identical
+    to the in-memory functions.
+    """
+    layout = inspect_splat_ply_file(src)
+    records = np.memmap(src, dtype=layout.dtype, mode="r", offset=layout.offset,
+                        shape=(layout.count,))  # fmt: skip
+    axes = ("x", "y", "z")
+    positions = np.empty((layout.count, 3), dtype=np.float64)
+    kept = 0
+    for start in range(0, layout.count, chunk):
+        part = records[start : start + chunk]
+        mask = _finite(part)
+        n = int(mask.sum())
+        for axis, name in enumerate(axes):
+            positions[kept : kept + n, axis] = part[name][mask]
+        kept += n
+    positions = positions[:kept]
+    center = np.median(positions, axis=0) if kept else np.zeros(3)
+    written = 0
+    with dst.open("wb") as fh:
+        fh.write(_ply_header(layout.dtype, kept, comments))
+        for start in range(0, layout.count, chunk):
+            part = records[start : start + chunk]
+            out = part[_finite(part)]  # a copy; the map stays read-only
+            for axis, name in enumerate(axes):
+                out[name] = out[name] - center[axis]
+                positions[written : written + len(out), axis] = out[name]
+            out.tofile(fh)  # parse_header only yields little-endian types
+            written += len(out)
+    del records, part  # release the map so the caller can delete the source
+    return CleanedPly(kept, layout.count - kept, [float(v) for v in center], positions)
 
 
 def splat_dtype() -> np.dtype:

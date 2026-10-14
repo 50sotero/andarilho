@@ -143,6 +143,11 @@ def run(ctx: StageContext) -> StageResult:
         )
         ctx.progress("Matching features.")
         match_features(ctx, database, names, work, overlap=int(params.get("sequentialOverlap", 10)))
+    except ProcessFailed as exc:
+        # Extraction and matching succeed on any decodable frames; a failure here is the
+        # toolchain or GPU, not the capture, so it must not tell the user to record again.
+        raise TransientError() from exc
+    try:
         ctx.progress("Estimating camera positions.")
         ctx.run(render_argv("colmap_mapper", database=database, images=images, sparse=sparse))
     except ProcessFailed as exc:

@@ -169,3 +169,24 @@ def test_child_environment_excludes_credentials(monkeypatch):
     )
     result = ProcessRunner().run([sys.executable, "-c", code], timeout=30)
     assert result.stdout.strip() == "None None"
+
+
+def test_every_recipe_option_is_checked_against_tool_help():
+    from andarilho_worker.recipes import ARGV
+    from andarilho_worker.toolcheck import HELP, options
+
+    unchecked = [name for name, template in ARGV.items() if options(template) and name not in HELP]
+    assert unchecked == []
+
+
+def test_toolcheck_reports_options_the_tool_does_not_accept():
+    from andarilho_worker.recipes import ARGV
+    from andarilho_worker.toolcheck import missing_options, options
+
+    every_option = "\n".join(opt for template in ARGV.values() for opt in options(template))
+    assert missing_options(lambda argv: every_option) == {}
+    # COLMAP 3.12 names the GPU switch SiftExtraction.use_gpu; a renamed option is caught,
+    # and a longer option sharing the prefix does not hide it.
+    stale = every_option.replace("--SiftExtraction.use_gpu", "--SiftExtraction.use_gpu_index")
+    missing = missing_options(lambda argv: stale)
+    assert missing == {"colmap_feature_extractor": ["--SiftExtraction.use_gpu"]}

@@ -37,6 +37,7 @@ jobs:
           docker run --rm --gpus all andarilho-worker-gpu:smoke nvidia-smi
           docker run --rm --gpus all andarilho-worker-gpu:smoke colmap -h
           docker run --rm --gpus all andarilho-worker-gpu:smoke ns-train splatfacto --help
+          docker run --rm andarilho-worker-gpu:smoke python -m andarilho_worker.toolcheck
       # The real pipeline: FFmpeg frames -> COLMAP -> Splatfacto training/export ->
       # normalization, through the worker's pinned recipe and stage code. Fails if
       # any stage fails or produces no render asset.

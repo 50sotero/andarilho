@@ -20,12 +20,12 @@ from andarilho_worker.geometry.layout import (
 )
 from andarilho_worker.geometry.ply import (
     PlyError,
+    clean_splat_ply_file,
     drop_non_finite,
+    inspect_splat_ply_file,
     read_splat_ply,
-    read_splat_ply_file,
     recenter,
     write_splat_ply,
-    write_splat_ply_file,
 )
 from andarilho_worker.geometry.polygon import triangulate
 from andarilho_worker.geometry.synthetic import synthetic_splats
@@ -189,15 +189,34 @@ def test_synthetic_splats_and_ply_roundtrip(layout):
     assert np.allclose(np.median(centered.positions(), axis=0), 0, atol=1e-3)
 
 
-def test_ply_files_stream_through_disk(layout, tmp_path):
+@pytest.mark.parametrize("chunk", [7, 1000, 1 << 20])
+def test_chunked_cleaning_matches_the_in_memory_pipeline(layout, tmp_path, chunk):
     cloud = synthetic_splats(layout)
+    data = cloud.data.copy()
+    data["x"][[0, 6, 7, 500]] = np.nan  # around and across chunk boundaries
+    data["opacity"][-1] = np.inf
+    src = tmp_path / "export.ply"
+    src.write_bytes(write_splat_ply(type(cloud)(data)))
+    expected, dropped = drop_non_finite(type(cloud)(data))
+    expected, center = recenter(expected)
+
+    dst = tmp_path / "normalized.ply"
+    cleaned = clean_splat_ply_file(src, dst, comments=["c"], chunk=chunk)
+    assert dst.read_bytes() == write_splat_ply(expected, comments=["c"])
+    assert (cleaned.count, cleaned.dropped, cleaned.center) == (expected.count, 5, center)
+    assert dropped == 5 and np.array_equal(cleaned.positions, expected.positions())
+    src.unlink()  # the memory map is released
+
+
+def test_ply_files_are_validated_without_reading_records(layout, tmp_path):
+    blob = write_splat_ply(synthetic_splats(layout))
     path = tmp_path / "scene.ply"
-    blob = write_splat_ply(cloud, comments=["c"])
-    assert write_splat_ply_file(cloud, path, comments=["c"]) == len(blob)
-    assert path.read_bytes() == blob
-    again = read_splat_ply_file(path)  # memory-mapped
-    assert np.array_equal(again.data, cloud.data)
-    empty = tmp_path / "empty.ply"
-    empty.write_bytes(b"")
-    with pytest.raises(PlyError):
-        read_splat_ply_file(empty)
+    path.write_bytes(blob)
+    layout_info = inspect_splat_ply_file(path)
+    assert layout_info.count == synthetic_splats(layout).count
+    bad_count = b"ply\nformat binary_little_endian 1.0\nelement vertex x\nend_header\n"
+    not_ascii = b"ply\n\xff\xfe\nend_header\n"
+    for bad in (b"", bad_count, not_ascii, blob[:-1]):
+        path.write_bytes(bad)
+        with pytest.raises(PlyError):
+            inspect_splat_ply_file(path)

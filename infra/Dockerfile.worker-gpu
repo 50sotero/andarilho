@@ -56,6 +56,8 @@ RUN npm install -g "@playcanvas/splat-transform@${SPLAT_TRANSFORM_VERSION}"
 WORKDIR /app/services/worker
 COPY services/worker/ ./
 RUN uv pip install --python /opt/venv/bin/python .
+# Fail the build if the pinned recipe uses an option these tool versions do not accept.
+RUN python -m andarilho_worker.toolcheck
 
 RUN useradd --system --uid 10001 --home /app andarilho && mkdir -p /scratch && chown andarilho /scratch
 USER andarilho

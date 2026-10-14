@@ -274,7 +274,9 @@ class ProcessRunner:
             duration_seconds=time.monotonic() - started,
         )
         if result.stderr_tail:
-            log.debug("%s stderr tail: %s", argv[0], result.stderr_tail[-2000:])
+            # A failure's (redacted) output is the only clue to its cause, so operators see it.
+            level = logging.WARNING if result.returncode != 0 else logging.DEBUG
+            log.log(level, "%s stderr tail: %s", argv[0], result.stderr_tail[-2000:])
         if check and result.returncode != 0:
             raise ProcessFailed(f"{argv[0]} exited with status {result.returncode}", result)
         return result
