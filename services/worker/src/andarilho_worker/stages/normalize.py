@@ -33,10 +33,13 @@ from andarilho_worker.stages.base import StageContext, StageResult, finish
 Z_UP_TO_Y_UP = [1.0, 0, 0, 0, 0, 0, -1.0, 0, 0, 1.0, 0, 0, 0, 0, 0, 1.0]
 MIN_SPLATS = 1000
 BOUNDS_SAMPLE = 2_000_000
-# SOG compression on the CPU (splat-transform's k-means, one core) is slow: the first
-# real preview scene (~163k splats) needed well over ten minutes. It gets at most this
-# long, and half the stage's remaining time, before the scene falls back to its PLY.
+# SOG compression on the CPU (splat-transform's k-means, one core) is slow for the
+# higher spherical-harmonic bands, which the recipe drops first (renderShDegree). It
+# gets at most this long, and half the stage's remaining time, before the scene falls
+# back to its PLY.
 SOG_MAX_SECONDS = 900
+# Splatfacto's default; a recipe without renderShDegree keeps every band.
+TRAINED_SH_DEGREE = 3
 
 
 def synthetic_layout() -> dict[str, Any]:
@@ -95,14 +98,22 @@ def run(ctx: StageContext) -> StageResult:
     compression: dict[str, Any] = {"format": "ply", "reason": "no compressor"}
     if tool_available("splat-transform"):
         sog_path = work / "scene.sog"
+        sh_degree = int(ctx.params.get("renderShDegree", TRAINED_SH_DEGREE))
         budget = min(SOG_MAX_SECONDS, ctx.remaining_seconds() / 2)
         started = time.monotonic()
         try:
             ctx.progress("Compressing the render asset.")
-            ctx.run(render_argv("splat_transform", input=ply_path, output=sog_path), timeout=budget)
+            argv = render_argv(
+                "splat_transform", input=ply_path, sh_degree=sh_degree, output=sog_path
+            )
+            ctx.run(argv, timeout=budget)
             render_key, render_format = ctx.attempt_key("scene.sog"), "sog"
             ctx.store.put_file(render_key, sog_path, "application/octet-stream")
-            compression = {"format": "sog", "bytes": sog_path.stat().st_size}
+            compression = {
+                "format": "sog",
+                "bytes": sog_path.stat().st_size,
+                "shDegree": sh_degree,
+            }
         except (ProcessFailed, ProcessTimeout) as exc:
             # Keep the PLY: larger to deliver, but a slow or failed compression never
             # costs the user their reconstruction.

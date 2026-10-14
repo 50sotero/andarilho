@@ -122,8 +122,12 @@ ARGV: dict[str, tuple[str, ...]] = {
         "ns-export", "gaussian-splat", "--load-config", "{config}", "--output-dir", "{output_dir}",
     ),
     # CPU SOG compression: deterministic, and it needs no Vulkan driver, which neither
-    # worker container has (WebGPU device creation fails without one).
-    "splat_transform": ("splat-transform", "--quiet", "--gpu", "cpu", "{input}", "{output}"),
+    # worker container has (WebGPU device creation fails without one). Spherical
+    # harmonic bands above {sh_degree} are dropped first (see renderShDegree).
+    "splat_transform": (
+        "splat-transform", "--quiet", "--gpu", "cpu",
+        "{input}", "--filter-harmonics", "{sh_degree}", "{output}",
+    ),
 }  # fmt: skip
 
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
@@ -234,6 +238,12 @@ COMMON = {
     "keyframeOversample": 3,
     "sequentialOverlap": 20,
     "seed": 42,
+    # Highest spherical-harmonic band kept in the SOG render asset. Splatfacto trains
+    # degree 3; on the CPU, SOG's k-means over those bands is what is slow. Measured
+    # on the first real preview scene (163k splats, PLY 40.5 MB): degree 0 took 3 s
+    # (2.2 MB), degree 1 took 58 s (3.1 MB), and degree 2 and 3 did not finish in
+    # 600 s. The archived PLY keeps every band.
+    "renderShDegree": 1,
 }
 
 RECIPES: dict[str, Recipe] = {

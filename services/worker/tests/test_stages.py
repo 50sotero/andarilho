@@ -397,6 +397,49 @@ def test_slow_sog_compression_falls_back_to_the_ply(db, seed, store, settings, m
     assert result["result_manifest"]["compression"]["reason"] == "timeout"
 
 
+def test_sog_compression_drops_the_bands_above_the_recipe_sh_degree(
+    db, seed, store, settings, monkeypatch
+):
+    from andarilho_worker.geometry.ply import write_splat_ply
+    from andarilho_worker.geometry.synthetic import synthetic_splats
+    from andarilho_worker.stages import STAGES
+    from andarilho_worker.stages import normalize as normalize_mod
+
+    monkeypatch.setattr(normalize_mod, "tool_available", lambda name: True)
+    calls: list[list[str]] = []
+
+    class Compressor:
+        def run(self, argv, *, timeout, **kw):
+            argv = [str(a) for a in argv]
+            calls.append(argv)
+            Path(argv[-1]).write_bytes(b"PK\x03\x04 sog")
+            return RunResult(tuple(argv), 0, "", "", 0.01)
+
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, quality="preview", first_stage="normalizing")
+    ply_key = f"tenants/{pid}/runs/{run_id}/attempts/training/1/scene.ply"
+    store.put_bytes(ply_key, write_splat_ply(synthetic_splats(normalize_mod.synthetic_layout())))
+    seed.exec(
+        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
+        json.dumps({"outputs": {"plyKey": ply_key, "quality": "preview"}}), job_id,
+    )  # fmt: skip
+    sup = Supervisor(db, store, settings, runner=Compressor(), stages=STAGES)
+    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
+    (argv,) = calls
+    assert argv[0] == "splat-transform"
+    # An action after the input applies to it: drop the bands, then write the SOG.
+    flag = argv.index("--filter-harmonics")
+    assert argv[flag - 1].endswith("normalized.ply")
+    assert argv[flag + 1] == str(RECIPES["preview"].params["renderShDegree"]) == "1"
+    assert argv[-1].endswith("scene.sog")
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
+    assert outputs["input_manifest"]["outputs"]["renderFormat"] == "sog"
+    result = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'normalizing'")
+    compression = result["result_manifest"]["compression"]
+    assert compression["format"] == "sog" and compression["shDegree"] == 1
+    assert compression["bytes"] == len(b"PK\x03\x04 sog")
+
+
 def test_normalize_streams_the_export_instead_of_reading_it_inline(
     db, seed, store, settings, monkeypatch
 ):
