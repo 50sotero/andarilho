@@ -75,6 +75,17 @@ ARGV: dict[str, tuple[str, ...]] = {
         "--SequentialMatching.overlap", "{overlap}", "--SequentialMatching.quadratic_overlap", "1",
         "--FeatureMatching.use_gpu", "1",
     ),
+    # Photos are not a capture sequence: match them exhaustively (photo-only
+    # captures) or against every image through an explicit pair list (mixed).
+    "colmap_exhaustive_matcher": (
+        "colmap", "exhaustive_matcher", "--database_path", "{database}",
+        "--FeatureMatching.use_gpu", "1",
+    ),
+    "colmap_matches_importer": (
+        "colmap", "matches_importer", "--database_path", "{database}",
+        "--match_list_path", "{pairs}", "--match_type", "pairs",
+        "--FeatureMatching.use_gpu", "1",
+    ),
     "colmap_mapper": (
         "colmap", "mapper", "--database_path", "{database}", "--image_path", "{images}",
         "--output_path", "{sparse}", "--Mapper.multiple_models", "1",

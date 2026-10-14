@@ -7,7 +7,7 @@ import {
   scaleLayout,
 } from "@/features/review/geometry";
 import { addOpening, movePoint, removeSelected } from "@/features/review/layout-edit";
-import { formatStageProgress, stageStates } from "@/features/processing/stages";
+import { canRetryRun, formatStageProgress, stageStates } from "@/features/processing/stages";
 import { expiryFromDays } from "@/features/sharing/SharePanel";
 import type { Layout, Run } from "@/lib/api/types";
 import fixture from "@andarilho/scene-contract/fixtures/synthetic-two-room.layout.json";
@@ -84,6 +84,20 @@ describe("layout geometry", () => {
     expect(layoutProblems(withOpening)).toEqual([]);
     const removed = removeSelected(withOpening, { kind: "wall", index: 0 });
     expect(removed.openings!.some((o) => o.wallId === layout.walls![0]!.id)).toBe(false);
+  });
+});
+
+describe("run retry offer", () => {
+  it("offers retry for infrastructure failures but not for bad captures", () => {
+    const failed = (code: string) => ({
+      status: "failed" as const,
+      error: { code, message: "", retryable: false, suggestedAction: null, requestId: "r" },
+    });
+    expect(canRetryRun(failed("TRAINING_FAILED"))).toBe(true);
+    expect(canRetryRun(failed("WORKER_LOST"))).toBe(true);
+    expect(canRetryRun(failed("DISCONNECTED_CAPTURE"))).toBe(false);
+    expect(canRetryRun({ status: "cancelled", error: null })).toBe(true);
+    expect(canRetryRun({ status: "succeeded", error: null })).toBe(false);
   });
 });
 

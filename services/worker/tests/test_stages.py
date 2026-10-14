@@ -259,3 +259,37 @@ def test_put_immutable_never_replaces_committed_bytes(tmp_path):
     with pytest.raises(StageError):
         put_immutable(store, key, b"stale", "model/gltf-binary")
     assert store.get_bytes(key) == b"winner"
+
+
+class _RecordingCtx:
+    def __init__(self):
+        self.calls = []
+
+    def run(self, argv, **kw):
+        self.calls.append([str(a) for a in argv])
+
+
+@pytest.mark.parametrize(
+    "names,expected",
+    [
+        (["00/frame_00001.jpg", "00/frame_00002.jpg"], [["sequential_matcher"]]),
+        (["photos_1600x1200/photo_00000.jpg", "photos_1600x1200/photo_00001.jpg"],
+         [["exhaustive_matcher"]]),
+        (["00/frame_00001.jpg", "photos_1600x1200/photo_00000.jpg"],
+         [["sequential_matcher"], ["matches_importer"]]),
+    ],
+)  # fmt: skip
+def test_matcher_respects_photo_ordering(tmp_path, names, expected):
+    from andarilho_worker.stages.reconstruct import match_features, photo_pairs
+
+    ctx = _RecordingCtx()
+    match_features(ctx, tmp_path / "db", names, tmp_path, overlap=10)
+    assert [c[1:2] for c in ctx.calls] == expected
+    if expected[-1] == ["matches_importer"]:
+        written = (tmp_path / "photo-pairs.txt").read_text().split("\n")
+        assert written[0] == "00/frame_00001.jpg photos_1600x1200/photo_00000.jpg"
+    assert photo_pairs(["a/1.jpg", "photos_1x1/p.jpg", "photos_1x1/q.jpg"]) == [
+        ("a/1.jpg", "photos_1x1/p.jpg"),
+        ("a/1.jpg", "photos_1x1/q.jpg"),
+        ("photos_1x1/p.jpg", "photos_1x1/q.jpg"),
+    ]

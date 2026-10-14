@@ -98,7 +98,8 @@ def get_scene(
     scene_id: uuid.UUID, response: Response, subject: Subject, db: Db, store: Store, config: Config
 ):
     scene = load_scoped(db, Scene, scene_id, subject, "scene")
-    _, role = load_project(db, scene.project_id, subject)
+    # Draft layouts, findings and history are review material: owners/editors only.
+    load_project(db, scene.project_id, subject, roles=WRITERS)
     revisions = (
         db.execute(
             select(SceneRevision)
@@ -115,9 +116,7 @@ def get_scene(
         "revision": ser.revision(current) if current else None,
         "revisions": [ser.revision_summary(r) for r in revisions],
         # The original plan is private source material: owners/editors only.
-        "floorPlan": _floor_plan(db, scene, store, config.delivery_url_ttl_seconds)
-        if role in WRITERS
-        else None,
+        "floorPlan": _floor_plan(db, scene, store, config.delivery_url_ttl_seconds),
     }
 
 
@@ -246,12 +245,15 @@ def scene_delivery(
     settings: Config,
 ):
     scene = load_scoped(db, Scene, scene_id, subject, "scene")
-    project, _ = load_project(db, scene.project_id, subject)
+    project, role = load_project(db, scene.project_id, subject)
     if project.lifecycle != "active":
         raise project_deleting()
     revision = _revision_of(db, scene, body.scene_revision_id)
     if revision.validation_state != "valid":
         raise invalid_state("This scene revision has not passed validation.")
+    if role not in WRITERS and revision.approval_state != "approved":
+        # Viewers walk approved revisions only; drafts stay with the reviewers.
+        raise not_found("scene revision")
     envelope = build_envelope(storage, settings, revision)
     if revision.manifest_sha256 is None:
         revision.manifest_sha256 = manifest_sha256(revision)

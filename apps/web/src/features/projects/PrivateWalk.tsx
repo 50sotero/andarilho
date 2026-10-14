@@ -30,16 +30,23 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
   const [noRevision, setNoRevision] = useState(false);
   const refreshes = useRef(0);
   const sceneId = detail?.scene?.id ?? null;
+  // Viewers cannot read draft review data; they walk the published (approved) revision.
+  const viewerRevisionId =
+    detail?.project.role === "viewer" ? (detail.project.publishedRevisionId ?? "") : null;
 
   const fetchEnvelope = useCallback(
     (signal?: { cancelled: boolean }): Promise<void> => {
       if (!sceneId) return Promise.resolve();
-      return api
-        .getScene(sceneId)
-        .then(({ data: sceneData }) => {
+      const revisionLookup =
+        viewerRevisionId !== null
+          ? Promise.resolve(viewerRevisionId || null)
+          : api.getScene(sceneId).then(({ data: sceneData }) => {
+              if (!signal?.cancelled) setScene(sceneData);
+              return walkableRevisionId(sceneData);
+            });
+      return revisionLookup
+        .then((revisionId) => {
           if (signal?.cancelled) return;
-          setScene(sceneData);
-          const revisionId = walkableRevisionId(sceneData);
           if (!revisionId) {
             setNoRevision(true);
             return;
@@ -54,7 +61,7 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
           if (!signal?.cancelled) setError(toFriendlyError(err));
         });
     },
-    [sceneId],
+    [sceneId, viewerRevisionId],
   );
 
   useEffect(() => {

@@ -240,11 +240,14 @@ function FloorPlanPanel({
   underlay,
   defaults,
   onChange,
+  onRefresh,
 }: {
   plan: FloorPlanLink;
   underlay: PlanUnderlay | null;
   defaults: PlanUnderlay;
   onChange: (next: PlanUnderlay | null) => void;
+  /** Fetch a fresh short-lived link; the one loaded with the page may have expired. */
+  onRefresh: () => Promise<FloorPlanLink | null>;
 }) {
   const id = useId();
   if (!IMAGE_PLAN_TYPES.has(plan.contentType)) {
@@ -253,9 +256,21 @@ function FloorPlanPanel({
         <h3 className="text-sm font-semibold">Floor plan</h3>
         <p className="mt-1 text-sm text-stone-600 dark:text-stone-400">
           PDF plans cannot be traced in the editor yet.{" "}
-          <a className="underline" href={plan.url} target="_blank" rel="noreferrer noopener">
+          <button
+            type="button"
+            className="underline"
+            onClick={() => {
+              // Open the tab synchronously (popup blockers), then point it at a fresh link.
+              const tab = window.open("about:blank", "_blank");
+              if (tab) tab.opener = null;
+              void onRefresh().then((fresh) => {
+                if (tab && fresh) tab.location.href = fresh.url;
+                else tab?.close();
+              });
+            }}
+          >
             Open the plan
-          </a>{" "}
+          </button>{" "}
           (private link, expires in a few minutes) and trace it by eye.
         </p>
       </div>
@@ -288,7 +303,15 @@ function FloorPlanPanel({
         <input
           type="checkbox"
           checked={Boolean(underlay)}
-          onChange={(e) => onChange(e.target.checked ? { ...defaults, url: plan.url } : null)}
+          onChange={(e) => {
+            if (!e.target.checked) {
+              onChange(null);
+              return;
+            }
+            void onRefresh().then((fresh) => {
+              if (fresh) onChange({ ...defaults, url: fresh.url });
+            });
+          }}
         />
         Show the plan under the layout for tracing
       </label>
@@ -463,6 +486,19 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     },
     [showRevision],
   );
+
+  const refreshFloorPlan = useCallback(async (): Promise<FloorPlanLink | null> => {
+    if (!sceneId) return null;
+    try {
+      const { data } = await api.getScene(sceneId);
+      // Only the plan link is refreshed here; the editable layout is left alone.
+      setScene((prev) => (prev ? { ...prev, floorPlan: data.floorPlan } : prev));
+      return data.floorPlan;
+    } catch (err) {
+      setError(toFriendlyError(err));
+      return null;
+    }
+  }, [sceneId]);
 
   const loadScene = useCallback(
     async (resetLayout: boolean) => {
@@ -772,6 +808,7 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
                   opacity: 0.5,
                 }}
                 onChange={setUnderlay}
+                onRefresh={refreshFloorPlan}
               />
             </Card>
           ) : null}

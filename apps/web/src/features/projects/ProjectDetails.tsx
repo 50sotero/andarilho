@@ -44,7 +44,8 @@ export function ProjectDetails({ projectId }: { projectId: string }) {
   const [status, setStatus] = useState("");
   const titleId = useId();
 
-  const sceneId = detail?.scene?.id ?? null;
+  // Draft scene data is review material for owners/editors; viewers never request it.
+  const sceneId = detail?.project.role === "viewer" ? null : (detail?.scene?.id ?? null);
 
   const loadScene = useCallback(async (): Promise<string | null> => {
     if (!sceneId) return null;

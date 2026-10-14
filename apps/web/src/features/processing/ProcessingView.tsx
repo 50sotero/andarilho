@@ -9,6 +9,7 @@ import type { JobDetail, JobEvent, ProjectDetail, Run } from "@/lib/api/types";
 import { usePolling } from "@/lib/use-polling";
 import {
   STAGES,
+  canRetryRun,
   formatElapsed,
   formatStageProgress,
   isTerminalRun,
@@ -259,8 +260,7 @@ export function ProcessingView({
               </Button>
             )
           ) : null}
-          {(run.status === "failed" && (run.error?.retryable ?? true)) ||
-          run.status === "cancelled" ? (
+          {canRetryRun(run) ? (
             <Button onClick={() => void retry()} disabled={busy}>
               {busy ? "Starting..." : "Retry with the same inputs"}
             </Button>

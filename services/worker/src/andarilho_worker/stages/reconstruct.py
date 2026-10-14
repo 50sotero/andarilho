@@ -90,6 +90,37 @@ def coverage_gate(
     return quality
 
 
+def photo_pairs(names: list[str]) -> list[tuple[str, str]]:
+    """Every supplementary photo paired with every other image (unordered, unique)."""
+    photos = [n for n in names if n.startswith("photos")]
+    pairs: set[tuple[str, str]] = set()
+    for photo in photos:
+        for other in names:
+            if other != photo:
+                pairs.add((min(photo, other), max(photo, other)))
+    return sorted(pairs)
+
+
+def match_features(
+    ctx: StageContext, database: Path, names: list[str], work: Path, *, overlap: int
+) -> None:
+    """Sequential matching only where filenames are a real capture order (video frames).
+
+    Photos are ordered by upload ID, not by capture, so photo-only sets use the
+    exhaustive matcher and mixed sets add explicit photo-to-everything pairs.
+    """
+    has_video = any(not n.startswith("photos") for n in names)
+    has_photos = any(n.startswith("photos") for n in names)
+    if not has_video:
+        ctx.run(render_argv("colmap_exhaustive_matcher", database=database))
+        return
+    ctx.run(render_argv("colmap_sequential_matcher", database=database, overlap=overlap))
+    if has_photos:
+        pairs_file = work / "photo-pairs.txt"
+        pairs_file.write_text("".join(f"{a} {b}\n" for a, b in photo_pairs(names)))
+        ctx.run(render_argv("colmap_matches_importer", database=database, pairs=pairs_file))
+
+
 def run(ctx: StageContext) -> StageResult:
     params = ctx.params
     prefix = ctx.output("framesPrefix")
@@ -111,13 +142,7 @@ def run(ctx: StageContext) -> StageResult:
             )
         )
         ctx.progress("Matching features.")
-        ctx.run(
-            render_argv(
-                "colmap_sequential_matcher",
-                database=database,
-                overlap=int(params.get("sequentialOverlap", 10)),
-            )
-        )
+        match_features(ctx, database, names, work, overlap=int(params.get("sequentialOverlap", 10)))
         ctx.progress("Estimating camera positions.")
         ctx.run(render_argv("colmap_mapper", database=database, images=images, sparse=sparse))
     except ProcessFailed as exc:

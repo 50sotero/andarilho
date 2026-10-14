@@ -71,3 +71,27 @@ export function formatElapsed(ms: number): string {
   if (m > 0) return `${m} min ${s} s`;
   return `${s} s`;
 }
+
+/**
+ * Failures caused by the capture itself: retrying the same inputs would fail the
+ * same way (and spend GPU time), so the user is sent to record a new capture.
+ */
+const CAPTURE_FAILURE_CODES = new Set([
+  "INSUFFICIENT_OVERLAP",
+  "DISCONNECTED_CAPTURE",
+  "CAMERA_REGISTRATION_FAILED",
+  "CAPTURE_TOO_BLURRY",
+  "INVALID_MEDIA",
+  "UNSUPPORTED_MEDIA",
+  "INSUFFICIENT_INPUTS",
+  "INPUT_NOT_VERIFIED",
+]);
+
+/** Whether to offer "retry with the same inputs" for a finished run. */
+export function canRetryRun(run: Pick<Run, "status" | "error">): boolean {
+  if (run.status === "cancelled") return true;
+  if (run.status !== "failed") return false;
+  // The error's `retryable` flag describes the last attempt (already exhausted), not
+  // whether a fresh run could succeed, so decide from the stable error code.
+  return !CAPTURE_FAILURE_CODES.has(run.error?.code ?? "");
+}
