@@ -13,12 +13,17 @@ function sameSelection(a: Selection | null, b: Selection): boolean {
  * Interactive top-down SVG editor. Point handles are focusable buttons:
  * drag with a pointer, or move with arrow keys (Shift = 0.5 m, otherwise 0.05 m).
  */
-/** A floor-plan image placed under the editor, in layout meters ([x, z] of its top-left). */
+/**
+ * A floor-plan image placed under the editor, in layout meters: [x, z] of its
+ * top-left corner, its width, and a rotation about that corner (degrees; the
+ * same sense as the landmark fit, from +x toward +z).
+ */
 export interface PlanUnderlay {
   url: string;
   x: number;
   z: number;
   width: number;
+  rotationDegrees?: number;
   opacity: number;
 }
 
@@ -173,6 +178,11 @@ export function LayoutCanvas({
           x={underlay.x}
           y={underlay.z}
           width={underlay.width}
+          transform={
+            underlay.rotationDegrees
+              ? `rotate(${underlay.rotationDegrees} ${underlay.x} ${underlay.z})`
+              : undefined
+          }
           opacity={underlay.opacity}
           preserveAspectRatio="xMinYMin meet"
           pointerEvents="none"

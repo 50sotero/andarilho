@@ -19,6 +19,8 @@ import {
   type Point,
   type ViewBox,
 } from "./geometry";
+import { AlignmentPanel } from "./AlignmentPanel";
+import { underlayFromFit } from "./alignment";
 import { LayoutCanvas, type PlanUnderlay } from "./LayoutCanvas";
 import {
   addLandmark,
@@ -277,7 +279,7 @@ function FloorPlanPanel({
     );
   }
   const current = underlay ?? defaults;
-  const field = (key: "x" | "z" | "width", label: string) => (
+  const field = (key: "x" | "z" | "width" | "rotationDegrees", label: string) => (
     <label className="text-sm" htmlFor={`${id}-${key}`}>
       {label}
       <input
@@ -285,7 +287,7 @@ function FloorPlanPanel({
         type="number"
         step="0.1"
         className={inputClass}
-        value={current[key]}
+        value={current[key] ?? 0}
         disabled={!underlay}
         onChange={(e) => {
           const value = Number(e.target.value);
@@ -317,12 +319,14 @@ function FloorPlanPanel({
       </label>
       <p className="mt-1 text-xs text-stone-600 dark:text-stone-400">
         The plan is private evidence: it is never part of a shared scene. Place it so that its walls
-        line up with the capture, then trace or calibrate against it.
+        line up with the capture (or mark landmarks on it and let them place it), then trace or
+        calibrate against it.
       </p>
-      <div className="mt-2 grid grid-cols-3 gap-2">
+      <div className="mt-2 grid grid-cols-2 gap-2">
         {field("x", "Left (m)")}
         {field("z", "Top (m)")}
         {field("width", "Width (m)")}
+        {field("rotationDegrees", "Rotation (°)")}
       </div>
       <label className="mt-2 block text-sm" htmlFor={`${id}-opacity`}>
         Opacity
@@ -830,30 +834,24 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
             />
           </Card>
           <Card>
-            <h3 className="text-sm font-semibold">Landmarks</h3>
-            {(layout.landmarks ?? []).length === 0 ? (
-              <p className="mt-1 text-sm text-stone-600 dark:text-stone-400">
-                Add at least three recognizable floor points (corners, door frames) to check the
-                alignment between the plan and the capture.
-              </p>
-            ) : (
-              <ul className="mt-2 space-y-1 text-sm">
-                {(layout.landmarks ?? []).map((lm, i) => (
-                  <li key={lm.id} className="flex items-center justify-between gap-2">
-                    <span>
-                      {lm.id}: ({lm.worldPoint.map((v) => v.toFixed(2)).join(", ")}) m
-                      {lm.uncertainty != null ? ` ± ${lm.uncertainty} m` : ""}
-                    </span>
-                    <Button
-                      variant="ghost"
-                      onClick={() => setSelection({ kind: "landmark", index: i })}
-                    >
-                      Edit
-                    </Button>
-                  </li>
-                ))}
-              </ul>
-            )}
+            <AlignmentPanel
+              layout={layout}
+              selection={selection}
+              plan={scene?.floorPlan ?? null}
+              onSelect={setSelection}
+              onChange={edit}
+              onRefreshPlan={refreshFloorPlan}
+              onPlace={(fit) => {
+                void refreshFloorPlan().then((fresh) => {
+                  if (!fresh) return;
+                  setUnderlay(underlayFromFit(fit, fresh.url, underlay?.opacity ?? 0.5));
+                  setStatus(
+                    "Placed the plan from the landmarks. Check that its walls match the capture " +
+                      "before tracing against it.",
+                  );
+                });
+              }}
+            />
           </Card>
         </div>
       </div>
