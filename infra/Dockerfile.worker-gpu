@@ -11,13 +11,15 @@ FROM ${CUDA_IMAGE}
 
 ARG COLMAP_VERSION=3.12.5
 ARG NERFSTUDIO_VERSION=1.1.5
-ARG GSPLAT_VERSION=1.5.3
+# nerfstudio 1.1.5 pins gsplat==1.4.0 exactly.
+ARG GSPLAT_VERSION=1.4.0
 ARG TORCH_VERSION=2.7.1
+ARG TORCHVISION_VERSION=0.22.1
 ARG TORCH_CUDA=cu128
 ARG SPLAT_TRANSFORM_VERSION=1.4.0
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
-    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0" UV_PROJECT_ENVIRONMENT=/opt/venv \
-    PATH="/opt/venv/bin:$PATH"
+    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0" UV_PROJECT_ENVIRONMENT=/opt/venv \
+    PATH="/opt/venv/bin:$PATH" TORCH_EXTENSIONS_DIR=/opt/torch_extensions
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg git cmake ninja-build build-essential python3.12 python3.12-venv python3.12-dev \
@@ -29,13 +31,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # COLMAP built with CUDA from a pinned release tag.
 RUN git clone --depth 1 --branch ${COLMAP_VERSION} https://github.com/colmap/colmap.git /opt/colmap-src \
- && cmake -S /opt/colmap-src -B /opt/colmap-build -GNinja -DCMAKE_CUDA_ARCHITECTURES=native -DGUI_ENABLED=OFF \
+ && cmake -S /opt/colmap-src -B /opt/colmap-build -GNinja -DCMAKE_CUDA_ARCHITECTURES="80;86;89;90;120" -DGUI_ENABLED=OFF \
  && cmake --build /opt/colmap-build && cmake --install /opt/colmap-build && rm -rf /opt/colmap-src /opt/colmap-build
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.30 /uv /usr/local/bin/uv
+# Install torch/torchvision from the CUDA index and keep them pinned while
+# resolving nerfstudio, so its dependencies cannot replace the CUDA build.
 RUN uv venv --python python3.12 /opt/venv \
- && uv pip install --python /opt/venv/bin/python "torch==${TORCH_VERSION}" --index-url https://download.pytorch.org/whl/${TORCH_CUDA} \
- && uv pip install --python /opt/venv/bin/python "nerfstudio==${NERFSTUDIO_VERSION}" "gsplat==${GSPLAT_VERSION}"
+ && uv pip install --python /opt/venv/bin/python \
+      "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+      --index-url https://download.pytorch.org/whl/${TORCH_CUDA} \
+ && uv pip install --python /opt/venv/bin/python \
+      "nerfstudio==${NERFSTUDIO_VERSION}" "gsplat==${GSPLAT_VERSION}" \
+      "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
+      --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA} \
+      --index-strategy unsafe-best-match \
+ && python -c "import torch; assert torch.__version__.startswith('${TORCH_VERSION}+${TORCH_CUDA}'), torch.__version__"
+# Precompile gsplat's CUDA kernels for the arch list above (no GPU needed, only
+# nvcc) so workers never JIT-compile at run time.
+RUN python -c "from gsplat.cuda._backend import _C; assert _C is not None" \
+ && chmod -R a+rX /opt/torch_extensions
 RUN npm install -g "@playcanvas/splat-transform@${SPLAT_TRANSFORM_VERSION}"
 
 WORKDIR /app/services/worker
