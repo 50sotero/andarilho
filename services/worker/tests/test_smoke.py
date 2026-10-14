@@ -17,6 +17,8 @@ from andarilho_worker.stages.normalize import synthetic_layout
 PLY = write_splat_ply(synthetic_splats(synthetic_layout()))
 RENDER_KEY = "tenants/x/runs/y/scene.ply"
 MP4 = b"\x00\x00\x00\x18ftypisom"
+POSTER_KEY = "tenants/x/runs/y/poster.webp"
+WEBP = b"RIFF" + (4).to_bytes(4, "little") + b"WEBP"
 
 
 def _fake(outputs):
@@ -24,6 +26,8 @@ def _fake(outputs):
         assert ctx.outputs()["inputs"][0]["mediaKind"] == "video"
         if ctx.stage == "normalizing":
             ctx.store.put_bytes(RENDER_KEY, PLY)
+        if ctx.stage == "preparing":
+            ctx.store.put_bytes(POSTER_KEY, WEBP)
         return StageResult("", "0" * 64, {}, outputs)
 
     return stage
@@ -35,7 +39,7 @@ def _fakes(bounds):
     normalized = {"renderKey": RENDER_KEY, "renderFormat": "ply", "scaleStatus": "estimated",
                   "worldFromDecodedRender": IDENTITY_MATRIX, "proposalBounds": bounds}  # fmt: skip
     return {
-        "preparing": _fake({"frameCount": 120}),
+        "preparing": _fake({"frameCount": 120, "posterKey": POSTER_KEY}),
         "camera_reconstruction": _fake({"coverage": coverage}),
         "training": _fake({"splatCount": 5000}),
         "normalizing": _fake(normalized),
@@ -60,6 +64,8 @@ def test_smoke_chains_capture_stages_into_a_validated_bundle(tmp_path, monkeypat
     assert manifest["quality"]["registeredViews"] == 110
     assert manifest["floors"][0]["elevation"] == 0.1  # the proposal sits on the splats' floor
     assert (bundle / "collision.glb").stat().st_size > 0
+    assert (bundle / "poster.webp").read_bytes() == WEBP
+    assert manifest["assets"]["poster"]["format"] == "webp"
     assert json.loads((bundle / "layout.json").read_text())["spawn"]["floorId"] == "floor-0"
 
 

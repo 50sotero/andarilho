@@ -1,9 +1,10 @@
 """Check the pinned recipe's command-line options against the installed tools.
 
 Run inside a worker image (``python -m andarilho_worker.toolcheck``, with
-``--only splat-transform`` in the CPU image); the image builds do this so a recipe
-written for another tool version fails the build instead of failing a user's
-run. It needs no GPU: every check reads ``--help``.
+``--only splat-transform ffmpeg`` in the CPU image); the image builds do this so a
+recipe written for another tool version fails the build instead of failing a
+user's run. It needs no GPU: every check reads ``--help`` (and FFmpeg's encoder
+list, for encoders a template selects with ``-c:v``).
 """
 
 from __future__ import annotations
@@ -34,6 +35,9 @@ HELP: dict[str, tuple[tuple[str, ...], ...]] = {
     "splat_transform": (("splat-transform", "--help"),),
 }
 
+# Encoders a template selects with ``-c:v`` must be listed here.
+ENCODERS_HELP = ("ffmpeg", "-hide_banner", "-encoders")
+
 Runner = Callable[[Sequence[str]], str]
 
 
@@ -49,6 +53,27 @@ def options(template: Sequence[str]) -> list[str]:
     return [token for token in template if token.startswith("--")]
 
 
+def encoders(template: Sequence[str]) -> list[str]:
+    return [template[i + 1] for i, word in enumerate(template[:-1]) if word == "-c:v"]
+
+
+def _listed(word: str, text: str) -> bool:
+    return re.search(rf"(?<![\w.-]){re.escape(word)}(?![\w.-])", text) is not None
+
+
+def encoder_names(listing: str) -> set[str]:
+    """Names from ``ffmpeg -encoders`` lines such as ``V....D libwebp  <description>``.
+
+    Only the name column counts: descriptions mention other encoders' names.
+    """
+    names = set()
+    for line in listing.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] in "VAS":
+            names.add(parts[1])
+    return names
+
+
 def missing_options(
     run_help: Runner = _help_text, only: Sequence[str] | None = None
 ) -> dict[str, list[str]]:
@@ -62,13 +87,16 @@ def missing_options(
         if only is not None and commands[0][0] not in only:
             continue
         text = "\n".join(run_help(argv) for argv in commands)
-        absent = [
-            opt
-            for opt in options(ARGV[name])
-            if not re.search(rf"(?<![\w.-]){re.escape(opt)}(?![\w.-])", text)
-        ]
+        absent = [opt for opt in options(ARGV[name]) if not _listed(opt, text)]
         if absent:
             missing[name] = absent
+    wanted = {name: encoders(t) for name, t in ARGV.items() if encoders(t)}
+    if wanted and (only is None or ENCODERS_HELP[0] in only):
+        available = encoder_names(run_help(ENCODERS_HELP))
+        for name, names in wanted.items():
+            absent = [encoder for encoder in names if encoder not in available]
+            if absent:
+                missing[name] = absent
     return missing
 
 

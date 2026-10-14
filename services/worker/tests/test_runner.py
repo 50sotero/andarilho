@@ -184,9 +184,29 @@ def test_toolcheck_reports_options_the_tool_does_not_accept():
     from andarilho_worker.toolcheck import missing_options, options
 
     every_option = "\n".join(opt for template in ARGV.values() for opt in options(template))
+    every_option += "\n V....D libwebp              libwebp WebP image (codec webp)"
     assert missing_options(lambda argv: every_option) == {}
     # COLMAP 3.12 names the GPU switch SiftExtraction.use_gpu; a renamed option is caught,
     # and a longer option sharing the prefix does not hide it.
     stale = every_option.replace("--SiftExtraction.use_gpu", "--SiftExtraction.use_gpu_index")
     missing = missing_options(lambda argv: stale)
     assert missing == {"colmap_feature_extractor": ["--SiftExtraction.use_gpu"]}
+
+
+def test_toolcheck_reports_an_encoder_ffmpeg_lacks():
+    from andarilho_worker.recipes import ARGV
+    from andarilho_worker.toolcheck import ENCODERS_HELP, missing_options, options
+
+    every_option = "\n".join(opt for template in ARGV.values() for opt in options(template))
+
+    def tools(*encoder_lines: str):
+        listing = "\n".join(encoder_lines)
+        return lambda argv: listing if tuple(argv) == ENCODERS_HELP else every_option
+
+    webp = " V....D libwebp              libwebp WebP image (codec webp)"
+    anim = " V....D libwebp_anim         libwebp WebP image (codec webp)"
+    assert missing_options(tools(anim, webp)) == {}
+    # A longer encoder name sharing the prefix does not satisfy the check.
+    assert missing_options(tools(anim)) == {"ffmpeg_poster": ["libwebp"]}
+    assert missing_options(tools(anim), only=["splat-transform"]) == {}
+    assert missing_options(tools(anim), only=["ffmpeg"]) == {"ffmpeg_poster": ["libwebp"]}

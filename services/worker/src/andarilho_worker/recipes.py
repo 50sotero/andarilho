@@ -71,6 +71,13 @@ ARGV: dict[str, tuple[str, ...]] = {
         ":force_original_aspect_ratio=decrease:force_divisible_by=2",
         "-frames:v", "1", "-q:v", "2", "{output}",
     ),
+    # The scene's poster: one prepared (already metadata-free) frame as WebP.
+    "ffmpeg_poster": (
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+        "-i", "{input}", "-map_metadata", "-1",
+        "-vf", "scale=w='min({width},iw)':h=-2",
+        "-frames:v", "1", "-c:v", "libwebp", "-quality", "80", "{output}",
+    ),
     "colmap_feature_extractor": (
         "colmap", "feature_extractor", "--database_path", "{database}",
         "--image_path", "{images}", "--ImageReader.camera_model", "OPENCV",

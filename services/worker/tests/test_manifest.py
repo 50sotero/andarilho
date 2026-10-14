@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import subprocess
@@ -11,6 +12,7 @@ import pytest
 
 from andarilho_worker.validation import (
     canonical_json,
+    check_poster_asset,
     loads_strict,
     manifest_sha256,
     validate_manifest,
@@ -119,6 +121,29 @@ def test_rejects_spawn_outside_bounds_and_bad_hash(manifest):
     bad = copy.deepcopy(manifest)
     bad["assets"]["render"]["sha256"] = "0" * 64
     assert "ASSET_SHA256" in codes(validate_scene(bad, fetch))
+
+
+WEBP = b"RIFF" + (4).to_bytes(4, "little") + b"WEBP"
+
+
+def test_poster_is_checked_against_its_declared_format(manifest):
+    assert check_poster_asset(WEBP, "webp") == []
+    assert check_poster_asset(b"\xff\xd8\xff\xe0", "jpeg") == []
+    assert codes(check_poster_asset(b"\xff\xd8\xff\xe0", "webp")) == {"POSTER_ASSET"}
+    assert codes(check_poster_asset(b"RIFF\x04\x00\x00\x00WAVE", "webp")) == {"POSTER_ASSET"}
+    with_poster = copy.deepcopy(manifest)
+    prefix = with_poster["assets"]["render"]["key"].rsplit("/", 1)[0]
+    poster = {"key": f"{prefix}/poster.webp", "format": "webp", "bytes": len(WEBP),
+              "sha256": hashlib.sha256(WEBP).hexdigest()}  # fmt: skip
+    with_poster["assets"]["poster"] = poster
+
+    def fetch_with(data: bytes):
+        return lambda key: data if key.endswith("/poster.webp") else fetch(key)
+
+    assert validate_scene(with_poster, fetch_with(WEBP)) == []
+    jpeg = b"\xff\xd8\xff" + WEBP[3:]
+    poster.update(sha256=hashlib.sha256(jpeg).hexdigest())
+    assert codes(validate_scene(with_poster, fetch_with(jpeg))) == {"POSTER_ASSET"}
 
 
 def test_spawn_blocked_detected(manifest):

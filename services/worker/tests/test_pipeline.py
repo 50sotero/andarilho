@@ -9,6 +9,7 @@ import sys
 import threading
 import time
 import uuid
+from dataclasses import replace
 
 import pytest
 from psycopg.types.json import Jsonb
@@ -136,6 +137,43 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
     assert third["validation_state"] == "invalid"
     assert {f["code"] for f in third["validation_findings"]} & {"SPAWN_BLOCKED"}
     assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "succeeded"
+
+
+WEBP = b"RIFF" + (4).to_bytes(4, "little") + b"WEBP"
+
+
+def test_packaging_publishes_the_poster_and_carries_it_to_layout_revisions(
+    db, seed, store, settings
+):
+    def preparing(ctx):  # the synthetic recipe has no capture, so stand in for its poster
+        result = STAGES["preparing"](ctx)
+        key = ctx.attempt_key("poster.webp")
+        ctx.store.put_bytes(key, WEBP, "image/webp")
+        return replace(result, outputs={**result.outputs, "posterKey": key})
+
+    sup = Supervisor(db, store, settings, delay_fn=lambda attempt: 0.0,
+                     stages={**STAGES, "preparing": preparing})  # fmt: skip
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    assert all(status == "succeeded" for _, status in drain(db, sup))
+    rev = seed.one("SELECT * FROM scene_revisions")
+    assert rev["validation_state"] == "valid"
+    poster = rev["manifest"]["assets"]["poster"]
+    assert poster["key"] == f"tenants/{pid}/scenes/{rev['id']}/poster.webp"
+    assert poster["format"] == "webp" and poster["bytes"] == len(WEBP)
+    assert store.get_bytes(poster["key"]) == WEBP
+    arts = seed.all("SELECT kind FROM artifacts ORDER BY kind")
+    assert [a["kind"] for a in arts] == [
+        "scene_collision", "scene_manifest", "scene_poster", "scene_render"
+    ]  # fmt: skip
+
+    rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], copy.deepcopy(rev["layout"]))
+    assert [status for _, status in drain(db, sup)] == ["succeeded"] * 3
+    second = seed.one("SELECT validation_state, manifest FROM scene_revisions WHERE id = %s", rev2)
+    assert second["validation_state"] == "valid"
+    carried = second["manifest"]["assets"]["poster"]
+    assert carried["key"] == f"tenants/{pid}/scenes/{rev2}/poster.webp"
+    assert carried["sha256"] == poster["sha256"]
 
 
 def _scaled_layout(layout, k):

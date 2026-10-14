@@ -30,6 +30,8 @@ MAX_INLINE_BYTES = 256 * 1024 * 1024
 # 20-million-splat PLY with full spherical harmonics is about 4.6 GiB. The bound is
 # S3's single-PUT limit, which the conditional create in ``put_immutable`` relies on.
 MAX_RENDER_BYTES = 5 * 1024**3
+# A scene poster is one WebP still; packaging reads it into memory.
+MAX_POSTER_BYTES = 4 * 1024 * 1024
 
 
 def check_key(key: str) -> str:

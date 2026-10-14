@@ -12,7 +12,7 @@ import pytest
 from andarilho_worker import queue
 from andarilho_worker.errors import StageError
 from andarilho_worker.recipes import ARGV, RECIPES, recipe_for, render_argv
-from andarilho_worker.runner import RunResult
+from andarilho_worker.runner import ProcessFailed, RunResult
 from andarilho_worker.settings import Settings
 from andarilho_worker.stages import prepare as prepare_mod
 from andarilho_worker.stages.reconstruct import SparseModel, coverage_gate
@@ -89,12 +89,18 @@ class FakeMediaRunner:
     """Stands in for ffprobe/ffmpeg: records argv and writes plausible outputs."""
 
     def __init__(
-        self, codec: str = "h264", duration: float = 10.0, photo_sizes=None, frame_rate="30/1"
+        self,
+        codec: str = "h264",
+        duration: float = 10.0,
+        photo_sizes=None,
+        frame_rate="30/1",
+        poster_fails=False,
     ) -> None:
         self.calls: list[list[str]] = []
         self.codec, self.duration, self.frame_rate = codec, duration, frame_rate
         self.photo_sizes = list(photo_sizes or [(1600, 1200)])
         self.photos = 0
+        self.poster_fails = poster_fails
 
     def run(self, argv, *, timeout, check_cancelled=None, **kw):
         argv = [str(a) for a in argv]
@@ -118,6 +124,10 @@ class FakeMediaRunner:
                 texture = np.random.default_rng(3).integers(0, 256, (size, size), dtype=np.uint8)
                 flat = np.full((size, size), 128, dtype=np.uint8)
                 np.stack([texture if i % 3 == 1 else flat for i in range(count)]).tofile(out)
+            elif out.suffix == ".webp":
+                if self.poster_fails:
+                    raise ProcessFailed("ffmpeg exited with status 1")
+                out.write_bytes(b"RIFF" + (4).to_bytes(4, "little") + b"WEBP")
             elif "%05d" in out.name:
                 for i in range(1, count + 1):
                     frame = b"\xff\xd8\xff" + i.to_bytes(4, "big")  # remembers its candidate index
@@ -190,6 +200,14 @@ def test_prepare_extracts_bounded_frames_and_strips_metadata(
     stats = result["result_manifest"]["keyframes"][0]
     assert stats["candidates"] == 120 and stats["kept"] == 40
     assert stats["keptMedianSharpness"] > stats["medianSharpness"] == 0
+    # The poster is the sharpest kept frame of the middle half (all kept frames tie
+    # here, so the first of frames 10..29), encoded as WebP from the prepared frame.
+    (poster_call,) = [c for c in ffmpeg if c[-1].endswith(".webp")]
+    assert poster_call[poster_call.index("-i") + 1].endswith("frame_00011.jpg")
+    assert poster_call[poster_call.index("-c:v") + 1] == "libwebp"
+    assert "min(1280,iw)" in poster_call[poster_call.index("-vf") + 1]
+    assert result["result_manifest"]["poster"] == "00/frame_00011.jpg"
+    assert store.get_bytes(outputs["posterKey"])[8:12] == b"WEBP"
 
 
 def test_prepare_never_samples_above_the_native_frame_rate(db, seed, store, settings, monkeypatch):
@@ -199,13 +217,28 @@ def test_prepare_never_samples_above_the_native_frame_rate(db, seed, store, sett
     pid = seed.project()
     _preparing_job(seed, store, pid, photos=0)
     assert sup.execute(queue.claim(db, "w", "cpu")) == "succeeded"
-    (video_call,) = [c for c in fake.calls if c[0] == "ffmpeg"]  # no candidates to choose from
+    video_calls = [c for c in fake.calls if c[0] == "ffmpeg" and not c[-1].endswith(".webp")]
+    (video_call,) = video_calls  # no candidates to choose from
     assert "fps=1.0000" in video_call[video_call.index("-vf") + 1]
     assert int(video_call[video_call.index("-frames:v") + 1]) == 10  # one per source frame
     outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'camera_reconstruction'")[
         "input_manifest"
     ]["outputs"]
     assert outputs["frameCount"] == 10
+    poster = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'preparing'")
+    assert poster["result_manifest"]["poster"] == "00/frame_00006.jpg"  # unscored: the middle
+
+
+def test_prepare_continues_without_a_poster_when_encoding_fails(
+    db, seed, store, settings, monkeypatch
+):
+    monkeypatch.setattr(prepare_mod, "tool_available", lambda name: True)
+    sup = Supervisor(db, store, settings, runner=FakeMediaRunner(poster_fails=True))
+    pid = seed.project()
+    _preparing_job(seed, store, pid)
+    assert sup.execute(queue.claim(db, "w", "cpu")) == "succeeded"
+    nxt = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'camera_reconstruction'")
+    assert nxt["input_manifest"]["outputs"]["posterKey"] is None
 
 
 def test_prepare_groups_photos_by_dimensions(db, seed, store, settings, monkeypatch):

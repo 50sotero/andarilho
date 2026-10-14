@@ -49,3 +49,15 @@ def pick_sharpest(scores: np.ndarray, keep: int) -> list[int]:
     edges = np.floor(np.arange(keep + 1) * (n / keep)).astype(int)
     windows = zip(edges[:-1], edges[1:], strict=True)
     return [int(lo + np.argmax(scores[lo:hi])) for lo, hi in windows]
+
+
+def pick_poster(scores: np.ndarray | None, count: int) -> int:
+    """Index of the poster among ``count`` kept frames: the sharpest of the middle half.
+
+    A walkthrough's first and last seconds often face a door, the floor or the
+    person filming. Without scores the middle frame is used.
+    """
+    lo, hi = count // 4, count - count // 4
+    if scores is None or len(scores) != count or hi <= lo:
+        return count // 2
+    return int(lo + np.argmax(scores[lo:hi]))

@@ -215,6 +215,17 @@ def check_render_asset(data: bytes, fmt: str) -> list[Finding]:
     return [Finding("RENDER_ASSET", "unknown render format")]
 
 
+POSTER_MAGIC = {"png": (0, b"\x89PNG"), "jpeg": (0, b"\xff\xd8\xff"), "webp": (8, b"WEBP")}
+
+
+def check_poster_asset(data: bytes, fmt: str) -> list[Finding]:
+    """Check that a poster's leading bytes match its declared image format."""
+    offset, magic = POSTER_MAGIC[fmt]
+    if data[offset : offset + len(magic)] != magic or (fmt == "webp" and data[:4] != b"RIFF"):
+        return [Finding("POSTER_ASSET", f"poster is not a {fmt} image")]
+    return []
+
+
 def _measure(source: bytes | Path) -> tuple[int, str]:
     """Byte count and SHA-256 of an asset; a file is hashed in a stream."""
     if not isinstance(source, Path):
@@ -269,6 +280,9 @@ def validate_scene(
     if "render" in sources:
         render_format = manifest["assets"]["render"]["format"]
         findings += check_render_asset(_head(sources["render"]), render_format)
+    if "poster" in sources:
+        poster_format = manifest["assets"]["poster"]["format"]
+        findings += check_poster_asset(_head(sources["poster"]), poster_format)
     if "collision" in sources:
         collision = sources["collision"]  # generated, small: parsed in memory
         data = collision.read_bytes() if isinstance(collision, Path) else collision

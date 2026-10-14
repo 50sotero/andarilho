@@ -11,7 +11,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from andarilho_worker.artifacts import MAX_RENDER_BYTES, put_immutable, scene_prefix
+from andarilho_worker.artifacts import (
+    MAX_POSTER_BYTES,
+    MAX_RENDER_BYTES,
+    put_immutable,
+    scene_prefix,
+)
 from andarilho_worker.errors import StageError
 from andarilho_worker.manifest import asset_entry, build_manifest
 from andarilho_worker.stages.base import StageContext, StageResult, finish
@@ -24,6 +29,7 @@ GEOMETRY_SOURCE = {
 }
 CONTENT_TYPES = {"ply": "application/octet-stream", "sog": "application/octet-stream",
                  "spz": "application/octet-stream"}  # fmt: skip
+POSTER_TYPES = {"webp": "image/webp", "png": "image/png", "jpeg": "image/jpeg"}
 
 
 def _load(conn: Any, ctx: StageContext, revision_id: str) -> dict[str, Any]:
@@ -67,6 +73,16 @@ def _load(conn: Any, ctx: StageContext, revision_id: str) -> dict[str, Any]:
     return {"revision": revision, "run": run, "previous": previous, "original": original}
 
 
+def _poster_bytes(ctx: StageContext, key: str) -> bytes:
+    """The poster made by ``preparing`` (or carried from the previous revision)."""
+    info = ctx.store.head(key) if key.startswith(f"tenants/{ctx.project_id}/") else None
+    if info is None:
+        raise StageError("MISSING_INPUT", details={"missing": "poster"})
+    if info.size > MAX_POSTER_BYTES:
+        raise StageError("BUDGET_EXHAUSTED", "The scene poster is too large to package.")
+    return ctx.store.get_bytes(key)
+
+
 def scaled_render_transform(matrix: list[float], scale: float) -> list[float]:
     """Return ``S(scale) * matrix`` for a column-major 4x4 matrix (uniform, about the origin)."""
     out = [float(v) for v in matrix]
@@ -97,6 +113,8 @@ def run(ctx: StageContext) -> StageResult:
         matrix = prev["worldFromDecodedRender"]
         scale_status = prev["scaleStatus"]
         quality = prev["quality"]
+        prev_poster = prev["assets"].get("poster") or {}
+        poster_source, poster_format = prev_poster.get("key"), prev_poster.get("format", "webp")
         calibration = (revision["layout"] or {}).get("calibration")
         if calibration:
             # The layout was rescaled to a known distance: scale the splats with it so
@@ -117,6 +135,7 @@ def run(ctx: StageContext) -> StageResult:
             "disconnectedComponents": 0,
             "warnings": ["Synthetic scene: no capture was reconstructed."],
         }
+        poster_source, poster_format = out.get("posterKey"), "webp"
     ctx.progress("Packaging scene files.")
     source = ctx.store.head(source_key)
     if source is None:
@@ -135,6 +154,12 @@ def run(ctx: StageContext) -> StageResult:
     glb = ctx.store.get_bytes(str(ctx.output("collisionKey")))
     collision_key = prefix + "collision.glb"
     collision_info = put_immutable(ctx.store, collision_key, glb, "model/gltf-binary")
+    poster, poster_info = None, None
+    if poster_source:
+        poster_key = prefix + f"poster.{poster_format}"
+        image = _poster_bytes(ctx, str(poster_source))
+        poster_info = put_immutable(ctx.store, poster_key, image, POSTER_TYPES[poster_format])
+        poster = asset_entry(poster_key, image, poster_format)
 
     source = str(out.get("layoutSource", "user" if ctx.job.scene_revision_id else "proposal"))
     manifest = build_manifest(
@@ -146,7 +171,7 @@ def run(ctx: StageContext) -> StageResult:
         layout_revision=int(revision["layout_revision"]),
         render=render,
         collision=asset_entry(collision_key, glb, "glb"),
-        poster=None,
+        poster=poster,
         world_from_decoded_render=matrix,
         scale_status=scale_status,
         geometry_source=GEOMETRY_SOURCE[source],
@@ -163,6 +188,8 @@ def run(ctx: StageContext) -> StageResult:
         "manifest": {**asset_entry(manifest_key, manifest_blob, "json"),
                      "version": manifest_info.version},
     }  # fmt: skip
+    if poster is not None and poster_info is not None:
+        files["poster"] = {**poster, "version": poster_info.version}
     return finish(
         ctx,
         {"files": files},

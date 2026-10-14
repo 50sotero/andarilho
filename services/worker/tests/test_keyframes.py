@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import numpy as np
 
-from andarilho_worker.keyframes import laplacian_variance, pick_sharpest, sharpness_from_raw
+from andarilho_worker.keyframes import (
+    laplacian_variance,
+    pick_poster,
+    pick_sharpest,
+    sharpness_from_raw,
+)
 
 
 def _frames() -> np.ndarray:
@@ -38,3 +43,12 @@ def test_pick_sharpest_keeps_one_frame_per_window_in_order():
     assert pick_sharpest(scores, 0) == []
     picked = pick_sharpest(np.arange(1000.0), 400)
     assert len(picked) == 400 and picked == sorted(set(picked))
+
+
+def test_pick_poster_prefers_the_sharpest_frame_of_the_middle_half():
+    scores = np.array([9, 9, 1, 4, 7, 2, 1, 3, 9, 9], dtype=float)
+    assert pick_poster(scores, 10) == 4  # frames 2..7; the sharp ends are skipped
+    assert pick_poster(None, 10) == 5  # unscored: the middle frame
+    assert pick_poster(scores[:3], 10) == 5  # scores for other frames are ignored
+    assert pick_poster(np.array([3.0]), 1) == 0
+    assert pick_poster(None, 1) == 0

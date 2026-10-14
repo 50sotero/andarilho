@@ -10,7 +10,7 @@ supervision and output contracts as the worker, using a local object store.
 The geometry and packaging stages need the database and are not run; instead
 ``--out/bundle`` receives what they would package for review, built by the same
 functions: the render asset, the automatic single-room layout proposal, its
-collision GLB and a scene manifest, checked by the same scene validator (the
+collision GLB, the poster and a scene manifest, checked by the same scene validator (the
 viewer's dev page opens it with ``?bundle=``). A JSON report is written to
 ``--out``; the process exits non-zero if any stage fails or the bundle does not
 validate, so a broken toolchain cannot pass silently.
@@ -87,6 +87,12 @@ def write_bundle(
     collision_path = bundle / "collision.glb"
     collision_path.write_bytes(collision_glb(layout))
     files = {prefix + render_path.name: render_path, prefix + collision_path.name: collision_path}
+    poster = None
+    if outputs.get("posterKey"):
+        poster_path = bundle / "poster.webp"
+        store.download(str(outputs["posterKey"]), poster_path)
+        files[prefix + poster_path.name] = poster_path
+        poster = asset_entry(prefix + poster_path.name, poster_path, "webp")
     quality = {k: v for k, v in (outputs.get("coverage") or {}).items() if k != "registeredRatio"}
     manifest = build_manifest(
         scene_id=str(uuid.uuid4()),
@@ -99,7 +105,7 @@ def write_bundle(
             prefix + render_path.name, render_path, render_format, sha256=render_sha
         ),
         collision=asset_entry(prefix + collision_path.name, collision_path, "glb"),
-        poster=None,
+        poster=poster,
         world_from_decoded_render=outputs["worldFromDecodedRender"],
         scale_status=str(outputs["scaleStatus"]),
         geometry_source="proposal",
@@ -122,6 +128,7 @@ def write_bundle(
         "renderFile": f"{bundle.name}/{render_path.name}",
         "renderBytes": render_path.stat().st_size,
         "renderSha256": render_sha,
+        "posterFile": f"{bundle.name}/poster.webp" if poster else None,
         "bounds": manifest["bounds"],
         "spawn": manifest["spawn"],
         "findings": findings,

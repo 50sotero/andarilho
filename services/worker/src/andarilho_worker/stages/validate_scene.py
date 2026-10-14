@@ -91,8 +91,10 @@ def run(ctx: StageContext) -> StageResult:
 
     def commit(conn: Any, job: Any) -> None:
         ids = {}
-        for kind in ("render", "collision", "manifest"):
-            entry = files[kind]
+        for kind in ("render", "collision", "poster", "manifest"):
+            entry = files.get(kind)
+            if entry is None:  # the poster is optional
+                continue
             ids[kind] = insert_artifact(
                 conn,
                 project_id=ctx.project_id,

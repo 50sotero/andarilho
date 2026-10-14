@@ -8,7 +8,9 @@
   ``keyframeOversample`` times that rate and the sharpest of each consecutive
   window is kept (:mod:`andarilho_worker.keyframes`), so fast turns contribute
   their least blurred frames while coverage stays even in time;
-* every retained image keeps a source map entry (upload ID + timestamp).
+* every retained image keeps a source map entry (upload ID + timestamp);
+* one retained frame becomes the scene's poster (WebP, at most 1280 px wide): the
+  sharpest of the middle half of the first video, else the middle photo.
 
 Frames are grouped per source (``images/<nn>/``) so COLMAP can assign one camera
 per source instead of forcing a shared calibration onto unrelated cameras.
@@ -17,14 +19,21 @@ per source instead of forcing a shared calibration onto unrelated cameras.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
+from andarilho_worker.artifacts import MAX_POSTER_BYTES
 from andarilho_worker.errors import StageError
-from andarilho_worker.keyframes import SCORE_SIZE, pick_sharpest, sharpness_from_raw
+from andarilho_worker.keyframes import (
+    SCORE_SIZE,
+    pick_poster,
+    pick_sharpest,
+    sharpness_from_raw,
+)
 from andarilho_worker.media import (
     MAX_VIDEO_SECONDS,
     VIDEO_CODECS,
@@ -32,11 +41,14 @@ from andarilho_worker.media import (
     parse_ffprobe,
 )
 from andarilho_worker.recipes import render_argv
-from andarilho_worker.runner import ProcessFailed, tool_available
+from andarilho_worker.runner import ProcessFailed, ProcessTimeout, tool_available
 from andarilho_worker.stages.base import StageContext, StageResult, finish
+
+log = logging.getLogger(__name__)
 
 PROBE_TIMEOUT = 120
 MAX_CANDIDATES_PER_FRAME = 4  # bounds decode work and scratch for keyframe candidates
+POSTER_WIDTH = 1280
 
 
 def probe_video(ctx: StageContext, path: Path) -> dict[str, Any]:
@@ -97,8 +109,10 @@ def extract_keyframes(
     keep: int,
     long_edge: int,
     timeout: float,
-) -> tuple[list[float], dict[str, Any]]:
-    """The sharpest candidate of each window, renamed in order; returns offsets and stats.
+) -> tuple[list[float], dict[str, Any], np.ndarray]:
+    """The sharpest candidate of each window, renamed in order.
+
+    Returns the kept frames' offsets, selection stats and the kept frames' sharpness.
 
     The candidates and their tiny grayscale copies come from the same ``fps``
     filter, so candidate ``i`` of both decodes is the same source frame.
@@ -142,7 +156,35 @@ def extract_keyframes(
         "medianSharpness": round(float(np.median(scores[:n])), 1) if n else None,
         "keptMedianSharpness": round(float(np.median(scores[picked])), 1) if picked else None,
     }
-    return [i / rate for i in picked], stats
+    return [i / rate for i in picked], stats, scores[picked]
+
+
+def is_webp(head: bytes) -> bool:
+    return len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP"
+
+
+def make_poster(ctx: StageContext, frame: Path, work: Path) -> str | None:
+    """Encode ``frame`` as the poster and store it with the attempt; its key or None.
+
+    The poster is only the viewer's fallback image, so a failed encode is logged
+    and the run continues without one instead of failing the reconstruction.
+    """
+    out = work / "poster.webp"
+    try:
+        ctx.run(
+            render_argv("ffmpeg_poster", input=frame, width=POSTER_WIDTH, output=out),
+            timeout=120,
+        )
+    except (ProcessFailed, ProcessTimeout) as exc:
+        log.warning("poster encoding failed: %s", type(exc).__name__)
+        return None
+    size = out.stat().st_size if out.is_file() else 0
+    if not 0 < size <= MAX_POSTER_BYTES or not is_webp(out.read_bytes()[:12]):
+        log.warning("poster encoding produced no usable WebP (%d bytes)", size)
+        return None
+    key = ctx.attempt_key("poster.webp")
+    ctx.store.put_file(key, out, "image/webp")
+    return key
 
 
 def run(ctx: StageContext) -> StageResult:
@@ -185,6 +227,8 @@ def run(ctx: StageContext) -> StageResult:
     source_map: dict[str, dict[str, Any]] = {}
     sharpness: list[dict[str, Any]] = []
     oversample = max(1, int(params.get("keyframeOversample", 1)))
+    poster_frames: list[Path] = []  # the first video's kept frames, in order
+    poster_scores: np.ndarray | None = None
     remaining = budget
     for index, video in enumerate(videos):
         if remaining <= 0:
@@ -203,12 +247,13 @@ def run(ctx: StageContext) -> StageResult:
             candidates = min(candidates, int(duration * native))
         ctx.progress("Extracting frames.", source=index, frames=want)
         timeout = max(300.0, duration * 4)
+        kept_scores = None
         if candidates <= want:
             take = extract_frames(
                 ctx, local[video["uploadId"]], folder, rate, want, long_edge, timeout
             )
         else:
-            take, stats = extract_keyframes(
+            take, stats, kept_scores = extract_keyframes(
                 ctx,
                 local[video["uploadId"]],
                 folder,
@@ -220,6 +265,9 @@ def run(ctx: StageContext) -> StageResult:
                 timeout,
             )
             sharpness.append({"source": index, **stats})
+        if not poster_frames:
+            poster_frames = sorted(folder.glob("frame_*.jpg"))
+            poster_scores = kept_scores
         for k, seconds in enumerate(take):
             source_map[f"{index:02d}/frame_{k + 1:05d}.jpg"] = {
                 "uploadId": video["uploadId"],
@@ -266,6 +314,10 @@ def run(ctx: StageContext) -> StageResult:
     ctx.store.put_bytes(
         source_map_key, json.dumps(source_map, sort_keys=True).encode(), "application/json"
     )
+    if not poster_frames:  # photos only
+        poster_frames = frames
+    poster = poster_frames[pick_poster(poster_scores, len(poster_frames))]
+    poster_key = make_poster(ctx, poster, work)
     return finish(
         ctx,
         {
@@ -273,11 +325,13 @@ def run(ctx: StageContext) -> StageResult:
             "effectiveFps": round(fps, 4),
             "videos": metas,
             "keyframes": sharpness,
+            "poster": poster.relative_to(images).as_posix() if poster_key else None,
         },
         outputs={
             "frameCount": len(frames),
             "framesPrefix": prefix,
             "frameNames": sorted(source_map),
             "sourceMapKey": source_map_key,
+            "posterKey": poster_key,
         },
     )
