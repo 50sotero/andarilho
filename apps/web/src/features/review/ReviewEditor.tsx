@@ -576,11 +576,14 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     : [0, 0];
 
   async function save() {
-    if (!layout || !revision || !sceneId || !etag) return;
+    // The base is the revision the canvas was edited from, never a newer one seen by
+    // polling: the server then refuses a stale canvas instead of stacking it on top.
+    const baseRevisionId = shownRef.current;
+    if (!layout || !baseRevisionId || !sceneId || !etag) return;
     setBusy(true);
     setError(null);
     try {
-      const result = await api.saveLayout(sceneId, revision.id, layout, etag);
+      const result = await api.saveLayout(sceneId, baseRevisionId, layout, etag);
       setStatus("Saved as a new draft revision. Validating the geometry...");
       // The canvas now shows exactly the revision that was just saved.
       shownRef.current = result.data.sceneRevisionId;
@@ -642,6 +645,7 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   }
 
   const problems = layoutProblems(layout);
+  const stale = revision.id !== shownRevisionId;
   const canApprove =
     !dirty &&
     revision.validationState === "valid" &&
@@ -677,7 +681,10 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
             ) : null}
           </div>
           <div className="flex flex-wrap gap-2">
-            <Button onClick={() => void save()} disabled={!dirty || busy || problems.length > 0}>
+            <Button
+              onClick={() => void save()}
+              disabled={!dirty || busy || stale || problems.length > 0}
+            >
               {busy ? "Working..." : "Save as new revision"}
             </Button>
             <Button variant="secondary" onClick={() => void discard()} disabled={busy}>
@@ -691,10 +698,10 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
         <p aria-live="polite" className="mt-2 text-sm text-teal-800 dark:text-teal-300">
           {status}
         </p>
-        {revision.id !== shownRevisionId ? (
+        {stale ? (
           <p role="status" className="mt-2 text-sm text-amber-800 dark:text-amber-300">
             Someone saved revision {revision.revision} while you were editing. Discard your changes
-            to see it before approving.
+            to see it before saving or approving.
           </p>
         ) : null}
         <div className="mt-2">

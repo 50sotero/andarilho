@@ -153,9 +153,10 @@ class Supervisor:
             ceiling = min(ceiling, float(row["max_seconds"]))
         return ceiling - float(row["used"])
 
-    def _recipe(self, job: ClaimedJob) -> Recipe | None:
+    def _recipe(self, job: ClaimedJob) -> tuple[Recipe | None, str]:
+        """The recipe to execute and the digest to record as the scene's provenance."""
         if not job.run_id:
-            return None
+            return None, ""
         run = self._read(
             lambda c: c.execute(
                 "SELECT quality, recipe_name, recipe_digest FROM reconstruction_runs WHERE id = %s",
@@ -170,6 +171,17 @@ class Supervisor:
             and [{"stage": d.get("stage"), "capability": d.get("capability")} for d in declared]
             != pinned
         )
+        if job.scene_revision_id is not None:
+            # Layout revisions of a finished scene run the current layout stages, whatever
+            # recipe reconstructed it: refusing would freeze every scene made before a
+            # recipe change. The scene keeps the reconstruction's digest as provenance.
+            if run["recipe_digest"] != recipe.digest:
+                log.info(
+                    "layout job %s runs current stages for a scene built with recipe %s",
+                    job.id,
+                    run["recipe_digest"],
+                )
+            return recipe, run["recipe_digest"]
         if run["recipe_digest"] != recipe.digest or stages_differ:
             # The run must record exactly the recipe that executes (provenance); a
             # mismatch means API/worker version skew, so refuse rather than guess.
@@ -180,7 +192,7 @@ class Supervisor:
                 recipe.digest,
             )
             raise RecipeMismatch(run["recipe_digest"])
-        return recipe
+        return recipe, recipe.digest
 
     def _next(self, job: ClaimedJob, recipe: Recipe | None, result: StageResult) -> NextJob | None:
         if recipe is None or not job.run_id:
@@ -201,9 +213,9 @@ class Supervisor:
     # -- execution -------------------------------------------------------------
     def execute(self, job: ClaimedJob) -> str:
         stage_fn = self.stages.get(job.stage)
-        recipe = None
+        recipe, provenance_digest = None, ""
         try:
-            recipe = self._recipe(job)
+            recipe, provenance_digest = self._recipe(job)
         except RecipeMismatch:
             return self._fail(job, error_body("RECIPE_MISMATCH"), None, 0.0)
         except KeyError:
@@ -254,7 +266,7 @@ class Supervisor:
             attempt=job.attempts,
             fencing_token=job.fencing_token,
             scratch=scratch,
-            recipe_digest=recipe.digest if recipe else "",
+            recipe_digest=provenance_digest,
             recipe=recipe.as_dict() if recipe else {},
             input_manifest=job.input_manifest,
             deadline=deadline,

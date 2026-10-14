@@ -376,6 +376,25 @@ def fail_run(conn: psycopg.Connection, run_id: str, error: Mapping[str, Any]) ->
     return True
 
 
+def fail_revision(conn: psycopg.Connection, scene_revision_id: str | None) -> None:
+    """A layout revision whose job failed for good stops pending: mark it invalid.
+
+    Otherwise the editor would show "validating" forever. The finding is safe to
+    show and tells the user how to recover (saving again queues a new pipeline).
+    """
+    if scene_revision_id is None:
+        return
+    finding = {
+        "code": "LAYOUT_PROCESSING_FAILED",
+        "message": "Processing this layout failed. Save the layout again to retry.",
+    }
+    conn.execute(
+        "UPDATE scene_revisions SET validation_state = 'invalid', validation_findings = %s "
+        "WHERE id = %s AND validation_state = 'pending'",
+        (Jsonb([finding]), scene_revision_id),
+    )
+
+
 def _insert_next(conn: psycopg.Connection, job: ClaimedJob, nxt: NextJob) -> bool:
     try:
         with conn.transaction():  # savepoint: a duplicate must not abort the completion
@@ -491,6 +510,8 @@ def fail_job(
         add_usage(conn, job, usage_seconds)
         if job.run_level:
             fail_run(conn, job.run_id, error)  # type: ignore[arg-type]
+        else:
+            fail_revision(conn, job.scene_revision_id)
     return "failed"
 
 
@@ -530,6 +551,8 @@ def retry_job(
             _event(conn, job.id, job.stage, "failed", "Retries exhausted.")
             if job.run_level:
                 fail_run(conn, job.run_id, final)  # type: ignore[arg-type]
+            else:
+                fail_revision(conn, job.scene_revision_id)
             return "failed"
         conn.execute(
             """
@@ -632,6 +655,8 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                 )
             if run_id and row["state"] == "failed" and row["scene_revision_id"] is None:
                 fail_run(conn, run_id, lost)
+            elif row["state"] == "failed" and row["scene_revision_id"] is not None:
+                fail_revision(conn, str(row["scene_revision_id"]))
             elif run_id and row["state"] == "cancelled":
                 finalize_run_if_cancelled(conn, run_id)
             outcomes.append(ReapOutcome(job_id, run_id, row["state"]))

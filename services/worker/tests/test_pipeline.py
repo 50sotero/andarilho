@@ -563,6 +563,38 @@ def test_run_with_unknown_recipe_digest_is_rejected(db, seed, sup):
     assert run["status"] == "failed" and run["error"]["code"] == "RECIPE_MISMATCH"
 
 
+def test_layout_revision_of_a_scene_built_by_an_older_recipe(db, seed, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    rev = seed.one("SELECT * FROM scene_revisions")
+    # A deployment changed the recipe after this scene was reconstructed.
+    seed.exec("UPDATE reconstruction_runs SET recipe_digest = 'sha256:older' WHERE id = %s", run_id)
+    rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], rev["layout"])
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    second = seed.one("SELECT validation_state, manifest FROM scene_revisions WHERE id = %s", rev2)
+    assert second["validation_state"] == "valid"
+    # The scene keeps the reconstruction's recipe as provenance.
+    assert second["manifest"]["provenance"]["recipeDigest"] == "sha256:older"
+
+
+def test_layout_job_out_of_retries_marks_the_revision_invalid(db, seed, store, settings, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    sup = Supervisor(db, store, settings, stages={**STAGES, "geometry_proposal": _transient_stage},
+                     delay_fn=lambda attempt: 0.0)  # fmt: skip
+    rev = seed.one("SELECT * FROM scene_revisions")
+    rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], rev["layout"])
+    seed.exec("UPDATE jobs SET max_attempts = 2 WHERE scene_revision_id = %s", rev2)
+    assert [d[1] for d in drain(db, sup)] == ["retry_wait", "failed"]
+    row = seed.one("SELECT validation_state, validation_findings FROM scene_revisions "
+                   "WHERE id = %s", rev2)  # fmt: skip
+    assert row["validation_state"] == "invalid"
+    assert row["validation_findings"][0]["code"] == "LAYOUT_PROCESSING_FAILED"
+    assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "succeeded"
+
+
 def test_concurrent_layout_revisions_do_not_share_intermediates(db, seed, sup):
     pid = seed.project()
     run_id, _ = seed.run(pid, quality="synthetic")
