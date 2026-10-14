@@ -15,6 +15,13 @@ export interface Bounds {
   max: [number, number, number];
 }
 
+/** User-confirmed metric calibration. ``render_scale`` is the cumulative uniform scale, about the world origin, applied to the run's original render frame. It is absolute rather than relative to the previous revision, so re-saving a layout never compounds it. */
+export interface Calibration {
+  method: "known_distance";
+  renderScale: number;
+  referenceLength?: number | null;
+}
+
 export interface CollisionAsset {
   key: string;
   bytes: number;
@@ -50,6 +57,7 @@ export interface Layout {
   obstacles?: Obstacle[];
   landmarks?: Landmark[];
   spawn: LayoutSpawn;
+  calibration?: Calibration | null;
 }
 
 export interface LayoutFloor {

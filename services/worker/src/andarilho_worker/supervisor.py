@@ -129,6 +129,26 @@ class Supervisor:
         with self.db.transaction() as conn:
             return fn(conn)
 
+    def _remaining_run_seconds(self, job: ClaimedJob) -> float:
+        row = self._read(
+            lambda c: c.execute(
+                """
+                SELECT (r.resource_budget ->> 'maxSeconds')::float AS max_seconds,
+                       COALESCE(l.actual_cpu_seconds + l.actual_gpu_seconds, 0) AS used
+                FROM reconstruction_runs r
+                LEFT JOIN usage_ledger l ON l.run_id = r.id
+                WHERE r.id = %s
+                """,
+                (job.run_id,),
+            ).fetchone()
+        )
+        ceiling = float(self.settings.run_max_seconds)
+        if row is None:
+            return ceiling
+        if row["max_seconds"] is not None:
+            ceiling = min(ceiling, float(row["max_seconds"]))
+        return ceiling - float(row["used"])
+
     def _recipe(self, job: ClaimedJob) -> Recipe | None:
         if not job.run_id:
             return None
@@ -189,6 +209,13 @@ class Supervisor:
         if recipe is not None and job.stage in recipe.stage_names():
             timeout = recipe.spec(job.stage).timeout_seconds
         timeout = min(timeout, self.settings.run_max_seconds)
+        if job.run_id:
+            # The run budget is a ceiling for the whole run, not per stage: subtract
+            # the seconds every earlier stage and attempt already consumed.
+            remaining = self._remaining_run_seconds(job)
+            if remaining <= 0:
+                return self._fail(job, error_body("BUDGET_EXHAUSTED"), None, 0.0)
+            timeout = min(timeout, remaining)
         deadline = datetime.now(UTC) + timedelta(seconds=timeout)
         token = CancellationToken(deadline)
         with self._tokens_lock:

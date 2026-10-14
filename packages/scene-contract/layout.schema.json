@@ -3,6 +3,41 @@
   "$id": "https://andarilho.dev/schemas/layout/1.0.json",
   "x-schema-version": "1.0",
   "$defs": {
+    "Calibration": {
+      "additionalProperties": false,
+      "description": "User-confirmed metric calibration.\n\n``render_scale`` is the cumulative uniform scale, about the world origin,\napplied to the run's original render frame. It is absolute rather than\nrelative to the previous revision, so re-saving a layout never compounds it.",
+      "properties": {
+        "method": {
+          "const": "known_distance",
+          "title": "Method",
+          "type": "string"
+        },
+        "renderScale": {
+          "exclusiveMinimum": 0,
+          "title": "Renderscale",
+          "type": "number"
+        },
+        "referenceLength": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Referencelength"
+        }
+      },
+      "required": [
+        "method",
+        "renderScale"
+      ],
+      "title": "Calibration",
+      "type": "object"
+    },
     "Landmark": {
       "additionalProperties": false,
       "properties": {
@@ -393,6 +428,17 @@
     },
     "spawn": {
       "$ref": "#/$defs/LayoutSpawn"
+    },
+    "calibration": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Calibration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
     }
   },
   "required": [

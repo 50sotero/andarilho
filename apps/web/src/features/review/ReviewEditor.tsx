@@ -415,6 +415,10 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
       active = false;
     };
   }, [sceneId, revisionId]);
+  // Never show an envelope from an earlier revision: while a new save is pending
+  // or after it fails validation there is no current preview.
+  const preview =
+    envelope && revisionId && envelope.sceneRevisionId === revisionId ? envelope : null;
 
   function edit(next: Layout) {
     setLayout(next);
@@ -677,9 +681,9 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
           and obstacles line up with the captured scene.
         </p>
         <div className="mt-3">
-          {envelope ? (
+          {preview ? (
             <ViewerClient
-              envelope={envelope}
+              envelope={preview}
               title={detail?.project.title ?? "this place"}
               allowCollisionOverlay
             />

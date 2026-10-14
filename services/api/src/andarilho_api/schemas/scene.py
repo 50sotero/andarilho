@@ -259,6 +259,19 @@ class LayoutSpawn(Contract):
     floor_id: Id
 
 
+class Calibration(Contract):
+    """User-confirmed metric calibration.
+
+    ``render_scale`` is the cumulative uniform scale, about the world origin,
+    applied to the run's original render frame. It is absolute rather than
+    relative to the previous revision, so re-saving a layout never compounds it.
+    """
+
+    method: Literal["known_distance"]
+    render_scale: Positive
+    reference_length: Positive | None = None
+
+
 class Layout(Contract):
     schema_version: Literal["1.0"]
     floors: Annotated[list[LayoutFloor], Field(min_length=1, max_length=16)]
@@ -267,6 +280,7 @@ class Layout(Contract):
     obstacles: Annotated[list[Obstacle], Field(max_length=1024)] = Field(default_factory=list)
     landmarks: Annotated[list[Landmark], Field(max_length=256)] = Field(default_factory=list)
     spawn: LayoutSpawn
+    calibration: Calibration | None = None
 
     @model_validator(mode="after")
     def _references(self) -> Layout:

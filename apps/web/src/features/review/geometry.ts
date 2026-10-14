@@ -143,7 +143,10 @@ export function layoutProblems(layout: Layout): LayoutProblem[] {
   return problems;
 }
 
-/** Uniformly scales all horizontal coordinates and heights about the origin. */
+/**
+ * Uniformly scales every coordinate and height about the world origin and records
+ * the cumulative calibration, so the worker scales the splats by the same amount.
+ */
 export function scaleLayout(layout: Layout, factor: number): Layout {
   if (!(factor > 0) || !Number.isFinite(factor)) return layout;
   const s = (p: [number, number]): [number, number] => [p[0] * factor, p[1] * factor];
@@ -160,13 +163,20 @@ export function scaleLayout(layout: Layout, factor: number): Layout {
       start: s(w.start),
       end: s(w.end),
       thickness: w.thickness * factor,
+      height: w.height * factor,
     })),
     openings: layout.openings?.map((o) => ({
       ...o,
       offset: o.offset * factor,
       width: o.width * factor,
+      bottom: (o.bottom ?? 0) * factor,
+      top: o.top * factor,
     })),
-    obstacles: layout.obstacles?.map((o) => ({ ...o, footprint: o.footprint.map(s) })),
+    obstacles: layout.obstacles?.map((o) => ({
+      ...o,
+      footprint: o.footprint.map(s),
+      height: o.height * factor,
+    })),
     landmarks: layout.landmarks?.map((l) => ({
       ...l,
       worldPoint: [l.worldPoint[0] * factor, l.worldPoint[1] * factor, l.worldPoint[2] * factor],
@@ -178,6 +188,10 @@ export function scaleLayout(layout: Layout, factor: number): Layout {
         layout.spawn.feet[1] * factor,
         layout.spawn.feet[2] * factor,
       ],
+    },
+    calibration: {
+      method: "known_distance",
+      renderScale: (layout.calibration?.renderScale ?? 1) * factor,
     },
   };
 }

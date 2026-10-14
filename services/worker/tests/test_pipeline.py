@@ -137,6 +137,59 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
     assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "succeeded"
 
 
+def _scaled_layout(layout, k):
+    out = copy.deepcopy(layout)
+    s2 = lambda p: [p[0] * k, p[1] * k]  # noqa: E731
+    for floor in out["floors"]:
+        floor["elevation"] *= k
+        floor["polygons"] = [[s2(p) for p in ring] for ring in floor["polygons"]]
+        floor["holes"] = [[s2(p) for p in ring] for ring in floor.get("holes", [])]
+    for wall in out["walls"]:
+        wall.update(start=s2(wall["start"]), end=s2(wall["end"]),
+                    thickness=wall["thickness"] * k, height=wall["height"] * k)  # fmt: skip
+    for o in out["openings"]:
+        o.update(offset=o["offset"] * k, width=o["width"] * k,
+                 bottom=o.get("bottom", 0) * k, top=o["top"] * k)  # fmt: skip
+    for o in out["obstacles"]:
+        o.update(footprint=[s2(p) for p in o["footprint"]], height=o["height"] * k)
+    out["spawn"]["feet"] = [v * k for v in out["spawn"]["feet"]]
+    out["calibration"] = {"method": "known_distance", "renderScale": k}
+    return out
+
+
+def _save_layout(seed, rev, pid, run_id, number, base_id, layout):
+    rid = str(uuid.uuid4())
+    seed.exec(
+        "INSERT INTO scene_revisions (id, scene_id, project_id, run_id, base_revision_id, revision, "
+        "layout_revision, layout, validation_state, approval_state, created_by) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending', 'draft', 'user-1')",
+        rid, rev["scene_id"], pid, run_id, base_id, number, number, Jsonb(layout),
+    )  # fmt: skip
+    seed.job(pid, "geometry_proposal", {"sceneRevisionId": rid, "layoutSource": "user"},
+             run_id=run_id, scene_revision_id=rid)  # fmt: skip
+    return rid
+
+
+def test_calibration_scales_render_transform_without_compounding(db, seed, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    rev = seed.one("SELECT * FROM scene_revisions")
+    assert rev["manifest"]["worldFromDecodedRender"][0] == 1
+    calibrated = _scaled_layout(rev["layout"], 2.0)
+    rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], calibrated)
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    m2 = seed.one("SELECT manifest FROM scene_revisions WHERE id = %s", rev2)["manifest"]
+    matrix = m2["worldFromDecodedRender"]
+    assert [matrix[0], matrix[5], matrix[10], matrix[15]] == [2, 2, 2, 1]
+    assert m2["scaleStatus"] == "user_measured"
+    # Re-saving the same calibrated layout must not scale the splats again.
+    rev3 = _save_layout(seed, rev, pid, run_id, 3, rev2, calibrated)
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    m3 = seed.one("SELECT manifest FROM scene_revisions WHERE id = %s", rev3)["manifest"]
+    assert m3["worldFromDecodedRender"] == matrix
+
+
 def test_invalid_layout_rejected_at_geometry_stage(db, seed, sup):
     pid = seed.project()
     run_id, _ = seed.run(pid, quality="synthetic")
@@ -223,6 +276,18 @@ def test_transient_failures_exhaust_retries(db, seed, store, settings):
     run = seed.one("SELECT status, error FROM reconstruction_runs")
     assert run["status"] == "failed" and run["error"]["code"] == "TRANSIENT_FAILURE"
     assert seed.one("SELECT state FROM usage_ledger")["state"] == "released"
+
+
+def test_run_budget_is_shared_across_stages(db, seed, store, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    budget = seed.one("SELECT resource_budget FROM reconstruction_runs")["resource_budget"]
+    # Earlier stages already consumed the whole run ceiling.
+    seed.exec("UPDATE usage_ledger SET actual_cpu_seconds = %s", int(budget["maxSeconds"]))
+    done = drain(db, sup)
+    assert done == [("validating", "failed")]
+    run = seed.one("SELECT status, error FROM reconstruction_runs WHERE id = %s", run_id)
+    assert run["status"] == "failed" and run["error"]["code"] == "BUDGET_EXHAUSTED"
 
 
 # ---------------------------------------------------------------------------

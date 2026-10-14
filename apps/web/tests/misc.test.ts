@@ -74,7 +74,10 @@ describe("layout geometry", () => {
     const scaled = scaleLayout(layout, 2);
     expect(scaled.floors[0]!.polygons[0]![1]).toEqual([8, -5]);
     expect(scaled.walls![0]!.thickness).toBeCloseTo(0.2);
-    expect(scaled.walls![0]!.height).toBe(layout.walls![0]!.height);
+    expect(scaled.walls![0]!.height).toBeCloseTo(layout.walls![0]!.height * 2);
+    expect(scaled.calibration).toEqual({ method: "known_distance", renderScale: 2 });
+    // Calibration is cumulative and absolute, so the splats are never rescaled twice.
+    expect(scaleLayout(scaled, 1.5).calibration?.renderScale).toBeCloseTo(3);
   });
   it("adds openings inside walls and removes a wall's openings with it", () => {
     const withOpening = addOpening(layout, 0);

@@ -53,7 +53,27 @@ def _load(conn: Any, ctx: StageContext, revision_id: str) -> dict[str, Any]:
                 revision["base_revision_id"],
             ),
         ).fetchone()
-    return {"revision": revision, "run": run, "previous": previous}
+    original = None
+    if revision is not None and ctx.job.scene_revision_id:
+        # The first packaged revision carries the run's original render frame.
+        original = conn.execute(
+            """
+            SELECT manifest FROM scene_revisions
+            WHERE project_id = %s AND scene_id = %s AND manifest IS NOT NULL
+            ORDER BY revision ASC LIMIT 1
+            """,
+            (ctx.project_id, revision["scene_id"]),
+        ).fetchone()
+    return {"revision": revision, "run": run, "previous": previous, "original": original}
+
+
+def scaled_render_transform(matrix: list[float], scale: float) -> list[float]:
+    """Return ``S(scale) * matrix`` for a column-major 4x4 matrix (uniform, about the origin)."""
+    out = [float(v) for v in matrix]
+    for column in range(4):
+        for row in range(3):
+            out[column * 4 + row] *= scale
+    return out
 
 
 def run(ctx: StageContext) -> StageResult:
@@ -77,6 +97,15 @@ def run(ctx: StageContext) -> StageResult:
         matrix = prev["worldFromDecodedRender"]
         scale_status = prev["scaleStatus"]
         quality = prev["quality"]
+        calibration = (revision["layout"] or {}).get("calibration")
+        if calibration:
+            # The layout was rescaled to a known distance: scale the splats with it so
+            # collision and appearance stay aligned, and record the measured scale.
+            original = (data["original"] or previous)["manifest"]
+            matrix = scaled_render_transform(
+                original["worldFromDecodedRender"], float(calibration["renderScale"])
+            )
+            scale_status = "user_measured"
     else:
         source_key = str(ctx.output("renderKey"))
         render_format = str(ctx.output("renderFormat"))
