@@ -4,6 +4,8 @@ README.md
 **/.next
 **/dist
 **/coverage
+**/test-results
+**/playwright-report
 services/
 packages/scene-contract/scene.schema.json
 packages/scene-contract/layout.schema.json

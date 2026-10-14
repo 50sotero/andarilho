@@ -36,6 +36,30 @@ jobs:
           NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
           NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: example-publishable-key
 
+  viewer-e2e:
+    # The viewer dev page in headless Chromium against the synthetic fixture.
+    # WebGL renders in software, so this stays CPU-only.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: install chromium
+        run: pnpm --filter @andarilho/viewer exec playwright install --with-deps chromium
+      - name: viewer walk-through checks
+        run: pnpm --filter @andarilho/viewer e2e
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: viewer-e2e-report
+          path: |
+            packages/viewer/playwright-report/
+            packages/viewer/test-results/
+          retention-days: 7
+
   python:
     runs-on: ubuntu-24.04
     services:
