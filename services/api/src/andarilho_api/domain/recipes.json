@@ -2,7 +2,7 @@
   "generatedFrom": "services/worker/src/andarilho_worker/recipes.py",
   "preview": {
     "name": "preview-v1",
-    "digest": "sha256:1767d7530744f29be1f07c2f202622767d8931352a2eada4ff683f16cc3d7612",
+    "digest": "sha256:2f1aa5c9966354d0c0b08d79a8bd04201bb2ae3721c025ccd6d5db7f4f6cdb38",
     "stages": [
       {
         "stage": "validating",
@@ -48,13 +48,14 @@
       "keyframeOversample": 3,
       "sequentialOverlap": 20,
       "seed": 42,
+      "renderShDegree": 1,
       "iterations": 7000,
       "saveSteps": 2000
     }
   },
   "standard": {
     "name": "standard-v1",
-    "digest": "sha256:ed05be1ad2de8caee749954044364122b54b16207c17e02e8639d89a9e8b4917",
+    "digest": "sha256:839541620262bb43e25b7cf6153cec9b0a3b4989d0f7d21417ff80f5a1a462c1",
     "stages": [
       {
         "stage": "validating",
@@ -100,13 +101,14 @@
       "keyframeOversample": 3,
       "sequentialOverlap": 20,
       "seed": 42,
+      "renderShDegree": 1,
       "iterations": 30000,
       "saveSteps": 5000
     }
   },
   "synthetic": {
     "name": "synthetic-v1",
-    "digest": "sha256:b0998f3151ed102f2fb1aaf359b0e945d6ce6ae015aec930bc863e299ac1c2ad",
+    "digest": "sha256:5f067358f05cacfc682b6dcd9e49f60133cbb2a61e46b034224fe769b1f32377",
     "stages": [
       {
         "stage": "validating",

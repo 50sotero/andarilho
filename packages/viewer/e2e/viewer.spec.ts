@@ -1,11 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
 
 // The synthetic two-room fixture (packages/scene-contract/fixtures): outer walls
-// at x = ±4 and z = ±2.5, a divider at x = 0 with one door, spawn feet [2, 0, 0]
-// facing -x.
+// at x = ±4 and z = ±2.5, a divider at x = 0 with one door, a table in the other
+// room, spawn feet [2, 0, 0] facing -x. The walker's radius is 0.25 m.
 const WALL_X = 4;
 const WALL_Z = 2.5;
 const SPAWN: [number, number, number] = [2, 0, 0];
+const TABLE = { minX: -2.5, maxX: -1.5, minZ: -1, maxZ: 0 };
+const RADIUS = 0.25;
 
 type Vec3 = [number, number, number];
 
@@ -29,6 +31,13 @@ function expectInsideTheWalls(p: Vec3): void {
   expect(Math.abs(p[0])).toBeLessThan(WALL_X);
   expect(Math.abs(p[2])).toBeLessThan(WALL_Z);
   expect(Math.abs(p[1])).toBeLessThan(0.25); // on the floor, not falling
+}
+
+/** Horizontal distance from the feet to the table's footprint (0 when on it). */
+function tableClearance(p: Vec3): number {
+  const dx = Math.max(TABLE.minX - p[0], 0, p[0] - TABLE.maxX);
+  const dz = Math.max(TABLE.minZ - p[2], 0, p[2] - TABLE.maxZ);
+  return Math.hypot(dx, dz);
 }
 
 async function hold(page: Page, key: string, ms: number): Promise<void> {
@@ -78,16 +87,29 @@ test("walks with the keyboard, collides with the walls and resets to the spawn",
   await expect(page.locator("#exit")).toBeEnabled();
   const start = await settledFeet(page);
 
-  // The spawn faces -x: walking forward passes through the divider's door into
-  // the other room and stops at its far wall.
+  // The spawn faces -x: walking forward passes through the divider's door into the
+  // other room and stops against what is ahead, the table or the far wall
+  // (which one depends on how the door frame nudged the walker sideways).
   await page.keyboard.down("KeyW");
-  await expect.poll(async () => (await feet(page))![0], { timeout: 20_000 }).toBeLessThan(-3);
-  await page.waitForTimeout(1_500);
+  await expect.poll(async () => (await feet(page))![0], { timeout: 20_000 }).toBeLessThan(-1);
+  let previous = await settledFeet(page);
+  await expect
+    .poll(
+      async () => {
+        await page.waitForTimeout(1_000);
+        const now = await settledFeet(page);
+        const moved = horizontalDistance(now, previous);
+        previous = now;
+        return moved;
+      },
+      { timeout: 30_000, intervals: [0] },
+    )
+    .toBeLessThan(0.01);
   await page.keyboard.up("KeyW");
   const stopped = await settledFeet(page);
-  expect(horizontalDistance(stopped, start)).toBeGreaterThan(5);
-  expect(stopped[0]).toBeGreaterThan(-WALL_X);
+  expect(horizontalDistance(stopped, start)).toBeGreaterThan(3);
   expectInsideTheWalls(stopped);
+  expect(tableClearance(stopped)).toBeGreaterThan(RADIUS - 0.05);
 
   await hold(page, "ArrowLeft", 2_000);
   expectInsideTheWalls(await settledFeet(page));
