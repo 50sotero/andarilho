@@ -87,9 +87,11 @@ def test_settings_from_env(tmp_path):
 class FakeMediaRunner:
     """Stands in for ffprobe/ffmpeg: records argv and writes plausible outputs."""
 
-    def __init__(self, codec: str = "h264", duration: float = 10.0) -> None:
+    def __init__(self, codec: str = "h264", duration: float = 10.0, photo_sizes=None) -> None:
         self.calls: list[list[str]] = []
         self.codec, self.duration = codec, duration
+        self.photo_sizes = list(photo_sizes or [(1600, 1200)])
+        self.photos = 0
 
     def run(self, argv, *, timeout, check_cancelled=None, **kw):
         argv = [str(a) for a in argv]
@@ -111,18 +113,24 @@ class FakeMediaRunner:
                 for i in range(1, count + 1):
                     (out.parent / out.name.replace("%05d", f"{i:05d}")).write_bytes(b"\xff\xd8\xff")
             else:
-                out.write_bytes(b"\xff\xd8\xff")
+                w, h = self.photo_sizes[self.photos % len(self.photo_sizes)]
+                self.photos += 1
+                out.write_bytes(jpeg_with_size(w, h))
         return RunResult(tuple(argv), 0, stdout, "", 0.01)
 
 
-def _preparing_job(seed, store, pid, *, codec="h264"):
+def jpeg_with_size(width: int, height: int) -> bytes:
+    sof = b"\xff\xc0\x00\x11\x08" + height.to_bytes(2, "big") + width.to_bytes(2, "big")
+    return b"\xff\xd8" + sof + b"\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01" + b"\xff\xd9"
+
+
+def _preparing_job(seed, store, pid, *, codec="h264", photos=1):
     run_id, job_id = seed.run(pid, quality="preview", first_stage="preparing")
     inputs = []
-    for kind, data in (
-        ("video", b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64),
-        ("photo", b"\xff\xd8\xff" + b"\x00" * 64),
-    ):
-        uid = f"{kind}-0000"
+    sources = [("video", b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64)]
+    sources += [("photo", b"\xff\xd8\xff" + bytes([i]) * 64) for i in range(photos)]
+    for n, (kind, data) in enumerate(sources):
+        uid = f"{kind}-{n:04d}" if kind == "photo" else f"{kind}-0000"
         key = f"tenants/{pid}/originals/{uid}"
         store.put_bytes(key, data)
         import hashlib
@@ -159,8 +167,23 @@ def test_prepare_extracts_bounded_frames_and_strips_metadata(
     assert outputs["frameCount"] == 21
     source_map = json.loads(store.get_bytes(outputs["sourceMapKey"]))
     assert source_map["00/frame_00003.jpg"] == {"uploadId": "video-0000", "timestampSeconds": 1.0}
-    assert source_map["photos/photo_00000.jpg"]["photo"] is True
+    assert source_map["photos_1600x1200/photo_00000.jpg"]["photo"] is True
     assert len(store.list_keys(outputs["framesPrefix"])) == 21
+
+
+def test_prepare_groups_photos_by_dimensions(db, seed, store, settings, monkeypatch):
+    monkeypatch.setattr(prepare_mod, "tool_available", lambda name: True)
+    fake = FakeMediaRunner(photo_sizes=[(1600, 1200), (1200, 1600)])
+    sup = Supervisor(db, store, settings, runner=fake)
+    pid = seed.project()
+    _preparing_job(seed, store, pid, photos=3)
+    assert sup.execute(queue.claim(db, "w", "cpu")) == "succeeded"
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'camera_reconstruction'")[
+        "input_manifest"
+    ]["outputs"]
+    folders = {name.split("/")[0] for name in outputs["frameNames"] if name.startswith("photos")}
+    # Portrait and landscape photos get separate COLMAP camera folders.
+    assert folders == {"photos_1600x1200", "photos_1200x1600"}
 
 
 def test_prepare_rejects_unsupported_codec(db, seed, store, settings, monkeypatch):

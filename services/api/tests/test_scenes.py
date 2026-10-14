@@ -328,3 +328,42 @@ def test_floor_plan_is_private_to_owners_and_editors(client, auth, db, setup):
     assert plan["uploadId"] == plan_id and plan["contentType"] == "application/pdf"
     assert f"originals/{plan_id}" in plan["url"] and plan["expiresAt"]
     assert _get_scene(client, auth, setup["sceneId"], sub="viewer-v").json()["floorPlan"] is None
+
+
+def test_revoking_newest_share_keeps_older_live_link_published(client, auth, db, setup):
+    assert _approve(client, auth, setup).status_code == 200
+    assert _share(client, auth, setup, 2).status_code == 201
+    old = db.get(SceneRevision, uuid.UUID(setup["revisionId"]))
+    newer = SceneRevision(
+        id=uuid.uuid4(),
+        scene_id=old.scene_id,
+        project_id=old.project_id,
+        run_id=old.run_id,
+        revision=old.revision + 1,
+        layout_revision=old.layout_revision + 1,
+        layout=old.layout,
+        manifest=old.manifest,
+        validation_state="valid",
+        approval_state="approved",
+        approved_by="user-a",
+        approved_at=datetime.now(UTC),
+        created_by="user-a",
+    )
+    db.add(newer)
+    db.flush()
+    newest = ShareLink(
+        project_id=old.project_id,
+        scene_revision_id=newer.id,
+        token_hash=b"n" * 32,
+        created_by="user-a",
+        created_at=datetime.now(UTC) + timedelta(seconds=5),
+    )
+    db.add(newest)
+    db.get(Project, old.project_id).published_revision_id = newer.id
+    db.commit()
+
+    assert client.delete(f"/v1/shares/{newest.id}", headers=auth()).status_code == 204
+    project = db.get(Project, old.project_id)
+    db.refresh(project)
+    # The older revision's link still works, so the project stays published on it.
+    assert project.published_revision_id == old.id

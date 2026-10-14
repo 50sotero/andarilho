@@ -8,7 +8,7 @@ from datetime import UTC, timedelta
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Request, Response
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from andarilho_api import serializers as ser
@@ -314,15 +314,25 @@ def revoke_share(share_id: uuid.UUID, subject: Subject, db: Db):
         share.revoked_at = now
         db.flush()
         if project.published_revision_id == share.scene_revision_id:
-            remaining = db.execute(
+            # Point at the newest revision that still has a live link (this one if it
+            # has others); only clear the pointer when no public link remains at all.
+            live = (
+                ShareLink.project_id == project.id,
+                ShareLink.revoked_at.is_(None),
+                or_(ShareLink.expires_at.is_(None), ShareLink.expires_at > now),
+            )
+            same = db.execute(
                 select(func.count()).where(
-                    ShareLink.project_id == project.id,
-                    ShareLink.scene_revision_id == share.scene_revision_id,
-                    ShareLink.revoked_at.is_(None),
+                    *live, ShareLink.scene_revision_id == share.scene_revision_id
                 )
             ).scalar_one()
-            if remaining == 0:
-                project.published_revision_id = None
+            if same == 0:
+                project.published_revision_id = db.execute(
+                    select(ShareLink.scene_revision_id)
+                    .where(*live)
+                    .order_by(ShareLink.created_at.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
                 project.updated_at = now
         audit.record(
             db,

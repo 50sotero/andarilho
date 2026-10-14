@@ -17,7 +17,12 @@ from pathlib import Path
 from typing import Any
 
 from andarilho_worker.errors import StageError
-from andarilho_worker.media import MAX_VIDEO_SECONDS, VIDEO_CODECS, parse_ffprobe
+from andarilho_worker.media import (
+    MAX_VIDEO_SECONDS,
+    VIDEO_CODECS,
+    jpeg_dimensions,
+    parse_ffprobe,
+)
 from andarilho_worker.recipes import render_argv
 from andarilho_worker.runner import ProcessFailed, tool_available
 from andarilho_worker.stages.base import StageContext, StageResult, finish
@@ -115,10 +120,13 @@ def run(ctx: StageContext) -> StageResult:
             }
         remaining -= len(produced)
     if photos:
-        folder = images / "photos"
-        folder.mkdir(parents=True, exist_ok=True)
+        # COLMAP gives each folder one camera and rejects a folder whose images differ
+        # in size, so photos are grouped by their output dimensions (e.g. portrait
+        # and landscape shots land in separate camera folders).
+        staging = images.parent / "photo-staging"
+        staging.mkdir(parents=True, exist_ok=True)
         for k, photo in enumerate(photos):
-            out = folder / f"photo_{k:05d}.jpg"
+            out = staging / f"photo_{k:05d}.jpg"
             try:
                 ctx.run(
                     render_argv(
@@ -131,7 +139,13 @@ def run(ctx: StageContext) -> StageResult:
                 )
             except ProcessFailed as exc:
                 raise StageError("INVALID_MEDIA", details={"uploadId": photo["uploadId"]}) from exc
-            source_map[f"photos/{out.name}"] = {"uploadId": photo["uploadId"], "photo": True}
+            size = jpeg_dimensions(out.read_bytes()) if out.is_file() else None
+            if size is None:
+                raise StageError("INVALID_MEDIA", details={"uploadId": photo["uploadId"]})
+            group = f"photos_{size[0]}x{size[1]}"
+            (images / group).mkdir(parents=True, exist_ok=True)
+            out.replace(images / group / out.name)
+            source_map[f"{group}/{out.name}"] = {"uploadId": photo["uploadId"], "photo": True}
 
     frames = sorted(p for p in images.rglob("*.jpg"))
     if not frames:

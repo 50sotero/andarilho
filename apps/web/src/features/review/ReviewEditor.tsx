@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { Button, Card, ErrorNotice, StatusBadge, inputClass } from "@/components/ui";
 import { ViewerClient } from "@/components/viewer/ViewerClient";
 import { useProject } from "@/features/projects/use-project";
@@ -430,21 +430,48 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   const [envelope, setEnvelope] = useState<DeliveryEnvelope | null>(null);
   const [underlay, setUnderlay] = useState<PlanUnderlay | null>(null);
   const overlayId = useId();
+  // The revision whose layout the canvas shows. Approval is only offered for it, so
+  // a revision saved elsewhere can never be approved against a stale canvas.
+  const [shownRevisionId, setShownRevisionId] = useState<string | null>(null);
+  const shownRef = useRef<string | null>(null);
+  const dirtyRef = useRef(false);
+  useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
+  const showRevision = useCallback((rev: NonNullable<SceneDetail["revision"]>) => {
+    setLayout(structuredClone(rev.layout));
+    setViewBox(layoutViewBox(rev.layout, 1));
+    setDirty(false);
+    setSelection(null);
+    shownRef.current = rev.id;
+    setShownRevisionId(rev.id);
+  }, []);
+
+  /** Adopt fresh scene data; follow a newer revision unless there are unsaved edits. */
+  const adoptScene = useCallback(
+    (data: SceneDetail, resetLayout: boolean) => {
+      setScene(data);
+      const rev = data.revision;
+      if (!rev) return;
+      if (resetLayout) {
+        showRevision(rev);
+      } else if (rev.id !== shownRef.current && !dirtyRef.current) {
+        showRevision(rev);
+        setStatus(`Showing revision ${rev.revision}, saved since you loaded this page.`);
+      }
+    },
+    [showRevision],
+  );
 
   const loadScene = useCallback(
     async (resetLayout: boolean) => {
       if (!sceneId) return;
       const result = await api.getScene(sceneId);
-      setScene(result.data);
       setEtag(result.etag);
-      if (resetLayout && result.data.revision) {
-        setLayout(structuredClone(result.data.revision.layout));
-        setViewBox(layoutViewBox(result.data.revision.layout, 1));
-        setDirty(false);
-        setSelection(null);
-      }
+      adoptScene(result.data, resetLayout);
     },
-    [sceneId],
+    [sceneId, adoptScene],
   );
 
   useEffect(() => {
@@ -454,12 +481,8 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
       .getScene(sceneId)
       .then((result) => {
         if (!active) return;
-        setScene(result.data);
         setEtag(result.etag);
-        if (result.data.revision) {
-          setLayout(structuredClone(result.data.revision.layout));
-          setViewBox(layoutViewBox(result.data.revision.layout, 1));
-        }
+        adoptScene(result.data, true);
       })
       .catch((err: unknown) => {
         if (active) setError(toFriendlyError(err));
@@ -467,7 +490,7 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     return () => {
       active = false;
     };
-  }, [sceneId]);
+  }, [sceneId, adoptScene]);
 
   // While a saved revision is being validated/packaged, poll the scene.
   const pending = scene?.revision?.validationState === "pending";
@@ -475,8 +498,8 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     async (signal) => {
       if (!sceneId) return { terminal: true };
       const result = await api.getScene(sceneId, signal);
-      setScene(result.data);
       setEtag(result.etag);
+      adoptScene(result.data, false);
       const done = result.data.revision?.validationState !== "pending";
       if (done) setStatus(`Revision ${result.data.revision?.revision ?? ""} validation finished.`);
       return { terminal: done };
@@ -523,6 +546,10 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     try {
       const result = await api.saveLayout(sceneId, revision.id, layout, etag);
       setStatus("Saved as a new draft revision. Validating the geometry...");
+      // The canvas now shows exactly the revision that was just saved.
+      shownRef.current = result.data.sceneRevisionId;
+      setShownRevisionId(result.data.sceneRevisionId);
+      dirtyRef.current = false;
       setDirty(false);
       await loadScene(false);
       if (result.etag) setEtag(result.etag);
@@ -583,6 +610,7 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     !dirty &&
     revision.validationState === "valid" &&
     revision.approvalState !== "approved" &&
+    revision.id === shownRevisionId &&
     !busy;
 
   return (
@@ -627,6 +655,12 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
         <p aria-live="polite" className="mt-2 text-sm text-teal-800 dark:text-teal-300">
           {status}
         </p>
+        {revision.id !== shownRevisionId ? (
+          <p role="status" className="mt-2 text-sm text-amber-800 dark:text-amber-300">
+            Someone saved revision {revision.revision} while you were editing. Discard your changes
+            to see it before approving.
+          </p>
+        ) : null}
         <div className="mt-2">
           <ErrorNotice error={error} />
         </div>
