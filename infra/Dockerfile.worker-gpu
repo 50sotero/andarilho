@@ -4,9 +4,10 @@
 # .github/workflows/gpu-smoke.yml. Every version below must be pinned together
 # and validated in this exact image before use (README sections 8 and 14).
 #
-# Pin the base image by digest before deploying:
+# The base image is pinned by its multi-arch index digest (the tag is kept for
+# readers; the digest decides). To move it, inspect the new tag and update both:
 #   docker buildx imagetools inspect nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
-ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04
+ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04@sha256:24c8e3581ea6330038b0d374920721983312627f8adbfcf390bdb4b399d280ed
 FROM ${CUDA_IMAGE}
 
 ARG COLMAP_VERSION=3.12.5
@@ -48,18 +49,42 @@ RUN uv venv --python python3.12 /opt/venv \
       --index-strategy unsafe-best-match \
  && python -c "import torch; assert torch.__version__.startswith('${TORCH_VERSION}+${TORCH_CUDA}'), torch.__version__"
 # Precompile gsplat's CUDA kernels for the arch list above (no GPU needed, only
-# nvcc) so workers never JIT-compile at run time.
-RUN python -c "from gsplat.cuda._backend import _C; assert _C is not None" \
+# nvcc) so workers never JIT-compile at run time. Each nvcc job can take several
+# GB for five architectures; unbounded (one per core) it exhausted a 32 GB build VM.
+ARG MAX_JOBS=4
+RUN MAX_JOBS=${MAX_JOBS} python -c "from gsplat.cuda._backend import _C; assert _C is not None" \
  && chmod -R a+rX /opt/torch_extensions
 RUN npm install -g "@playcanvas/splat-transform@${SPLAT_TRANSFORM_VERSION}"
+# Splatfacto's LPIPS metric loads torchvision's AlexNet weights through torch.hub.
+# Bake them in where the non-root worker can read them: workers fetch nothing at
+# run time.
+ENV TORCH_HOME=/opt/torch-home
+RUN python -c "import torchvision; torchvision.models.alexnet(weights='DEFAULT')" \
+ && ls /opt/torch-home/hub/checkpoints/alexnet-*.pth \
+ && chmod -R a+rX /opt/torch-home
 
+# The worker gets its own locked environment. It runs the trainer only as
+# subprocesses (ns-train/ns-export from /opt/venv, still on PATH), and its pinned
+# dependencies (numpy 2) must not replace the versions nerfstudio resolved; the
+# trainer environment is checked for conflicts after the worker is installed.
 WORKDIR /app/services/worker
+COPY services/worker/pyproject.toml services/worker/uv.lock ./
+RUN UV_PROJECT_ENVIRONMENT=/opt/worker-venv UV_LINK_MODE=copy \
+    uv sync --frozen --no-dev --no-install-project --python python3.12
 COPY services/worker/ ./
-RUN uv pip install --python /opt/venv/bin/python .
+RUN UV_PROJECT_ENVIRONMENT=/opt/worker-venv UV_LINK_MODE=copy \
+    uv sync --frozen --no-dev --python python3.12 \
+ && uv pip check --python /opt/venv/bin/python \
+ && rm -rf /root/.cache
+ENV PATH="/opt/worker-venv/bin:$PATH"
 # Fail the build if the pinned recipe uses an option these tool versions do not accept.
 RUN python -m andarilho_worker.toolcheck
 
-RUN useradd --system --uid 10001 --home /app andarilho && mkdir -p /scratch && chown andarilho /scratch
+# A writable home: torch.compile (used during Splatfacto training) keeps its Triton
+# kernel cache under ~/.triton, other tools cache under ~/.cache, and /app is
+# read-only for the worker.
+RUN useradd --system --uid 10001 --create-home --home-dir /home/andarilho andarilho \
+ && mkdir -p /scratch && chown andarilho /scratch
 USER andarilho
 ENV WORKER_CAPABILITY=gpu WORKER_SCRATCH_DIR=/scratch
 CMD ["python", "-m", "andarilho_worker"]
