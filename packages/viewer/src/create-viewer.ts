@@ -112,6 +112,14 @@ function defaultIsWebGL2Available(): boolean {
   }
 }
 
+/** The collision asset could not be downloaded (as opposed to being invalid). */
+class CollisionFetchError extends Error {
+  constructor(cause: unknown) {
+    super("Collision asset download failed", { cause });
+    this.name = "CollisionFetchError";
+  }
+}
+
 async function defaultFetchBytes(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
   const response = await fetch(url, { signal, credentials: "omit" });
   if (!response.ok) throw new Error(`Collision asset request failed (${response.status})`);
@@ -413,7 +421,14 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
     if (!deps || !source) return null;
     const bounds = source.manifest.bounds;
     if (source.collisionUrl) {
-      const bytes = await deps.fetchBytes(source.collisionUrl, abort.signal);
+      let bytes: ArrayBuffer;
+      try {
+        bytes = await deps.fetchBytes(source.collisionUrl, abort.signal);
+      } catch (error) {
+        // A dropped connection or an expired signed URL (403) can succeed with a
+        // fresh envelope, unlike an invalid asset: report it as recoverable.
+        throw new CollisionFetchError(error);
+      }
       if (source.collisionSha256) {
         const digest = await sha256Hex(bytes);
         if (digest !== null && digest !== source.collisionSha256.toLowerCase()) {
@@ -451,6 +466,7 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
       },
     });
     if (meshResult.status === "rejected") {
+      if (meshResult.reason instanceof CollisionFetchError) throw meshResult.reason;
       return {
         mode: "inspection",
         reason: safeMessage(meshResult.reason, "Collision geometry could not be loaded."),
@@ -543,6 +559,17 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
         return;
       }
       dispatch({ type: "progress", progress: { render: "done" } });
+      if (
+        physicsResult.status === "rejected" &&
+        physicsResult.reason instanceof CollisionFetchError
+      ) {
+        fail({
+          code: "collision-load-failed",
+          message: "The walking geometry could not be downloaded.",
+          recoverable: true,
+        });
+        return;
+      }
       const physics =
         physicsResult.status === "fulfilled"
           ? physicsResult.value

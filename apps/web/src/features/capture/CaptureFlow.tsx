@@ -58,6 +58,21 @@ function readVideoDuration(file: File): Promise<number | null> {
   });
 }
 
+/**
+ * How removing an upload row involves the server. A verified file is released
+ * through its own flow; while a file is being checked the server may refuse
+ * (409), so the row stays until it confirms; an unfinished or rejected upload is
+ * aborted best-effort (expiry and cleanup reconcile it); a row the server never
+ * saw is only dropped locally.
+ */
+export function removalMode(
+  serverStatus: UploadRowView["serverStatus"],
+): "release-verified" | "confirm" | "best-effort" | "local" {
+  if (serverStatus === "verified") return "release-verified";
+  if (serverStatus === "uploaded_unverified") return "confirm";
+  return "best-effort";
+}
+
 function initialProgress(size: number): UploadProgress {
   return {
     phase: "idle",
@@ -298,10 +313,20 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
     const uploader = uploadersRef.current.get(id);
     const row = rows.find((r) => r.id === id);
     const uploadId = row?.uploadId ?? uploader?.state.uploadId;
-    if (uploadId && row?.serverStatus === "verified") {
-      if (!(await removeVerified(uploadId, row.name))) return;
-    } else if (uploadId) {
-      api.abortUpload(uploadId).catch(() => undefined);
+    const mode = uploadId ? removalMode(row?.serverStatus ?? null) : "local";
+    if (mode === "release-verified") {
+      if (!(await removeVerified(uploadId!, row!.name))) return;
+    } else if (mode === "confirm") {
+      setError(null);
+      try {
+        await api.abortUpload(uploadId!);
+      } catch (err) {
+        // e.g. 409 while the file is still being checked: keep the row (and its polling).
+        setError(toFriendlyError(err));
+        return;
+      }
+    } else if (mode === "best-effort") {
+      api.abortUpload(uploadId!).catch(() => undefined);
     }
     uploader?.pause();
     if (uploader) removeResumeRecord(projectId, uploader.fingerprint);

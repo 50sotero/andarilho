@@ -10,6 +10,7 @@ import { addOpening, movePoint, removeSelected } from "@/features/review/layout-
 import { canRetryRun, formatStageProgress, stageStates } from "@/features/processing/stages";
 import { expiryFromDays } from "@/features/sharing/SharePanel";
 import { fallbackLayout } from "@/features/projects/PrivateWalk";
+import { removalMode } from "@/features/capture/CaptureFlow";
 import { rejectionMessage } from "@/features/uploads/UploadList";
 import type { DeliveryEnvelope, Layout, Run, SceneDetail } from "@/lib/api/types";
 import fixture from "@andarilho/scene-contract/fixtures/synthetic-two-room.layout.json";
@@ -149,5 +150,15 @@ describe("upload rejection message", () => {
     expect(rejectionMessage("INSPECTION_FAILED")).toMatch(/upload it again/);
     expect(rejectionMessage("INSPECTION_FAILED")).not.toMatch(/undamaged/);
     expect(rejectionMessage("UNSUPPORTED_MEDIA")).toMatch(/UNSUPPORTED_MEDIA.*undamaged/);
+  });
+});
+
+describe("upload row removal", () => {
+  it("waits for the server while a file is being checked, so a refusal keeps the row", () => {
+    expect(removalMode("uploaded_unverified")).toBe("confirm");
+    expect(removalMode("verified")).toBe("release-verified");
+    expect(removalMode("initiated")).toBe("best-effort");
+    expect(removalMode("rejected")).toBe("best-effort");
+    expect(removalMode(null)).toBe("best-effort");
   });
 });

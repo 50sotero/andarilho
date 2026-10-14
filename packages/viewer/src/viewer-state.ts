@@ -16,7 +16,12 @@ import type { QualityProfileName } from "./render/quality";
 export type ViewerMode = "inspection" | "walkable";
 
 export type ViewerErrorCode =
-  "webgl2-unavailable" | "invalid-input" | "render-load-failed" | "context-lost" | "init-failed";
+  | "webgl2-unavailable"
+  | "invalid-input"
+  | "render-load-failed"
+  | "collision-load-failed"
+  | "context-lost"
+  | "init-failed";
 
 export interface ViewerError {
   code: ViewerErrorCode;

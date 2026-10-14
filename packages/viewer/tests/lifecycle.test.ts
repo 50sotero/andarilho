@@ -319,6 +319,23 @@ describe("viewer lifecycle", () => {
     second.viewer.dispose();
   });
 
+  it("reports a failed collision download as recoverable, not as inspection-only", async () => {
+    const h = harness();
+    h.deps.fetchBytes = async () => {
+      throw new Error("Collision asset request failed (403)"); // e.g. an expired signed URL
+    };
+    const { viewer } = start(h);
+    h.spark.initialized.resolve();
+    await vi.waitFor(() =>
+      expect(viewer.getState()).toMatchObject({
+        status: "error",
+        error: { code: "collision-load-failed", recoverable: true },
+      }),
+    );
+    expect(viewer.enterWalk()).toBe(false);
+    viewer.dispose();
+  });
+
   it("falls back to inspection when the spawn has no clearance", async () => {
     const h = harness({ ok: false, reason: "blocked", supportY: 0 });
     const { viewer } = start(h);
