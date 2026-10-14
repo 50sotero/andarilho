@@ -57,6 +57,13 @@ ARGV: dict[str, tuple[str, ...]] = {
         ":force_original_aspect_ratio=decrease:force_divisible_by=2",
         "-frames:v", "{max_frames}", "-q:v", "2", "{output_pattern}",
     ),
+    # The same frames as ffmpeg_frames, as tiny grayscale raw images for sharpness scoring.
+    "ffmpeg_score_frames": (
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+        "-i", "{input}", "-map", "0:v:0", "-an", "-sn", "-dn", "-map_metadata", "-1",
+        "-vf", "fps={fps},scale={size}:{size},format=gray",
+        "-frames:v", "{max_frames}", "-f", "rawvideo", "{output}",
+    ),
     "ffmpeg_photo": (
         "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
         "-i", "{input}", "-map", "0:v:0", "-map_metadata", "-1",
@@ -210,7 +217,13 @@ COMMON = {
     "maxPhotos": 400,
     "minRegisteredViews": 30,
     "minRegisteredRatio": 0.8,
-    "sequentialOverlap": 10,
+    # Measured on the first real walkthrough (handheld phone video, fast room
+    # transitions): 2 fps registered 28 of 141 frames, 4 fps 122 of 283, and 4 fps
+    # chosen as the sharpest of 12 fps candidates 155 of 283. The sequential
+    # window spans the same ~5 s at 4 fps as 10 frames did at 2 fps.
+    "fps": 4,
+    "keyframeOversample": 3,
+    "sequentialOverlap": 20,
     "seed": 42,
 }
 
@@ -219,13 +232,13 @@ RECIPES: dict[str, Recipe] = {
         "preview-v1",
         "preview",
         _specs(RUN_STAGES),
-        {**COMMON, "fps": 2, "iterations": 7000, "saveSteps": 2000},
+        {**COMMON, "iterations": 7000, "saveSteps": 2000},
     ),
     "standard": Recipe(
         "standard-v1",
         "standard",
         _specs(RUN_STAGES),
-        {**COMMON, "fps": 3, "iterations": 30000, "saveSteps": 5000},
+        {**COMMON, "iterations": 30000, "saveSteps": 5000},
     ),
     "synthetic": Recipe(
         "synthetic-v1",

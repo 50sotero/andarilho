@@ -4,6 +4,10 @@
 * FFmpeg extracts 2-4 fps (recipe) capped at 400 frames overall, at most 1600 px
   on the long edge, drops audio/subtitle/data streams and strips EXIF/GPS
   (``-map_metadata -1``); FFmpeg's default autorotation normalizes orientation;
+* video frames are chosen, not just sampled: candidates are decoded at
+  ``keyframeOversample`` times that rate and the sharpest of each consecutive
+  window is kept (:mod:`andarilho_worker.keyframes`), so fast turns contribute
+  their least blurred frames while coverage stays even in time;
 * every retained image keeps a source map entry (upload ID + timestamp).
 
 Frames are grouped per source (``images/<nn>/``) so COLMAP can assign one camera
@@ -13,10 +17,14 @@ per source instead of forcing a shared calibration onto unrelated cameras.
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from andarilho_worker.errors import StageError
+from andarilho_worker.keyframes import SCORE_SIZE, pick_sharpest, sharpness_from_raw
 from andarilho_worker.media import (
     MAX_VIDEO_SECONDS,
     VIDEO_CODECS,
@@ -28,6 +36,7 @@ from andarilho_worker.runner import ProcessFailed, tool_available
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
 PROBE_TIMEOUT = 120
+MAX_CANDIDATES_PER_FRAME = 4  # bounds decode work and scratch for keyframe candidates
 
 
 def probe_video(ctx: StageContext, path: Path) -> dict[str, Any]:
@@ -52,6 +61,88 @@ def plan_frames(durations: list[float], photos: int, *, fps: float, cap: int) ->
     if total <= 0 or budget == 0:
         return fps, budget
     return min(fps, budget / total), budget
+
+
+def extract_frames(
+    ctx: StageContext,
+    video: Path,
+    folder: Path,
+    rate: float,
+    count: int,
+    long_edge: int,
+    timeout: float,
+) -> list[float]:
+    """Evenly sampled frames as ``frame_00001.jpg``...; returns their offsets in seconds."""
+    ctx.run(
+        render_argv(
+            "ffmpeg_frames",
+            input=video,
+            fps=f"{rate:.4f}",
+            long_edge=long_edge,
+            max_frames=count,
+            output_pattern=folder / "frame_%05d.jpg",
+        ),
+        timeout=timeout,
+    )
+    return [k / rate for k in range(len(list(folder.glob("frame_*.jpg"))))]
+
+
+def extract_keyframes(
+    ctx: StageContext,
+    video: Path,
+    folder: Path,
+    staging: Path,
+    rate: float,
+    candidates: int,
+    keep: int,
+    long_edge: int,
+    timeout: float,
+) -> tuple[list[float], dict[str, Any]]:
+    """The sharpest candidate of each window, renamed in order; returns offsets and stats.
+
+    The candidates and their tiny grayscale copies come from the same ``fps``
+    filter, so candidate ``i`` of both decodes is the same source frame.
+    """
+    staging.mkdir(parents=True, exist_ok=True)
+    try:
+        ctx.run(
+            render_argv(
+                "ffmpeg_frames",
+                input=video,
+                fps=f"{rate:.4f}",
+                long_edge=long_edge,
+                max_frames=candidates,
+                output_pattern=staging / "cand_%05d.jpg",
+            ),
+            timeout=timeout,
+        )
+        raw = staging / "score.gray"
+        ctx.run(
+            render_argv(
+                "ffmpeg_score_frames",
+                input=video,
+                fps=f"{rate:.4f}",
+                size=SCORE_SIZE,
+                max_frames=candidates,
+                output=raw,
+            ),
+            timeout=timeout,
+        )
+        scores = sharpness_from_raw(raw)
+        produced = sorted(staging.glob("cand_*.jpg"))
+        n = min(len(produced), len(scores))
+        picked = pick_sharpest(scores[:n], keep)
+        for k, i in enumerate(picked):
+            produced[i].replace(folder / f"frame_{k + 1:05d}.jpg")
+    finally:
+        shutil.rmtree(staging, ignore_errors=True)
+    stats = {
+        "candidates": n,
+        "kept": len(picked),
+        "medianSharpness": round(float(np.median(scores[:n])), 1) if n else None,
+        "keptMedianSharpness": round(float(np.median(scores[picked])), 1) if picked else None,
+    }
+    return [i / rate for i in picked], stats
 
 
 def run(ctx: StageContext) -> StageResult:
@@ -92,6 +183,8 @@ def run(ctx: StageContext) -> StageResult:
         cap=cap,
     )
     source_map: dict[str, dict[str, Any]] = {}
+    sharpness: list[dict[str, Any]] = []
+    oversample = max(1, int(params.get("keyframeOversample", 1)))
     remaining = budget
     for index, video in enumerate(videos):
         if remaining <= 0:
@@ -99,26 +192,36 @@ def run(ctx: StageContext) -> StageResult:
         meta = metas[video["uploadId"]]
         folder = images / f"{index:02d}"
         folder.mkdir(parents=True, exist_ok=True)
-        want = min(remaining, max(1, int(meta["durationSeconds"] * fps)))
+        duration = meta["durationSeconds"]
+        want = min(remaining, max(1, int(duration * fps)))
+        candidates = min(int(duration * fps * oversample), want * MAX_CANDIDATES_PER_FRAME)
+        if meta.get("frameRate"):
+            candidates = min(candidates, int(duration * meta["frameRate"]))  # no duplicates
         ctx.progress("Extracting frames.", source=index, frames=want)
-        ctx.run(
-            render_argv(
-                "ffmpeg_frames",
-                input=local[video["uploadId"]],
-                fps=f"{fps:.4f}",
-                long_edge=long_edge,
-                max_frames=want,
-                output_pattern=folder / "frame_%05d.jpg",
-            ),
-            timeout=max(300.0, meta["durationSeconds"] * 4),
-        )
-        produced = sorted(folder.glob("frame_*.jpg"))
-        for k, frame in enumerate(produced):
-            source_map[f"{index:02d}/{frame.name}"] = {
+        timeout = max(300.0, duration * 4)
+        if candidates <= want:
+            take = extract_frames(
+                ctx, local[video["uploadId"]], folder, fps, want, long_edge, timeout
+            )
+        else:
+            take, stats = extract_keyframes(
+                ctx,
+                local[video["uploadId"]],
+                folder,
+                work / "cand",
+                candidates / duration,
+                candidates,
+                want,
+                long_edge,
+                timeout,
+            )
+            sharpness.append({"source": index, **stats})
+        for k, seconds in enumerate(take):
+            source_map[f"{index:02d}/frame_{k + 1:05d}.jpg"] = {
                 "uploadId": video["uploadId"],
-                "timestampSeconds": round(meta["startTime"] + k / fps, 3),
+                "timestampSeconds": round(meta["startTime"] + seconds, 3),
             }
-        remaining -= len(produced)
+        remaining -= len(take)
     if photos:
         # COLMAP gives each folder one camera and rejects a folder whose images differ
         # in size, so photos are grouped by their output dimensions (e.g. portrait
@@ -161,7 +264,12 @@ def run(ctx: StageContext) -> StageResult:
     )
     return finish(
         ctx,
-        {"frames": len(frames), "effectiveFps": round(fps, 4), "videos": metas},
+        {
+            "frames": len(frames),
+            "effectiveFps": round(fps, 4),
+            "videos": metas,
+            "keyframes": sharpness,
+        },
         outputs={
             "frameCount": len(frames),
             "framesPrefix": prefix,

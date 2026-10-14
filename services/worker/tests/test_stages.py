@@ -6,6 +6,7 @@ import json
 import struct
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from andarilho_worker import queue
@@ -108,10 +109,17 @@ class FakeMediaRunner:
             })  # fmt: skip
         elif argv[0] == "ffmpeg":
             out = Path(argv[-1])
-            if "%05d" in out.name:
-                count = int(argv[argv.index("-frames:v") + 1])
+            count = int(argv[argv.index("-frames:v") + 1]) if "-frames:v" in argv else 1
+            if "rawvideo" in argv:
+                # Sharpness-scoring decode: only every third candidate frame has texture.
+                size = int(argv[argv.index("-vf") + 1].split("scale=")[1].split(":")[0])
+                texture = np.random.default_rng(3).integers(0, 256, (size, size), dtype=np.uint8)
+                flat = np.full((size, size), 128, dtype=np.uint8)
+                np.stack([texture if i % 3 == 1 else flat for i in range(count)]).tofile(out)
+            elif "%05d" in out.name:
                 for i in range(1, count + 1):
-                    (out.parent / out.name.replace("%05d", f"{i:05d}")).write_bytes(b"\xff\xd8\xff")
+                    frame = b"\xff\xd8\xff" + i.to_bytes(4, "big")  # remembers its candidate index
+                    (out.parent / out.name.replace("%05d", f"{i:05d}")).write_bytes(frame)
             else:
                 w, h = self.photo_sizes[self.photos % len(self.photo_sizes)]
                 self.photos += 1
@@ -155,20 +163,31 @@ def test_prepare_extracts_bounded_frames_and_strips_metadata(
     job = queue.claim(db, "w", "cpu")
     assert sup.execute(job) == "succeeded"
     ffmpeg = [c for c in fake.calls if c[0] == "ffmpeg"]
-    video_call = ffmpeg[0]
-    assert "-an" in video_call and video_call[video_call.index("-map_metadata") + 1] == "-1"
-    assert any("min(1600,iw)" in a for a in video_call)
-    assert int(video_call[video_call.index("-frames:v") + 1]) == 20  # 10 s at 2 fps
+    candidates, scoring = ffmpeg[0], ffmpeg[1]
+    for call in (candidates, scoring):
+        assert "-an" in call and call[call.index("-map_metadata") + 1] == "-1"
+        assert int(call[call.index("-frames:v") + 1]) == 120  # 10 s at 4 fps, 3 candidates each
+        assert "fps=12.0000" in call[call.index("-vf") + 1]  # the same frames in both decodes
+    assert any("min(1600,iw)" in a for a in candidates)
+    assert "rawvideo" in scoring and "format=gray" in scoring[scoring.index("-vf") + 1]
     nxt = seed.one(
         "SELECT stage, capability, input_manifest FROM jobs WHERE stage = 'camera_reconstruction'"
     )
     assert nxt["capability"] == "gpu"
     outputs = nxt["input_manifest"]["outputs"]
-    assert outputs["frameCount"] == 21
+    assert outputs["frameCount"] == 41
+    # The sharpest candidate of each window of three is kept: candidate 3k+1 (0-based),
+    # the second of every window, at (3k + 1) / 12 seconds.
     source_map = json.loads(store.get_bytes(outputs["sourceMapKey"]))
-    assert source_map["00/frame_00003.jpg"] == {"uploadId": "video-0000", "timestampSeconds": 1.0}
+    assert source_map["00/frame_00003.jpg"] == {"uploadId": "video-0000", "timestampSeconds": 0.583}
+    third = store.get_bytes(outputs["framesPrefix"] + "00/frame_00003.jpg")
+    assert int.from_bytes(third[3:], "big") == 8  # ffmpeg's 1-based name for candidate 7
     assert source_map["photos_1600x1200/photo_00000.jpg"]["photo"] is True
-    assert len(store.list_keys(outputs["framesPrefix"])) == 21
+    assert len(store.list_keys(outputs["framesPrefix"])) == 41
+    result = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'preparing'")
+    stats = result["result_manifest"]["keyframes"][0]
+    assert stats["candidates"] == 120 and stats["kept"] == 40
+    assert stats["keptMedianSharpness"] > stats["medianSharpness"] == 0
 
 
 def test_prepare_groups_photos_by_dimensions(db, seed, store, settings, monkeypatch):

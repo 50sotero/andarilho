@@ -2,7 +2,7 @@
   "generatedFrom": "services/worker/src/andarilho_worker/recipes.py",
   "preview": {
     "name": "preview-v1",
-    "digest": "sha256:ebd6746b11c7759911bc36ce18e6a30daf2a7588c78ac8fb26b778b0331fc71e",
+    "digest": "sha256:b8e2dbb94c7a68095995b410091b0cd92173c0b6386880bbcd1c1c7484576d92",
     "stages": [
       {
         "stage": "validating",
@@ -44,16 +44,17 @@
       "maxPhotos": 400,
       "minRegisteredViews": 30,
       "minRegisteredRatio": 0.8,
-      "sequentialOverlap": 10,
+      "fps": 4,
+      "keyframeOversample": 3,
+      "sequentialOverlap": 20,
       "seed": 42,
-      "fps": 2,
       "iterations": 7000,
       "saveSteps": 2000
     }
   },
   "standard": {
     "name": "standard-v1",
-    "digest": "sha256:408b81df1d8f8492597c7ec5baccac60a2945f8a9301e0d6901bc0fa946f8eb8",
+    "digest": "sha256:0650695d74965faad7c8cabfe6a755c67ea1d65af193b13bc5d6af5b0296bd7b",
     "stages": [
       {
         "stage": "validating",
@@ -95,16 +96,17 @@
       "maxPhotos": 400,
       "minRegisteredViews": 30,
       "minRegisteredRatio": 0.8,
-      "sequentialOverlap": 10,
+      "fps": 4,
+      "keyframeOversample": 3,
+      "sequentialOverlap": 20,
       "seed": 42,
-      "fps": 3,
       "iterations": 30000,
       "saveSteps": 5000
     }
   },
   "synthetic": {
     "name": "synthetic-v1",
-    "digest": "sha256:79fb71a6f272485f346538c884df68f46ed0ecbef9d61856388d6db179ac02c3",
+    "digest": "sha256:512c95de7864f81b601115d963196df162be6e5aea4c4a4124f4a4d34d3fbe0a",
     "stages": [
       {
         "stage": "validating",
