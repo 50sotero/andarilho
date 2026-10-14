@@ -365,6 +365,38 @@ def test_matcher_respects_photo_ordering(tmp_path, names, expected):
     ]
 
 
+def test_slow_sog_compression_falls_back_to_the_ply(db, seed, store, settings, monkeypatch):
+    from andarilho_worker.geometry.ply import write_splat_ply
+    from andarilho_worker.geometry.synthetic import synthetic_splats
+    from andarilho_worker.runner import ProcessTimeout
+    from andarilho_worker.stages import STAGES
+    from andarilho_worker.stages import normalize as normalize_mod
+
+    monkeypatch.setattr(normalize_mod, "tool_available", lambda name: True)
+    timeouts: list[float] = []
+
+    class SlowCompressor:
+        def run(self, argv, *, timeout, **kw):
+            timeouts.append(timeout)
+            raise ProcessTimeout(f"{argv[0]} exceeded {timeout:.0f}s")
+
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, quality="preview", first_stage="normalizing")
+    ply_key = f"tenants/{pid}/runs/{run_id}/attempts/training/1/scene.ply"
+    store.put_bytes(ply_key, write_splat_ply(synthetic_splats(normalize_mod.synthetic_layout())))
+    seed.exec(
+        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
+        json.dumps({"outputs": {"plyKey": ply_key, "quality": "preview"}}), job_id,
+    )  # fmt: skip
+    sup = Supervisor(db, store, settings, runner=SlowCompressor(), stages=STAGES)
+    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
+    assert len(timeouts) == 1 and timeouts[0] <= normalize_mod.SOG_MAX_SECONDS
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
+    assert outputs["input_manifest"]["outputs"]["renderFormat"] == "ply"
+    result = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'normalizing'")
+    assert result["result_manifest"]["compression"]["reason"] == "timeout"
+
+
 def test_normalize_streams_the_export_instead_of_reading_it_inline(
     db, seed, store, settings, monkeypatch
 ):

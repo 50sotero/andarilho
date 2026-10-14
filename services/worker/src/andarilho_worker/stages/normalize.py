@@ -14,6 +14,7 @@ world frame from the bundled synthetic layout, so its matrix is identity.
 from __future__ import annotations
 
 import json
+import time
 from importlib import resources
 from typing import Any
 
@@ -25,13 +26,17 @@ from andarilho_worker.geometry.ply import PlyError, clean_splat_ply_file, write_
 from andarilho_worker.geometry.synthetic import synthetic_splats
 from andarilho_worker.manifest import IDENTITY_MATRIX
 from andarilho_worker.recipes import render_argv
-from andarilho_worker.runner import ProcessFailed, tool_available
+from andarilho_worker.runner import ProcessFailed, ProcessTimeout, tool_available
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
 # Nerfstudio/COLMAP Z-up decoded frame -> Andarilho world (+Y up): (x, y, z) -> (x, z, -y)
 Z_UP_TO_Y_UP = [1.0, 0, 0, 0, 0, 0, -1.0, 0, 0, 1.0, 0, 0, 0, 0, 0, 1.0]
 MIN_SPLATS = 1000
 BOUNDS_SAMPLE = 2_000_000
+# SOG compression on the CPU (splat-transform's k-means, one core) is slow: the first
+# real preview scene (~163k splats) needed well over ten minutes. It gets at most this
+# long, and half the stage's remaining time, before the scene falls back to its PLY.
+SOG_MAX_SECONDS = 900
 
 
 def synthetic_layout() -> dict[str, Any]:
@@ -87,15 +92,23 @@ def run(ctx: StageContext) -> StageResult:
     archive_key = ctx.attempt_key("normalized.ply")
     ctx.store.put_file(archive_key, ply_path, "application/octet-stream")
     render_key, render_format = archive_key, "ply"
+    compression: dict[str, Any] = {"format": "ply", "reason": "no compressor"}
     if tool_available("splat-transform"):
         sog_path = work / "scene.sog"
+        budget = min(SOG_MAX_SECONDS, ctx.remaining_seconds() / 2)
+        started = time.monotonic()
         try:
             ctx.progress("Compressing the render asset.")
-            ctx.run(render_argv("splat_transform", input=ply_path, output=sog_path), timeout=1800)
+            ctx.run(render_argv("splat_transform", input=ply_path, output=sog_path), timeout=budget)
             render_key, render_format = ctx.attempt_key("scene.sog"), "sog"
             ctx.store.put_file(render_key, sog_path, "application/octet-stream")
-        except ProcessFailed:
-            render_key, render_format = archive_key, "ply"  # CPU fallback: keep the PLY
+            compression = {"format": "sog", "bytes": sog_path.stat().st_size}
+        except (ProcessFailed, ProcessTimeout) as exc:
+            # Keep the PLY: larger to deliver, but a slow or failed compression never
+            # costs the user their reconstruction.
+            reason = "timeout" if isinstance(exc, ProcessTimeout) else "failed"
+            compression = {"format": "ply", "reason": reason}
+        compression["seconds"] = round(time.monotonic() - started, 1)
     # Percentile bounds from an evenly strided sample keep this step small for huge clouds.
     sample = cleaned.positions[:: max(1, cleaned.count // BOUNDS_SAMPLE)]
     world = apply_matrix(Z_UP_TO_Y_UP, sample)
@@ -105,7 +118,12 @@ def run(ctx: StageContext) -> StageResult:
     ceiling = float(np.percentile(world[:, 1], 98))
     return finish(
         ctx,
-        {"splats": cleaned.count, "dropped": cleaned.dropped, "recenteredBy": cleaned.center},
+        {
+            "splats": cleaned.count,
+            "dropped": cleaned.dropped,
+            "recenteredBy": cleaned.center,
+            "compression": compression,
+        },
         outputs={
             "renderKey": render_key,
             "renderFormat": render_format,
