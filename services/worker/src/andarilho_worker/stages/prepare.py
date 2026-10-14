@@ -193,15 +193,19 @@ def run(ctx: StageContext) -> StageResult:
         folder = images / f"{index:02d}"
         folder.mkdir(parents=True, exist_ok=True)
         duration = meta["durationSeconds"]
-        want = min(remaining, max(1, int(duration * fps)))
-        candidates = min(int(duration * fps * oversample), want * MAX_CANDIDATES_PER_FRAME)
-        if meta.get("frameRate"):
-            candidates = min(candidates, int(duration * meta["frameRate"]))  # no duplicates
+        # Never sample above the video's own frame rate: FFmpeg's fps filter would
+        # duplicate frames (a 1 fps time-lapse would yield copies of each frame).
+        native = float(meta.get("frameRate") or 0)
+        rate = min(fps, native) if native > 0 else fps
+        want = min(remaining, max(1, int(duration * rate)))
+        candidates = min(int(duration * rate * oversample), want * MAX_CANDIDATES_PER_FRAME)
+        if native > 0:
+            candidates = min(candidates, int(duration * native))
         ctx.progress("Extracting frames.", source=index, frames=want)
         timeout = max(300.0, duration * 4)
         if candidates <= want:
             take = extract_frames(
-                ctx, local[video["uploadId"]], folder, fps, want, long_edge, timeout
+                ctx, local[video["uploadId"]], folder, rate, want, long_edge, timeout
             )
         else:
             take, stats = extract_keyframes(

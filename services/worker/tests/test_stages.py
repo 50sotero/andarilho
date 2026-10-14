@@ -88,9 +88,11 @@ def test_settings_from_env(tmp_path):
 class FakeMediaRunner:
     """Stands in for ffprobe/ffmpeg: records argv and writes plausible outputs."""
 
-    def __init__(self, codec: str = "h264", duration: float = 10.0, photo_sizes=None) -> None:
+    def __init__(
+        self, codec: str = "h264", duration: float = 10.0, photo_sizes=None, frame_rate="30/1"
+    ) -> None:
         self.calls: list[list[str]] = []
-        self.codec, self.duration = codec, duration
+        self.codec, self.duration, self.frame_rate = codec, duration, frame_rate
         self.photo_sizes = list(photo_sizes or [(1600, 1200)])
         self.photos = 0
 
@@ -103,7 +105,7 @@ class FakeMediaRunner:
         if argv[0] == "ffprobe":
             stdout = json.dumps({
                 "streams": [{"codec_type": "video", "codec_name": self.codec, "width": 1920,
-                             "height": 1080, "avg_frame_rate": "30/1", "duration": str(self.duration)},
+                             "height": 1080, "avg_frame_rate": self.frame_rate, "duration": str(self.duration)},
                             {"codec_type": "audio", "codec_name": "aac"}],
                 "format": {"duration": str(self.duration), "start_time": "0"},
             })  # fmt: skip
@@ -188,6 +190,22 @@ def test_prepare_extracts_bounded_frames_and_strips_metadata(
     stats = result["result_manifest"]["keyframes"][0]
     assert stats["candidates"] == 120 and stats["kept"] == 40
     assert stats["keptMedianSharpness"] > stats["medianSharpness"] == 0
+
+
+def test_prepare_never_samples_above_the_native_frame_rate(db, seed, store, settings, monkeypatch):
+    monkeypatch.setattr(prepare_mod, "tool_available", lambda name: True)
+    fake = FakeMediaRunner(frame_rate="1/1")  # a 10 s, 1 fps time-lapse
+    sup = Supervisor(db, store, settings, runner=fake)
+    pid = seed.project()
+    _preparing_job(seed, store, pid, photos=0)
+    assert sup.execute(queue.claim(db, "w", "cpu")) == "succeeded"
+    (video_call,) = [c for c in fake.calls if c[0] == "ffmpeg"]  # no candidates to choose from
+    assert "fps=1.0000" in video_call[video_call.index("-vf") + 1]
+    assert int(video_call[video_call.index("-frames:v") + 1]) == 10  # one per source frame
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'camera_reconstruction'")[
+        "input_manifest"
+    ]["outputs"]
+    assert outputs["frameCount"] == 10
 
 
 def test_prepare_groups_photos_by_dimensions(db, seed, store, settings, monkeypatch):
