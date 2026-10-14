@@ -25,6 +25,7 @@ from andarilho_api.domain import audit
 from andarilho_api.domain.runs import cancel_jobs, finalize_if_idle
 from andarilho_api.models import (
     ACTIVE_RUN_STATUSES,
+    TERMINAL_JOB_STATES,
     Job,
     Project,
     ReconstructionRun,
@@ -87,22 +88,7 @@ def request_deletion(
         upload.status = "aborted"
         upload.multipart_upload_id = None
 
-    db.add(
-        Job(
-            id=uuid.uuid4(),
-            project_id=project.id,
-            run_id=None,
-            capability="cpu",
-            stage="project_cleanup",
-            state="queued",
-            priority=10,
-            input_manifest={
-                "projectId": str(project.id),
-                "prefix": tenant_prefix(project.id),
-                "requestedAt": now.isoformat(),
-            },
-        )
-    )
+    db.add(_cleanup_job(project.id, now))
     audit.record(
         db,
         project_id=project.id,
@@ -113,3 +99,48 @@ def request_deletion(
         data={"cancelledRuns": [str(r.id) for r in runs]},
     )
     return to_abort
+
+
+def _cleanup_job(project_id: uuid.UUID, requested_at: datetime) -> Job:
+    return Job(
+        id=uuid.uuid4(),
+        project_id=project_id,
+        run_id=None,
+        capability="cpu",
+        stage="project_cleanup",
+        state="queued",
+        priority=10,
+        input_manifest={
+            "projectId": str(project_id),
+            "prefix": tenant_prefix(project_id),
+            "requestedAt": requested_at.isoformat(),
+        },
+    )
+
+
+def ensure_cleanup(db: Session, project: Project, *, now: datetime) -> bool:
+    """Queue a fresh ``project_cleanup`` for a project stuck in ``deleting``.
+
+    A cleanup job that ran out of attempts (storage outage, repeated lease loss)
+    is terminal, so a repeated deletion request starts a new one. The original
+    request time is kept so the cleanup horizon does not move. Returns True when
+    a job was added.
+    """
+    jobs = (
+        db.execute(
+            select(Job)
+            .where(Job.project_id == project.id, Job.stage == "project_cleanup")
+            .order_by(Job.created_at)
+        )
+        .scalars()
+        .all()
+    )
+    if any(job.state not in TERMINAL_JOB_STATES for job in jobs):
+        return False
+    requested = now
+    if jobs:
+        recorded = jobs[0].input_manifest.get("requestedAt")
+        if recorded:
+            requested = datetime.fromisoformat(recorded)
+    db.add(_cleanup_job(project.id, requested))
+    return True

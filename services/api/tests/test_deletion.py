@@ -133,3 +133,20 @@ def test_delete_idle_run_releases_reservation(client, auth, db):
     assert run.status == "cancelled"
     ledger = db.execute(select(UsageLedger).where(UsageLedger.run_id == run.id)).scalar_one()
     assert ledger.state == "released"
+
+
+def test_repeated_delete_requeues_failed_cleanup(client, auth, db):
+    pid = create_project(client, auth)["id"]
+    assert client.delete(f"/v1/projects/{pid}", headers=auth()).status_code == 202
+    cleanups = select(Job).where(Job.stage == "project_cleanup")
+    first = db.execute(cleanups).scalar_one()
+    first.state = "failed"  # e.g. attempts exhausted during a storage outage
+    db.commit()
+    assert client.delete(f"/v1/projects/{pid}", headers=auth()).status_code == 202
+    db.expire_all()
+    jobs = sorted(db.execute(cleanups).scalars(), key=lambda j: j.state)
+    assert [j.state for j in jobs] == ["failed", "queued"]
+    # The original request time is kept, so the cleanup horizon does not move.
+    assert jobs[1].input_manifest["requestedAt"] == jobs[0].input_manifest["requestedAt"]
+    assert client.delete(f"/v1/projects/{pid}", headers=auth()).status_code == 202
+    assert len(db.execute(cleanups).all()) == 2

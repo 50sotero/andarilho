@@ -127,6 +127,21 @@ def test_spawn_blocked_detected(manifest):
     assert "SPAWN_BLOCKED" in codes(validate_scene(bad, fetch))
 
 
+def test_spawn_obstacle_check_uses_the_spawn_floor(manifest):
+    layout = json.loads((FIXTURES / "synthetic-two-room.layout.json").read_text())
+    assert validate_scene(manifest, fetch, layout=layout) == []
+    feet = manifest["spawn"]["feet"]
+    x, z = feet[0], feet[2]
+    square = [[x - 0.2, z - 0.2], [x + 0.2, z - 0.2], [x + 0.2, z + 0.2], [x - 0.2, z + 0.2]]
+    upstairs = copy.deepcopy(layout)
+    upstairs["floors"].append({**copy.deepcopy(layout["floors"][0]), "id": "upper", "elevation": 3})
+    upstairs["obstacles"] = [{"id": "desk", "floorId": "upper", "footprint": square, "height": 0.8}]
+    assert validate_scene(manifest, fetch, layout=upstairs) == []
+    same_floor = copy.deepcopy(upstairs)
+    same_floor["obstacles"][0]["floorId"] = manifest["spawn"]["floorId"]
+    assert "SPAWN_BLOCKED" in codes(validate_scene(manifest, fetch, layout=same_floor))
+
+
 def test_canonical_sha_matches_api_rule():
     value = {"b": 1, "a": "ç"}
     assert canonical_json(value) == '{"a":"ç","b":1}'.encode()

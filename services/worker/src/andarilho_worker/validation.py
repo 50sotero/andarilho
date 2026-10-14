@@ -173,6 +173,9 @@ def check_collision_glb(
         if floor is None or not floor_supports(floor, (feet[0], feet[2])):
             findings.append(Finding("SPAWN_NOT_SUPPORTED", "spawn is outside the approved floor"))
         for obstacle in layout.get("obstacles", []):
+            # Only obstacles on the spawn floor can block it; others are above or below.
+            if obstacle["floorId"] != manifest["spawn"]["floorId"]:
+                continue
             if point_in_polygon((feet[0], feet[2]), obstacle["footprint"]):
                 findings.append(Finding("SPAWN_BLOCKED", "spawn is inside an obstacle"))
     return findings

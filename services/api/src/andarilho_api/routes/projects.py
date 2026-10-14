@@ -19,7 +19,7 @@ from andarilho_api.auth import current_subject
 from andarilho_api.db import get_db
 from andarilho_api.deps import check_if_match, get_storage, utcnow
 from andarilho_api.domain import audit
-from andarilho_api.domain.deletion import request_deletion
+from andarilho_api.domain.deletion import ensure_cleanup, request_deletion
 from andarilho_api.domain.membership import OWNER, WRITERS, load_project
 from andarilho_api.domain.publication import live_published, published_revision_id
 from andarilho_api.errors import validation_failed
@@ -221,4 +221,6 @@ def delete_project(
             except StorageError:
                 # The project_cleanup job and bucket lifecycle rules reconcile leftovers.
                 logger.warning("multipart abort failed during project deletion")
+    elif project.lifecycle == "deleting" and ensure_cleanup(db, project, now=utcnow()):
+        db.commit()
     return {"projectId": str(project.id), "lifecycle": "deleting"}
