@@ -64,6 +64,10 @@ TERMINAL_JOB_STATES = ("succeeded", "failed", "cancelled")
 VALIDATION_STATES = ("pending", "valid", "invalid")
 APPROVAL_STATES = ("draft", "approved")
 LEDGER_STATES = ("reserved", "released", "settled")
+# Existing-tour sources (README section 15). Only provider embeds exist so far; a
+# native import (MatterPak, GLB) adds its kind with its own pipeline.
+IMPORT_KINDS = ("matterport_embed",)
+IMPORT_PROVIDERS = ("matterport",)
 
 
 def _in(column: str, values: tuple[str, ...]) -> str:
@@ -564,6 +568,39 @@ class IdempotencyRecord(Base):
 
     __table_args__ = (
         UniqueConstraint("project_id", "operation", "idempotency_key", name="uq_idempotency_scope"),
+    )
+
+
+class TourImport(Base):
+    """An existing tour attached to a project, with its provenance (README section 15).
+
+    A ``matterport_embed`` is the provider's own presentation shown in an iframe
+    built from the validated model id; it is never a native scene manifest.
+    """
+
+    __tablename__ = "tour_imports"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    created_by: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    canonical_url: Mapped[str] = mapped_column(Text, nullable=False)
+    # The listing page the tour was found on, if any (provenance and attribution).
+    listing_url: Mapped[str | None] = mapped_column(Text)
+    # How it was acquired and what the user confirmed, e.g. permission to show it.
+    provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    created_at: Mapped[datetime] = _created()
+
+    __table_args__ = (
+        CheckConstraint(_in("kind", IMPORT_KINDS), name="kind"),
+        CheckConstraint(_in("provider", IMPORT_PROVIDERS), name="provider"),
+        UniqueConstraint("project_id", "provider", "model_id", name="uq_tour_imports_model"),
     )
 
 

@@ -148,6 +148,25 @@ export interface PartUrlsResponse {
   expiresAt: string;
 }
 
+/** An existing provider tour attached to a project (README section 15): an embed only. */
+export interface TourImport {
+  id: string;
+  projectId: string;
+  kind: "matterport_embed";
+  provider: "matterport";
+  modelId: string;
+  canonicalUrl: string;
+  listingUrl: string | null;
+  createdAt: string;
+}
+
+export interface ImportResolution {
+  source: "matterport_url" | "homeq_listing";
+  listingUrl: string | null;
+  tours: { provider: "matterport"; modelId: string; canonicalUrl: string; modes: string[] }[];
+  notes: string[];
+}
+
 /** Optional AI explanation of a failed run (README section 16); suggestions only. */
 export interface RunAdvice {
   runId: string;

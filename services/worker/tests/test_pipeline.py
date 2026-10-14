@@ -543,6 +543,13 @@ def test_project_cleanup_deletes_objects_and_tombstones(db, seed, store, sup):
     other = seed.project()
     store.put_bytes(f"tenants/{other}/keep.bin", b"x")
     store.multipart_uploads["mp-1"] = f"tenants/{pid}/staging/abc"
+    seed.exec(
+        "INSERT INTO tour_imports (id, project_id, created_by, kind, provider, model_id, "
+        "canonical_url, listing_url) VALUES (%s, %s, 'user-1', 'matterport_embed', "
+        "'matterport', 'GzAxTe2zAQs', 'https://my.matterport.com/show/?m=GzAxTe2zAQs', "
+        "'https://www.homeq.se/lagenhet/1')",
+        str(uuid.uuid4()), pid,
+    )  # fmt: skip
     assert store.list_keys(f"tenants/{pid}/")
     seed.exec("UPDATE projects SET lifecycle = 'deleting' WHERE id = %s", pid)
     seed.job(pid, "project_cleanup", {"projectId": pid, "prefix": f"tenants/{pid}/"}, priority=10)
@@ -565,6 +572,7 @@ def test_project_cleanup_deletes_objects_and_tombstones(db, seed, store, sup):
         seed.one("SELECT count(*) AS n FROM scene_revisions WHERE project_id = %s", pid)["n"] == 0
     )
     assert seed.one("SELECT count(*) AS n FROM artifacts WHERE project_id = %s", pid)["n"] == 0
+    assert seed.one("SELECT count(*) AS n FROM tour_imports WHERE project_id = %s", pid)["n"] == 0
     audit = seed.one("SELECT action, data FROM audit_events WHERE project_id = %s", pid)
     assert audit["action"] == "project.cleanup_completed" and audit["data"]["passes"] == 2
     assert store.list_keys(f"tenants/{other}/") == [f"tenants/{other}/keep.bin"]

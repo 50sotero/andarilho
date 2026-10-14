@@ -133,6 +133,14 @@ const ERROR_COPY: Record<string, { title: string; action: string }> = {
     action: "Remove some inputs or delete older projects.",
   },
   RATE_LIMITED: { title: "Too many requests", action: "Wait a moment and try again." },
+  IMPORT_UNSUPPORTED: {
+    title: "That link can't be imported",
+    action: "Paste a Matterport tour link or a HomeQ listing page.",
+  },
+  IMPORT_SOURCE_UNAVAILABLE: {
+    title: "The listing page couldn't be read",
+    action: "Check the link, or paste the Matterport tour link itself.",
+  },
   AI_UNAVAILABLE: {
     title: "AI suggestions aren't available",
     action: "Use the guidance above, or try again later.",

@@ -15,6 +15,7 @@ from andarilho_api.models import (
     Scene,
     SceneRevision,
     ShareLink,
+    TourImport,
     Upload,
 )
 
@@ -210,4 +211,17 @@ def share(s: ShareLink) -> dict[str, Any]:
         "expiresAt": iso(s.expires_at),
         "revokedAt": iso(s.revoked_at),
         "createdAt": iso(s.created_at),
+    }
+
+
+def tour_import(t: TourImport) -> dict[str, Any]:
+    return {
+        "id": str(t.id),
+        "projectId": str(t.project_id),
+        "kind": t.kind,
+        "provider": t.provider,
+        "modelId": t.model_id,
+        "canonicalUrl": t.canonical_url,
+        "listingUrl": t.listing_url,
+        "createdAt": iso(t.created_at),
     }

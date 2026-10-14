@@ -11,6 +11,7 @@ import {
   linkButtonClass,
   primaryLinkClass,
 } from "@/components/ui";
+import { ImportsPanel } from "@/features/imports/ImportsPanel";
 import { SharePanel } from "@/features/sharing/SharePanel";
 import { api } from "@/lib/api/client";
 import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
@@ -181,6 +182,10 @@ export function ProjectDetails({ projectId }: { projectId: string }) {
           ) : (
             <p className="mt-1 text-sm">A scene appears after processing succeeds.</p>
           )}
+        </Card>
+
+        <Card className="md:col-span-2">
+          <ImportsPanel projectId={project.id} canEdit={canEdit} />
         </Card>
 
         {detail.scene && project.role === "owner" && !deleting ? (

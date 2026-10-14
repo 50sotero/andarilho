@@ -125,3 +125,15 @@ class ShareCreate(Body):
 
 class PublicDeliveryRequest(Body):
     token: Annotated[str, Field(min_length=16, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")]
+
+
+class ImportResolve(Body):
+    url: Annotated[str, Field(min_length=8, max_length=2048)]
+
+
+class ImportCreate(Body):
+    kind: Literal["matterport_embed"]
+    model_id: Annotated[str, Field(pattern=r"^[A-Za-z0-9]{11}$")]
+    listing_url: Annotated[str, Field(max_length=2048)] | None = None
+    # The user confirms they may show this tour in Andarilho (README section 15).
+    permission_confirmed: Literal[True]

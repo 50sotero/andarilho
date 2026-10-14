@@ -10,7 +10,10 @@ const baseSecurityHeaders = [
   { key: "X-Frame-Options", value: "DENY" },
   {
     key: "Content-Security-Policy",
-    value: "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'",
+    // frame-src: the only embeds are Matterport tours built from a validated model id.
+    value:
+      "frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; " +
+      "frame-src https://my.matterport.com",
   },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },

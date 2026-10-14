@@ -13,8 +13,9 @@
 
 Metadata policy (documented here and in the final report):
 
-* deleted: jobs and job events (including this job), share links, project
-  members, idempotency records, scene revisions, scenes, artifacts, uploads;
+* deleted: jobs and job events (including this job), share links, attached
+  tours (``tour_imports``), project members, idempotency records, scene
+  revisions, scenes, artifacts, uploads;
 * retained but scrubbed for usage accounting: ``reconstruction_runs``
   (``created_by`` -> ``'deleted'``, ``error`` cleared), ``usage_ledger`` rows
   (reservations still ``reserved`` are released) and ``capture_sets``
@@ -65,6 +66,7 @@ def scrub(conn: Any, project_id: str, job_id: str, stats: dict[str, Any]) -> Non
     )
     conn.execute("DELETE FROM jobs WHERE project_id = %s", p)  # job_events cascade
     conn.execute("DELETE FROM share_links WHERE project_id = %s", p)
+    conn.execute("DELETE FROM tour_imports WHERE project_id = %s", p)
     conn.execute("UPDATE scenes SET current_draft_revision_id = NULL WHERE project_id = %s", p)
     conn.execute("DELETE FROM scene_revisions WHERE project_id = %s", p)
     conn.execute("DELETE FROM artifacts WHERE project_id = %s", p)

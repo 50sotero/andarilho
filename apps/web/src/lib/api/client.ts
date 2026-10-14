@@ -11,8 +11,10 @@ import type {
   Project,
   ProjectDetail,
   ProjectList,
+  ImportResolution,
   RunAccepted,
   RunAdvice,
+  TourImport,
   RunQuality,
   SceneDetail,
   ShareCreated,
@@ -154,6 +156,22 @@ export function createApiClient(fetchImpl: FetchLike = (input, init) => fetch(in
         `/v1/runs/${id(runId)}/cancel`,
         { method: "POST", body: {} },
       ),
+    // Existing tours
+    resolveImport: (projectId: string, url: string) =>
+      request<ImportResolution>(`/v1/projects/${id(projectId)}/imports/resolve`, {
+        method: "POST",
+        body: { url },
+      }),
+    createImport: (projectId: string, modelId: string, listingUrl: string | null) =>
+      request<TourImport>(`/v1/projects/${id(projectId)}/imports`, {
+        method: "POST",
+        body: { kind: "matterport_embed", modelId, listingUrl, permissionConfirmed: true },
+      }),
+    listImports: (projectId: string) =>
+      request<{ items: TourImport[] }>(`/v1/projects/${id(projectId)}/imports`),
+    deleteImport: (importId: string) =>
+      request<void>(`/v1/imports/${id(importId)}`, { method: "DELETE" }),
+
     getRunAdvice: (runId: string) =>
       request<RunAdvice>(`/v1/runs/${id(runId)}/advice`, { method: "POST", body: {} }),
     retryRun: (runId: string, idempotencyKey: string) =>
