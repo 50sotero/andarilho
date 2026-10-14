@@ -17,6 +17,7 @@ from andarilho_api.db import get_db
 from andarilho_api.deps import check_if_match, get_settings_dep, get_storage, utcnow
 from andarilho_api.domain import audit
 from andarilho_api.domain.membership import OWNER, WRITERS, load_project, load_scoped, lock_row
+from andarilho_api.domain.publication import published_revision_id
 from andarilho_api.domain.revisions import (
     build_envelope,
     hash_token,
@@ -48,6 +49,8 @@ from andarilho_api.settings import Settings
 from andarilho_api.storage import Storage
 
 logger = logging.getLogger("andarilho_api.scenes")
+INSPECTED_CONTENT_TYPES = {"pdf": "application/pdf", "png": "image/png", "jpeg": "image/jpeg"}
+
 router = APIRouter(tags=["scenes"])
 public_router = APIRouter(tags=["public"])
 
@@ -87,7 +90,10 @@ def _floor_plan(db: Session, scene: Scene, store: Storage, ttl: int) -> dict | N
         return None
     return {
         "uploadId": str(upload.id),
-        "contentType": upload.declared_content_type,
+        # The inspected signature, not the client's declared type, decides how it renders.
+        "contentType": INSPECTED_CONTENT_TYPES.get(
+            (upload.media_metadata or {}).get("format"), upload.declared_content_type
+        ),
         "url": store.presign_get(upload.immutable_key, ttl, upload.storage_version),
         "expiresAt": (utcnow() + timedelta(seconds=ttl)).isoformat(),
     }
@@ -251,8 +257,11 @@ def scene_delivery(
     revision = _revision_of(db, scene, body.scene_revision_id)
     if revision.validation_state != "valid":
         raise invalid_state("This scene revision has not passed validation.")
-    if role not in WRITERS and revision.approval_state != "approved":
-        # Viewers walk approved revisions only; drafts stay with the reviewers.
+    if role not in WRITERS and (
+        revision.approval_state != "approved" or published_revision_id(db, project) != revision.id
+    ):
+        # Viewers walk only the revision currently published through a live share link;
+        # drafts and formerly published revisions stay with the reviewers.
         raise not_found("scene revision")
     envelope = build_envelope(storage, settings, revision)
     if revision.manifest_sha256 is None:

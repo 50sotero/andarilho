@@ -21,6 +21,7 @@ from andarilho_api.models import (
     Scene,
     SceneRevision,
     ShareLink,
+    Upload,
 )
 
 
@@ -327,18 +328,33 @@ def test_floor_plan_is_private_to_owners_and_editors(client, auth, db, setup):
     plan = _get_scene(client, auth, setup["sceneId"]).json()["floorPlan"]
     assert plan["uploadId"] == plan_id and plan["contentType"] == "application/pdf"
     assert f"originals/{plan_id}" in plan["url"] and plan["expiresAt"]
+    # A PNG declared as a PDF is labelled by its inspected signature.
+    upload = db.get(Upload, uuid.UUID(plan_id))
+    upload.media_metadata = {"format": "png", "width": 10, "height": 10}
+    db.commit()
+    assert _get_scene(client, auth, setup["sceneId"]).json()["floorPlan"]["contentType"] == (
+        "image/png"
+    )
     # Viewers cannot read draft review material at all (layout, findings, plan).
     assert _get_scene(client, auth, setup["sceneId"], sub="viewer-v").status_code == 403
 
 
-def test_viewers_only_receive_approved_revisions(client, auth, db, setup):
+def test_viewers_only_receive_the_live_published_revision(client, auth, db, setup):
     db.add(ProjectMember(project_id=uuid.UUID(setup["pid"]), subject="viewer-v", role="viewer"))
     db.commit()
     url = f"/v1/scenes/{setup['sceneId']}/delivery"
     body = {"sceneRevisionId": setup["revisionId"]}
     assert client.post(url, json=body, headers=auth("viewer-v")).status_code == 404
     assert _approve(client, auth, setup).status_code == 200
+    # Approved but not published: still review material.
+    assert client.post(url, json=body, headers=auth("viewer-v")).status_code == 404
+    assert _share(client, auth, setup, 2).status_code == 201
     assert client.post(url, json=body, headers=auth("viewer-v")).status_code == 200
+    share = db.execute(select(ShareLink)).scalar_one()
+    share.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    db.commit()
+    assert client.post(url, json=body, headers=auth("viewer-v")).status_code == 404
+    assert client.post(url, json=body, headers=auth()).status_code == 200  # owners still can
 
 
 def test_revoking_newest_share_keeps_older_live_link_published(client, auth, db, setup):

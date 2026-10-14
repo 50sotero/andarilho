@@ -16,6 +16,7 @@ import type { MediaKind, Upload } from "@/lib/api/types";
 import {
   fileFingerprint,
   getDefaultStorage,
+  isExpired,
   loadResumeRecord,
   partRange,
   remainingParts,
@@ -270,6 +271,13 @@ export class MultipartUpload {
         this.emit({ phase: "paused" });
         throw new UploadAbortedError();
       }
+      if (
+        error instanceof ApiError &&
+        (error.code === "UPLOAD_EXPIRED" || error.status === 404 || error.status === 410)
+      ) {
+        // The server no longer accepts this upload: the next Resume starts a new one.
+        this.discardRecord();
+      }
       this.emit({ phase: "failed", error });
       throw error;
     }
@@ -278,7 +286,11 @@ export class MultipartUpload {
   private async initialize(
     signal: AbortSignal,
   ): Promise<UploadResumeRecord | { completedUpload: Upload }> {
-    if (this.record) return this.record; // resuming within the same page session
+    if (this.record) {
+      // Resuming within the same page session, unless the upload expired meanwhile.
+      if (!isExpired(this.record, this.now())) return this.record;
+      this.discardRecord();
+    }
 
     const saved = loadResumeRecord(this.projectId, this.file, {
       storage: this.storage,
@@ -333,6 +345,11 @@ export class MultipartUpload {
     saveResumeRecord(record, this.storage);
     this.emit({ uploadId: record.uploadId, resumed: false });
     return record;
+  }
+
+  private discardRecord() {
+    this.record = null;
+    removeResumeRecord(this.projectId, this.fingerprint, this.storage);
   }
 
   private emitPartProgress(phase?: UploadPhase) {

@@ -393,4 +393,55 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).toHaveBeenCalledTimes(1);
     expect(upload.state.phase).toBe("completed");
   });
+  it("starts a new upload when a paused upload expired in the same session", async () => {
+    const size = 3 * PART;
+    const { api } = fakeApi(size);
+    let clock = Date.now();
+    let block = true;
+    let upload: MultipartUpload | null = null;
+    const putPart: PutPart = async (url, _b, signal) => {
+      if (block && partOf(url) === 2) {
+        upload!.pause();
+        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      }
+      return `"e${partOf(url)}"`;
+    };
+    upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+      api,
+      putPart,
+      storage: null,
+      concurrency: 1,
+      now: () => clock,
+    });
+    await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+    clock += 2 * 24 * 3600 * 1000; // paused past the upload's expiry
+    block = false;
+    await upload.start();
+    expect(api.createUpload).toHaveBeenCalledTimes(2);
+    expect(upload.state.phase).toBe("completed");
+  });
+
+  it("drops an upload the server reports expired so Resume starts over", async () => {
+    const size = 2 * PART;
+    let expired = true;
+    const { api } = fakeApi(size);
+    const sign = api.requestPartUrls.getMockImplementation()!;
+    api.requestPartUrls.mockImplementation(async (id: string, parts: number[]) => {
+      if (expired) {
+        throw new ApiError(410, { code: "UPLOAD_EXPIRED", message: "Expired.", retryable: false });
+      }
+      return sign(id, parts);
+    });
+    const upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+      api,
+      putPart: async (url) => `"e${partOf(url)}"`,
+      storage: null,
+      sleep: noSleep,
+    });
+    await expect(upload.start()).rejects.toBeInstanceOf(ApiError);
+    expired = false;
+    await upload.start();
+    expect(api.createUpload).toHaveBeenCalledTimes(2);
+    expect(upload.state.phase).toBe("completed");
+  });
 });
