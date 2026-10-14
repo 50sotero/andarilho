@@ -424,13 +424,18 @@ describe("MultipartUpload", () => {
   it("drops an upload the server reports expired so Resume starts over", async () => {
     const size = 2 * PART;
     let expired = true;
-    const { api } = fakeApi(size);
-    const sign = api.requestPartUrls.getMockImplementation()!;
-    api.requestPartUrls.mockImplementation(async (id: string, parts: number[]) => {
-      if (expired) {
-        throw new ApiError(410, { code: "UPLOAD_EXPIRED", message: "Expired.", retryable: false });
-      }
-      return sign(id, parts);
+    const signer = fakeApi(size).api;
+    const { api } = fakeApi(size, {
+      requestPartUrls: async (id: string, parts: number[]) => {
+        if (expired) {
+          throw new ApiError(410, {
+            code: "UPLOAD_EXPIRED",
+            message: "Expired.",
+            retryable: false,
+          });
+        }
+        return signer.requestPartUrls(id, parts);
+      },
     });
     const upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
       api,
