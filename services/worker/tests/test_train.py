@@ -67,8 +67,9 @@ def _context(tmp_path, store, settings, runner) -> StageContext:
         max_scratch_bytes=settings.max_scratch_bytes,
         cancellation=CancellationToken(deadline),
         job=JobInfo("p", "r", None, None, "gpu"),
-        services=StageServices(store=store, runner=runner, settings=settings,
-                               progress=lambda message, data: True),  # fmt: skip
+        services=StageServices(
+            store=store, runner=runner, settings=settings, progress=lambda message, data: True
+        ),  # fmt: skip
     )
 
 
