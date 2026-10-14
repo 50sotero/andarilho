@@ -88,6 +88,15 @@ services:
       dockerfile: infra/Dockerfile.api
     environment:
       <<: *app-env
+      # Optional AI advice for failed runs (README section 16): set AI_PROVIDER=opencode
+      # and OPENCODE_API_KEY_HOST_FILE (the key file's host path) in ../.env. The file
+      # is mounted read-only as a secret; the key itself never enters the environment.
+      AI_PROVIDER: ${AI_PROVIDER:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/openai/v1}
+      AI_MODEL: ${AI_MODEL:-deepseek-v4.1-flash}
+      OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
+    secrets:
+      - opencode_api_key
     depends_on:
       postgres:
         condition: service_healthy
@@ -155,3 +164,8 @@ volumes:
   postgres-data:
   minio-data:
   worker-scratch:
+
+secrets:
+  opencode_api_key:
+    # Unconfigured, this mounts an empty file and AI advice stays off.
+    file: ${OPENCODE_API_KEY_HOST_FILE:-./ai-key.none}

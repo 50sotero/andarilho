@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from andarilho_api.ai.client import AIClient
 from andarilho_api.auth import JwksCache, JwksFetcher, TokenVerifier
 from andarilho_api.db import make_engine, make_session_factory
 from andarilho_api.errors import RequestContextMiddleware, install_error_handlers
@@ -15,10 +16,14 @@ from andarilho_api.storage import Storage
 
 
 def create_app(
-    settings: Settings | None = None, *, jwks_fetcher: JwksFetcher | None = None
+    settings: Settings | None = None,
+    *,
+    jwks_fetcher: JwksFetcher | None = None,
+    ai_client: AIClient | None = None,
 ) -> FastAPI:
     """Build the app. ``jwks_fetcher`` replaces the HTTP JWKS download (tests inject
-    their own signing keys); verification itself is never skipped."""
+    their own signing keys); verification itself is never skipped. ``ai_client``
+    replaces the AI provider client (tests use a mock transport)."""
     settings = settings or get_settings()
     app = FastAPI(
         title="Andarilho API",
@@ -42,6 +47,8 @@ def create_app(
         leeway=settings.auth_leeway_seconds,
     )
     app.state.public_rate_limiter = RateLimiter(settings.public_delivery_rate_limit_per_minute)
+    app.state.ai_client = ai_client or AIClient(settings)
+    app.state.ai_rate_limiter = RateLimiter(settings.ai_requests_per_minute)
 
     install_error_handlers(app)
     if settings.cors_allowed_origins:

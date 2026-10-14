@@ -11,7 +11,7 @@ from functools import lru_cache
 from typing import Literal
 from urllib.parse import urlparse
 
-from pydantic import Field, model_validator
+from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 MIB = 1024 * 1024
@@ -78,6 +78,24 @@ class Settings(BaseSettings):
     # CORS is off by default; the web app proxies requests same-origin.
     cors_allowed_origins: list[str] = Field(default_factory=list)
 
+    # Optional AI enrichment (README section 16), off unless AI_PROVIDER is set. The
+    # key comes from OPENCODE_API_KEY or the file OPENCODE_API_KEY_FILE names; it is
+    # read when used and never logged, returned or passed to a subprocess.
+    ai_provider: Literal["opencode"] | None = None
+    ai_base_url: str = "https://opencode.ai/inference/openai/v1"
+    ai_model: str = "deepseek-v4.1-flash"
+    opencode_api_key: SecretStr | None = None
+    opencode_api_key_file: str | None = None
+    ai_max_output_tokens: int = Field(default=2048, ge=64, le=8192)
+    ai_timeout_seconds: float = Field(default=60, gt=0, le=300)
+    ai_max_concurrency: int = Field(default=2, ge=1, le=16)
+    ai_requests_per_minute: int = Field(default=10, ge=1)
+
+    @field_validator("ai_provider", "opencode_api_key", "opencode_api_key_file", mode="before")
+    @classmethod
+    def _blank_is_unset(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
     @property
     def video_max_bytes(self) -> int:
         return self.upload_max_video_bytes or self.upload_max_total_bytes
@@ -100,6 +118,8 @@ class Settings(BaseSettings):
             value = getattr(self, name)
             if urlparse(value).scheme != "https":
                 problems.append(f"{name.upper()} must use https in production")
+        if self.ai_provider is not None and urlparse(self.ai_base_url).scheme != "https":
+            problems.append("AI_BASE_URL must use https in production")
         checked = {
             "DATABASE_URL": self.database_url,
             "AUTH_ISSUER": self.auth_issuer,

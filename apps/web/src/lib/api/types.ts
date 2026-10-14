@@ -148,6 +148,16 @@ export interface PartUrlsResponse {
   expiresAt: string;
 }
 
+/** Optional AI explanation of a failed run (README section 16); suggestions only. */
+export interface RunAdvice {
+  runId: string;
+  provider: string;
+  model: string;
+  advice: { summary: string; steps: string[] };
+  /** What was sent to the provider, for display next to the advice. */
+  sent: string;
+}
+
 export interface RunAccepted {
   runId: string;
   jobId: string;

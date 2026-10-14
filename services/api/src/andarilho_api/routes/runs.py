@@ -6,13 +6,15 @@ import uuid
 from collections.abc import Callable
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Header, Query
+from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from andarilho_api import serializers as ser
+from andarilho_api.ai.client import AIClient, AIError
+from andarilho_api.ai.tasks import explain_failed_run
 from andarilho_api.auth import current_subject
 from andarilho_api.db import get_db
 from andarilho_api.deps import get_settings_dep, utcnow
@@ -25,7 +27,7 @@ from andarilho_api.domain.runs import (
     request_run_cancellation,
     submit_run,
 )
-from andarilho_api.errors import invalid_state, not_found
+from andarilho_api.errors import ApiError, invalid_state, not_found
 from andarilho_api.models import CaptureSet, Job, JobEvent, ReconstructionRun
 from andarilho_api.schemas.api import EmptyBody, RunCreate
 from andarilho_api.settings import Settings
@@ -228,6 +230,84 @@ def retry_run(
         req_hash=req_hash,
         action=action,
     )
+
+
+# What the advice request sends to the provider, shown next to the result.
+ADVICE_SENT = "The error code, its message and capture statistics. No images or files are sent."
+
+
+def _ai_failure(exc: AIError) -> ApiError:
+    if exc.kind == "rate_limited":
+        headers = {"Retry-After": str(exc.retry_after)} if exc.retry_after else None
+        return ApiError(
+            429,
+            "AI_RATE_LIMITED",
+            "The AI provider is busy.",
+            retryable=True,
+            suggested_action="Try again in a minute.",
+            headers=headers,
+        )
+    if exc.kind == "invalid_output":
+        return ApiError(502, "AI_INVALID_OUTPUT", "The AI reply could not be used.", retryable=True)
+    if exc.kind in ("timeout", "unavailable"):
+        return ApiError(503, "AI_UNAVAILABLE", "The AI provider did not answer.", retryable=True)
+    # not_configured / unauthorized: an operator problem, reported the same way.
+    return ApiError(503, "AI_UNAVAILABLE", "AI suggestions are not available here.")
+
+
+@router.post("/runs/{run_id}/advice")
+def run_advice(run_id: uuid.UUID, subject: Subject, db: Db, request: Request):
+    """Optional AI explanation of a failed run with recapture steps (README section 16).
+
+    Only the error code, its public message, the failed stage and capture
+    statistics are sent; the run's outcome and the static guidance never depend on it.
+    """
+    scoped = load_scoped(db, ReconstructionRun, run_id, subject, "run")
+    load_project(db, scoped.project_id, subject, roles=WRITERS, require_active=True)
+    if scoped.status != "failed" or not scoped.error:
+        raise invalid_state("Suggestions are only available for a failed run.")
+    client: AIClient = request.app.state.ai_client
+    if not client.enabled:
+        raise _ai_failure(AIError("not_configured"))
+    wait = request.app.state.ai_rate_limiter.check(str(scoped.project_id))
+    if wait is not None:
+        raise _ai_failure(AIError("rate_limited", retry_after=wait))
+    failed_stage = db.execute(
+        select(Job.stage)
+        .where(Job.run_id == scoped.id, Job.state == "failed")
+        .order_by(Job.updated_at.desc())
+        .limit(1)
+    ).scalar_one_or_none()
+    error, quality, project_id = dict(scoped.error), scoped.quality, scoped.project_id
+    db.commit()  # release the connection while the provider answers
+    try:
+        completion = explain_failed_run(
+            client, error=error, failed_stage=failed_stage, quality=quality
+        )
+    except AIError as exc:
+        raise _ai_failure(exc) from None
+    audit.record(
+        db,
+        project_id=project_id,
+        actor=subject,
+        action="run.ai_advice",
+        resource_type="run",
+        resource_id=run_id,
+        data={
+            "provider": completion.provider,
+            "model": completion.model,
+            "promptTokens": completion.usage.prompt_tokens,
+            "completionTokens": completion.usage.completion_tokens,
+        },
+    )
+    db.commit()
+    return {
+        "runId": str(run_id),
+        "provider": completion.provider,
+        "model": completion.model,
+        "advice": completion.value.model_dump(),
+        "sent": ADVICE_SENT,
+    }
 
 
 @router.get("/jobs/{job_id}")

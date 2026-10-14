@@ -7,6 +7,7 @@ import { api, newIdempotencyKey } from "@/lib/api/client";
 import { friendlyFromErrorBody, toFriendlyError, type FriendlyError } from "@/lib/api/errors";
 import type { JobDetail, JobEvent, ProjectDetail, Run } from "@/lib/api/types";
 import { usePolling } from "@/lib/use-polling";
+import { RunAdvice } from "./RunAdvice";
 import {
   STAGES,
   canRetryRun,
@@ -151,6 +152,7 @@ export function ProcessingView({
   const friendlyRunError =
     runError && run?.status === "failed" ? friendlyFromErrorBody(runError) : null;
   const base = `/projects/${encodeURIComponent(projectId)}`;
+  const canEdit = detail?.project.role === "owner" || detail?.project.role === "editor";
 
   if (!detail) {
     return (
@@ -230,6 +232,7 @@ export function ProcessingView({
             ) : null}
           </div>
         ) : null}
+        {friendlyRunError && canEdit ? <RunAdvice key={run.id} runId={run.id} /> : null}
 
         <div className="mt-3 space-y-2">
           <ErrorNotice error={actionError} />

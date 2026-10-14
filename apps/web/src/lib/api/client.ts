@@ -12,6 +12,7 @@ import type {
   ProjectDetail,
   ProjectList,
   RunAccepted,
+  RunAdvice,
   RunQuality,
   SceneDetail,
   ShareCreated,
@@ -153,6 +154,8 @@ export function createApiClient(fetchImpl: FetchLike = (input, init) => fetch(in
         `/v1/runs/${id(runId)}/cancel`,
         { method: "POST", body: {} },
       ),
+    getRunAdvice: (runId: string) =>
+      request<RunAdvice>(`/v1/runs/${id(runId)}/advice`, { method: "POST", body: {} }),
     retryRun: (runId: string, idempotencyKey: string) =>
       request<RunAccepted>(`/v1/runs/${id(runId)}/retry`, {
         method: "POST",

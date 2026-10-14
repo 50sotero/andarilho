@@ -133,6 +133,15 @@ const ERROR_COPY: Record<string, { title: string; action: string }> = {
     action: "Remove some inputs or delete older projects.",
   },
   RATE_LIMITED: { title: "Too many requests", action: "Wait a moment and try again." },
+  AI_UNAVAILABLE: {
+    title: "AI suggestions aren't available",
+    action: "Use the guidance above, or try again later.",
+  },
+  AI_RATE_LIMITED: { title: "The AI provider is busy", action: "Try again in a minute." },
+  AI_INVALID_OUTPUT: {
+    title: "The AI reply couldn't be used",
+    action: "Try again, or use the guidance above.",
+  },
   UPSTREAM_UNAVAILABLE: {
     title: "The service is unavailable",
     action: "Check your connection and try again in a moment.",
@@ -189,7 +198,8 @@ export function toFriendlyError(error: unknown): FriendlyError {
   if (error instanceof ApiError) {
     const copy = ERROR_COPY[error.code];
     let action = error.suggestedAction ?? copy?.action ?? null;
-    if (error.code === "RATE_LIMITED" && error.retryAfterSeconds != null) {
+    const limited = error.code === "RATE_LIMITED" || error.code === "AI_RATE_LIMITED";
+    if (limited && error.retryAfterSeconds != null) {
       action = `Wait about ${Math.max(1, Math.ceil(error.retryAfterSeconds))} seconds and try again.`;
     }
     return {
