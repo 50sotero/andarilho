@@ -9,6 +9,7 @@ import hashlib
 import json
 import math
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -17,7 +18,7 @@ from andarilho_worker.contracts import SCHEMA_VERSION, scene_validator
 from andarilho_worker.geometry.collide import capsule_clearance
 from andarilho_worker.geometry.glb import GlbError, read_glb
 from andarilho_worker.geometry.layout import Finding, floor_supports, validate_layout
-from andarilho_worker.geometry.ply import PlyError, parse_header
+from andarilho_worker.geometry.ply import MAX_HEADER_BYTES, PlyError, parse_header
 from andarilho_worker.geometry.polygon import point_in_polygon
 
 BOUNDS_TOLERANCE = 1e-3
@@ -196,6 +197,7 @@ def _floor_under(nodes, feet: Sequence[float], tolerance: float = 0.05) -> bool:
 
 
 def check_render_asset(data: bytes, fmt: str) -> list[Finding]:
+    """Check a render asset from its leading bytes (at least the PLY header or magic)."""
     if fmt == "ply":
         try:
             parse_header(data)
@@ -213,35 +215,62 @@ def check_render_asset(data: bytes, fmt: str) -> list[Finding]:
     return [Finding("RENDER_ASSET", "unknown render format")]
 
 
+def _measure(source: bytes | Path) -> tuple[int, str]:
+    """Byte count and SHA-256 of an asset; a file is hashed in a stream."""
+    if not isinstance(source, Path):
+        return len(source), hashlib.sha256(source).hexdigest()
+    digest = hashlib.sha256()
+    with source.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return source.stat().st_size, digest.hexdigest()
+
+
+def _head(source: bytes | Path) -> bytes:
+    if not isinstance(source, Path):
+        return source[:MAX_HEADER_BYTES]
+    with source.open("rb") as fh:
+        return fh.read(MAX_HEADER_BYTES)
+
+
 def validate_scene(
     manifest: Mapping[str, Any],
-    fetch: Callable[[str], bytes],
+    fetch: Callable[[str], bytes | Path],
     *,
     project_id: str | None = None,
     layout: Mapping[str, Any] | None = None,
 ) -> list[Finding]:
-    """Full validation: manifest semantics, asset hashes/bytes, GLB and spawn checks."""
+    """Full validation: manifest semantics, asset hashes/bytes, GLB and spawn checks.
+
+    ``fetch`` returns an asset's bytes or a local file holding them; files are
+    hashed in a stream and only the render asset's header is read, so a
+    multi-GiB render asset is never held in memory.
+    """
     findings = validate_manifest(manifest, project_id=project_id)
     if findings:
         return findings
     if layout is not None:
         findings += validate_layout(layout)
-    blobs: dict[str, bytes] = {}
+    sources: dict[str, bytes | Path] = {}
     for name, asset in manifest["assets"].items():
         if asset is None:
             continue
         try:
-            data = fetch(asset["key"])
+            source = fetch(asset["key"])
         except FileNotFoundError:
             findings.append(Finding("ASSET_MISSING", f"{name} asset is missing"))
             continue
-        if len(data) != asset["bytes"]:
+        size, sha256 = _measure(source)
+        if size != asset["bytes"]:
             findings.append(Finding("ASSET_BYTES", f"{name} byte count does not match"))
-        if hashlib.sha256(data).hexdigest() != asset["sha256"]:
+        if sha256 != asset["sha256"]:
             findings.append(Finding("ASSET_SHA256", f"{name} sha256 does not match"))
-        blobs[name] = data
-    if "render" in blobs:
-        findings += check_render_asset(blobs["render"], manifest["assets"]["render"]["format"])
-    if "collision" in blobs:
-        findings += check_collision_glb(blobs["collision"], manifest, layout)
+        sources[name] = source
+    if "render" in sources:
+        render_format = manifest["assets"]["render"]["format"]
+        findings += check_render_asset(_head(sources["render"]), render_format)
+    if "collision" in sources:
+        collision = sources["collision"]  # generated, small: parsed in memory
+        data = collision.read_bytes() if isinstance(collision, Path) else collision
+        findings += check_collision_glb(data, manifest, layout)
     return findings

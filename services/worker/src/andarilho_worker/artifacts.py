@@ -9,11 +9,13 @@ and are written with :func:`put_immutable` (never overwritten with different byt
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import re
 import shutil
+import tempfile
 import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
@@ -59,7 +61,9 @@ class ObjectInfo:
 
 class ObjectStore(Protocol):
     def put_bytes(self, key: str, data: bytes, content_type: str = ...) -> ObjectInfo: ...
-    def create_new(self, key: str, data: bytes, content_type: str = ...) -> ObjectInfo | None: ...
+    def create_new(
+        self, key: str, data: bytes | Path, content_type: str = ...
+    ) -> ObjectInfo | None: ...
     def put_file(self, key: str, path: Path, content_type: str = ...) -> ObjectInfo: ...
     def get_bytes(self, key: str, version: str | None = None, max_bytes: int = ...) -> bytes: ...
     def download(self, key: str, dest: Path, version: str | None = None) -> str: ...
@@ -97,19 +101,25 @@ class LocalObjectStore:
         os.replace(tmp, path)
         return ObjectInfo(key, len(data), None)
 
-    def create_new(self, key: str, data: bytes, content_type: str = "application/octet-stream"):
-        """Atomically create ``key``; return ``None`` if it already exists."""
+    def create_new(
+        self, key: str, data: bytes | Path, content_type: str = "application/octet-stream"
+    ):
+        """Atomically create ``key`` from bytes or a file; return ``None`` if it already exists."""
         path = self._path(key)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-        tmp.write_bytes(data)
+        if isinstance(data, Path):
+            shutil.copyfile(data, tmp)
+        else:
+            tmp.write_bytes(data)
+        size = tmp.stat().st_size
         try:
             os.link(tmp, path)  # fails if the destination exists; never replaces it
         except FileExistsError:
             return None
         finally:
             tmp.unlink(missing_ok=True)
-        return ObjectInfo(key, len(data), None)
+        return ObjectInfo(key, size, None)
 
     def put_file(self, key: str, path: Path, content_type: str = "application/octet-stream"):
         dest = self._path(key)
@@ -208,23 +218,32 @@ class S3ObjectStore:
             raise self._wrap(exc) from exc
         return ObjectInfo(key, len(data), resp.get("VersionId"))
 
-    def create_new(self, key: str, data: bytes, content_type: str = "application/octet-stream"):
-        """Conditional create (``If-None-Match: *``); return ``None`` if ``key`` exists."""
+    def create_new(
+        self, key: str, data: bytes | Path, content_type: str = "application/octet-stream"
+    ):
+        """Conditional create (``If-None-Match: *``); return ``None`` if ``key`` exists.
+
+        A file is streamed as the request body (one PUT: at most 5 GiB, which bounds
+        ``MAX_RENDER_BYTES``), so large render assets are never held in memory.
+        """
         try:
-            resp = self.client.put_object(
-                Bucket=self.bucket,
-                Key=check_key(key),
-                Body=data,
-                ContentType=content_type,
-                ChecksumAlgorithm="SHA256",
-                IfNoneMatch="*",
-            )
+            with contextlib.ExitStack() as stack:
+                body = stack.enter_context(data.open("rb")) if isinstance(data, Path) else data
+                resp = self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=check_key(key),
+                    Body=body,
+                    ContentType=content_type,
+                    ChecksumAlgorithm="SHA256",
+                    IfNoneMatch="*",
+                )
         except Exception as exc:
             code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
             if code in ("PreconditionFailed", "412", "ConditionalRequestConflict"):
                 return None
             raise self._wrap(exc) from exc
-        return ObjectInfo(key, len(data), resp.get("VersionId"))
+        size = data.stat().st_size if isinstance(data, Path) else len(data)
+        return ObjectInfo(key, size, resp.get("VersionId"))
 
     def put_file(self, key: str, path: Path, content_type: str = "application/octet-stream"):
         try:
@@ -355,22 +374,32 @@ class S3ObjectStore:
 def put_immutable(
     store: ObjectStore,
     key: str,
-    data: bytes,
+    data: bytes | Path,
     content_type: str,
     *,
-    max_bytes: int = MAX_INLINE_BYTES,
+    sha256: str | None = None,
 ) -> ObjectInfo:
     """Write ``data`` once; an identical existing object is reused, a different one is an error.
 
-    The create is atomic (conditional), so a stale attempt racing a retry can never
-    replace bytes that the fenced winner already committed to a manifest.
+    ``data`` is bytes or a local file, which is streamed (render assets can be
+    GiBs). The create is atomic (conditional), so a stale attempt racing a retry
+    can never replace bytes that the fenced winner already committed to a
+    manifest. On a collision the existing object is streamed to a temporary file
+    and compared by SHA-256; ``sha256`` saves rehashing a file the caller hashed.
     """
     created = store.create_new(key, data, content_type)
     if created is not None:
         return created
+    if isinstance(data, Path):
+        expected = sha256 or _sha256_file(data)
+        scratch = data.parent
+    else:
+        expected = sha256 or hashlib.sha256(data).hexdigest()
+        scratch = None
     existing = store.head(key)
-    current = store.get_bytes(key, max_bytes=max(max_bytes, len(data)))
-    if existing is not None and hashlib.sha256(current).digest() == hashlib.sha256(data).digest():
+    with tempfile.TemporaryDirectory(dir=scratch) as tmp:
+        current = store.download(key, Path(tmp) / "existing")
+    if existing is not None and current == expected:
         return existing
     raise StageError("ARTIFACT_CONFLICT")
 

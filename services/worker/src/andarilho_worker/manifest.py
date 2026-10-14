@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from andarilho_worker.contracts import SCHEMA_VERSION
@@ -16,13 +17,21 @@ def scene_prefix(project_id: str, scene_revision_id: str) -> str:
     return f"tenants/{project_id}/scenes/{scene_revision_id}/"
 
 
-def asset_entry(key: str, data: bytes, fmt: str) -> dict[str, Any]:
-    return {
-        "key": key,
-        "format": fmt,
-        "bytes": len(data),
-        "sha256": hashlib.sha256(data).hexdigest(),
-    }
+def asset_entry(
+    key: str, data: bytes | Path, fmt: str, *, sha256: str | None = None
+) -> dict[str, Any]:
+    """Manifest entry for an asset given as bytes or as a local file (hashed in a stream)."""
+    if isinstance(data, Path):
+        size = data.stat().st_size
+        if sha256 is None:
+            digest = hashlib.sha256()
+            with data.open("rb") as fh:
+                for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            sha256 = digest.hexdigest()
+    else:
+        size, sha256 = len(data), sha256 or hashlib.sha256(data).hexdigest()
+    return {"key": key, "format": fmt, "bytes": size, "sha256": sha256}
 
 
 def _clean_number(v: float) -> float | int:

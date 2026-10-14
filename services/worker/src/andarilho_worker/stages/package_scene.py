@@ -118,15 +118,20 @@ def run(ctx: StageContext) -> StageResult:
             "warnings": ["Synthetic scene: no capture was reconstructed."],
         }
     ctx.progress("Packaging scene files.")
-    render_bytes = ctx.store.get_bytes(source_key, max_bytes=MAX_RENDER_BYTES)
+    source = ctx.store.head(source_key)
+    if source is None:
+        raise StageError("MISSING_INPUT", details={"missing": "render asset"})
+    if source.size > MAX_RENDER_BYTES:
+        raise StageError("BUDGET_EXHAUSTED", "The scene is too large to package.")
+    # Streamed through scratch, never held in memory: render assets can be GiBs.
+    ctx.scratch.mkdir(parents=True, exist_ok=True)
+    render_path = ctx.scratch / f"scene.{render_format}"
+    render_sha = ctx.store.download(source_key, render_path)
     render_key = prefix + f"scene.{render_format}"
     render_info = put_immutable(
-        ctx.store,
-        render_key,
-        render_bytes,
-        CONTENT_TYPES[render_format],
-        max_bytes=MAX_RENDER_BYTES,
+        ctx.store, render_key, render_path, CONTENT_TYPES[render_format], sha256=render_sha
     )
+    render = asset_entry(render_key, render_path, render_format, sha256=render_sha)
     glb = ctx.store.get_bytes(str(ctx.output("collisionKey")))
     collision_key = prefix + "collision.glb"
     collision_info = put_immutable(ctx.store, collision_key, glb, "model/gltf-binary")
@@ -139,7 +144,7 @@ def run(ctx: StageContext) -> StageResult:
         run_id=str(ctx.run_id),
         layout=revision["layout"],
         layout_revision=int(revision["layout_revision"]),
-        render=asset_entry(render_key, render_bytes, render_format),
+        render=render,
         collision=asset_entry(collision_key, glb, "glb"),
         poster=None,
         world_from_decoded_render=matrix,
@@ -153,8 +158,7 @@ def run(ctx: StageContext) -> StageResult:
     manifest_key = prefix + "manifest.json"
     manifest_info = put_immutable(ctx.store, manifest_key, manifest_blob, "application/json")
     files = {
-        "render": {**asset_entry(render_key, render_bytes, render_format),
-                   "version": render_info.version},
+        "render": {**render, "version": render_info.version},
         "collision": {**asset_entry(collision_key, glb, "glb"), "version": collision_info.version},
         "manifest": {**asset_entry(manifest_key, manifest_blob, "json"),
                      "version": manifest_info.version},

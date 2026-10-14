@@ -15,6 +15,8 @@ revision becomes ``invalid`` with findings.
 
 from __future__ import annotations
 
+import hashlib
+from pathlib import Path
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -57,14 +59,21 @@ def run(ctx: StageContext) -> StageResult:
             "SCENE_VALIDATION_FAILED", on_fail=_invalidate(revision_id, findings)
         ) from exc
     ctx.progress("Validating the scene.")
+    assets = ctx.scratch / "assets"
+
+    def fetch(key: str) -> Path:
+        # Streamed to scratch and hashed from disk: render assets can be GiBs.
+        info = ctx.store.head(key)
+        if info is not None and info.size > MAX_RENDER_BYTES:
+            raise StageError("BUDGET_EXHAUSTED", "The scene is too large to validate.")
+        dest = assets / hashlib.sha256(key.encode()).hexdigest()
+        ctx.store.download(key, dest)
+        return dest
+
     findings = [
         f.as_dict()
         for f in validate_scene(
-            manifest,
-            # Assets are bounded by the render limit, not the small inline-object limit.
-            lambda key: ctx.store.get_bytes(key, max_bytes=MAX_RENDER_BYTES),
-            project_id=ctx.project_id,
-            layout=revision["layout"],
+            manifest, fetch, project_id=ctx.project_id, layout=revision["layout"]
         )
     ]
     if not findings and manifest.get("sceneRevisionId") != revision_id:
