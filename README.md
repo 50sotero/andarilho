@@ -279,7 +279,7 @@ andarilho/
         metrics.py
       tests/
   infra/
-    compose.yaml                       # API, web, Postgres, MinIO, CPU worker
+    compose.yaml                       # API, web behind a Caddy edge, Postgres, MinIO, CPU worker
     Dockerfile.api
     Dockerfile.worker-gpu
     Dockerfile.web

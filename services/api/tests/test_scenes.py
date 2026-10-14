@@ -385,8 +385,25 @@ def test_viewer_project_detail_uses_the_published_scene(client, auth, db, setup)
     db.commit()
     url = f"/v1/projects/{setup['pid']}"
     assert client.get(url, headers=auth("viewer-v")).json()["scene"] is None  # nothing published
-    db.get(Project, uuid.UUID(setup["pid"])).published_revision_id = uuid.UUID(setup["revisionId"])
-    db.commit()
+    assert _approve(client, auth, setup).status_code == 200
+    assert _share(client, auth, setup, 2).status_code == 201
     newer = scene(db, setup["pid"])  # a newer draft scene becomes the active draft
     assert client.get(url, headers=auth()).json()["scene"]["id"] == newer["sceneId"]
     assert client.get(url, headers=auth("viewer-v")).json()["scene"]["id"] == setup["sceneId"]
+
+
+def test_publication_ends_when_the_last_share_expires(client, auth, db, setup):
+    assert _approve(client, auth, setup).status_code == 200
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    assert _share(client, auth, setup, 2, expiresAt=expires).status_code == 201
+    url = f"/v1/projects/{setup['pid']}"
+    assert (
+        client.get(url, headers=auth()).json()["project"]["publishedRevisionId"]
+        == (setup["revisionId"])
+    )
+    share = db.execute(select(ShareLink)).scalar_one()
+    share.expires_at = datetime.now(UTC) - timedelta(seconds=1)  # expired naturally
+    db.commit()
+    assert client.get(url, headers=auth()).json()["project"]["publishedRevisionId"] is None
+    listed = client.get("/v1/projects", headers=auth()).json()["items"][0]
+    assert listed["publishedRevisionId"] is None

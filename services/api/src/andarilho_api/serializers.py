@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -34,7 +35,8 @@ def etag(version: int) -> str:
     return f'"{version}"'
 
 
-def project(p: Project, role: str) -> dict[str, Any]:
+def project(p: Project, role: str, published: uuid.UUID | None = None) -> dict[str, Any]:
+    """``published`` is the live-derived revision (see domain.publication)."""
     return {
         "id": str(p.id),
         "title": p.title,
@@ -42,7 +44,7 @@ def project(p: Project, role: str) -> dict[str, Any]:
         "version": p.version,
         "role": role,
         "activeDraftRevisionId": sid(p.active_draft_revision_id),
-        "publishedRevisionId": sid(p.published_revision_id),
+        "publishedRevisionId": sid(published),
         "createdAt": iso(p.created_at),
         "updatedAt": iso(p.updated_at),
     }

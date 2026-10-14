@@ -20,6 +20,7 @@ from andarilho_api.domain.quotas import check_upload
 from andarilho_api.errors import ApiError, invalid_state, validation_failed
 from andarilho_api.models import (
     ACTIVE_RUN_STATUSES,
+    TERMINAL_JOB_STATES,
     CaptureSet,
     Job,
     ReconstructionRun,
@@ -317,6 +318,12 @@ def delete_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store
     if upload.status == "verified":
         _remove_verified(db, upload)
         return Response(status_code=204)
+    if upload.status == "aborted" and upload.immutable_key is not None:
+        # Removed earlier but its bytes are still stored (the cleanup job may have
+        # run out of attempts): queue cleanup again unless one is still pending.
+        _queue_cleanup(db, upload)
+        db.commit()
+        return Response(status_code=204)
     if upload.status == "initiated":
         if upload.multipart_upload_id:
             try:
@@ -369,6 +376,23 @@ def _remove_verified(db: Session, upload: Upload) -> None:
         )
     upload.status = "aborted"
     upload.updated_at = utcnow()
+    _queue_cleanup(db, upload)
+    db.commit()
+
+
+def _queue_cleanup(db: Session, upload: Upload) -> None:
+    pending = db.execute(
+        select(
+            exists().where(
+                Job.project_id == upload.project_id,
+                Job.upload_id == upload.id,
+                Job.stage == "upload_cleanup",
+                Job.state.not_in(TERMINAL_JOB_STATES),
+            )
+        )
+    ).scalar_one()
+    if pending:
+        return
     db.add(
         Job(
             id=uuid.uuid4(),
@@ -385,4 +409,3 @@ def _remove_verified(db: Session, upload: Upload) -> None:
             },
         )
     )
-    db.commit()

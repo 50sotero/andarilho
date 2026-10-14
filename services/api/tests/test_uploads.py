@@ -325,3 +325,18 @@ def test_upload_backing_a_run_cannot_be_removed(client, auth, db):
     row = db.get(Upload, uuid.UUID(video))
     db.refresh(row)
     assert row.status == "verified"
+
+
+def test_deleting_a_removed_upload_requeues_failed_cleanup(client, auth, db):
+    pid = create_project(client, auth)["id"]
+    video = verified_upload(db, pid)
+    assert client.delete(f"/v1/uploads/{video}", headers=auth()).status_code == 204
+    # A pending cleanup is not duplicated.
+    assert client.delete(f"/v1/uploads/{video}", headers=auth()).status_code == 204
+    jobs = select(Job).where(Job.upload_id == uuid.UUID(video), Job.stage == "upload_cleanup")
+    first = db.execute(jobs).scalar_one()
+    first.state = "failed"  # e.g. storage outage exhausted its attempts
+    db.commit()
+    assert client.delete(f"/v1/uploads/{video}", headers=auth()).status_code == 204
+    states = sorted(j.state for j in db.execute(jobs).scalars())
+    assert states == ["failed", "queued"]

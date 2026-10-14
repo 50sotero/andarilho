@@ -102,15 +102,13 @@ export function UploadList({
                     Resume
                   </Button>
                 ) : null}
-                {row.serverStatus !== "verified" ? (
-                  <Button
-                    variant="ghost"
-                    onClick={() => onRemove(row.id)}
-                    aria-label={`Remove ${row.name}`}
-                  >
-                    Remove
-                  </Button>
-                ) : null}
+                <Button
+                  variant="ghost"
+                  onClick={() => onRemove(row.id)}
+                  aria-label={`Remove ${row.name}`}
+                >
+                  Remove
+                </Button>
               </div>
             </div>
             <progress

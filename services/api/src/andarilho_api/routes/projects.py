@@ -21,6 +21,7 @@ from andarilho_api.deps import check_if_match, get_storage, utcnow
 from andarilho_api.domain import audit
 from andarilho_api.domain.deletion import request_deletion
 from andarilho_api.domain.membership import OWNER, WRITERS, load_project
+from andarilho_api.domain.publication import live_published, published_revision_id
 from andarilho_api.errors import validation_failed
 from andarilho_api.models import (
     CaptureSet,
@@ -103,7 +104,9 @@ def list_projects(
     if len(rows) > limit:
         last = page[-1][0]
         next_cursor = _encode_cursor(last.created_at, last.id)
-    return {"items": [ser.project(p, role) for p, role in page], "nextCursor": next_cursor}
+    published = live_published(db, [p for p, _ in page])
+    items = [ser.project(p, role, published[p.id]) for p, role in page]
+    return {"items": items, "nextCursor": next_cursor}
 
 
 def _project_detail(db: Session, project: Project, role: str) -> dict[str, Any]:
@@ -148,7 +151,8 @@ def _project_detail(db: Session, project: Project, role: str) -> dict[str, Any]:
     # Viewers only walk the published revision, so their scene is the one it belongs to,
     # even when a newer draft scene exists.
     viewer = role == "viewer"
-    scene = scene_of(project.published_revision_id if viewer else project.active_draft_revision_id)
+    published = published_revision_id(db, project)
+    scene = scene_of(published if viewer else project.active_draft_revision_id)
     if scene is None and not viewer:
         scene = db.execute(
             select(Scene)
@@ -162,7 +166,7 @@ def _project_detail(db: Session, project: Project, role: str) -> dict[str, Any]:
         .order_by(ShareLink.created_at.desc(), ShareLink.id)
     ).scalars()
     return {
-        "project": ser.project(project, role),
+        "project": ser.project(project, role, published),
         "uploads": [ser.upload(u) for u in uploads],
         "captureSets": [ser.capture_set(c) for c in capture_sets],
         "runs": [ser.run(r, jobs_by_run.get(r.id, [])) for r in runs],
@@ -197,7 +201,7 @@ def update_project(
     db.commit()
     db.refresh(project)
     response.headers["ETag"] = ser.etag(project.version)
-    return ser.project(project, role)
+    return ser.project(project, role, published_revision_id(db, project))
 
 
 @router.delete("/projects/{project_id}", status_code=202)

@@ -274,18 +274,40 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
     void runQueue(ids);
   }
 
-  function removeRow(id: string) {
+  /** Removes a verified file from the project, releasing its quota. False if refused. */
+  async function removeVerified(uploadId: string, name: string): Promise<boolean> {
+    setError(null);
+    try {
+      await api.abortUpload(uploadId);
+    } catch (err) {
+      // e.g. the file backs a reconstruction and must stay.
+      setError(toFriendlyError(err));
+      return false;
+    }
+    setIncludePrevious((prev) => {
+      const next = new Set(prev);
+      next.delete(uploadId);
+      return next;
+    });
+    setAnnouncement(`${name} removed from the project.`);
+    void reload();
+    return true;
+  }
+
+  async function removeRow(id: string) {
     const uploader = uploadersRef.current.get(id);
     const row = rows.find((r) => r.id === id);
-    uploader?.pause();
-    if (uploader) removeResumeRecord(projectId, uploader.fingerprint);
     const uploadId = row?.uploadId ?? uploader?.state.uploadId;
-    if (uploadId && row?.serverStatus !== "verified") {
+    if (uploadId && row?.serverStatus === "verified") {
+      if (!(await removeVerified(uploadId, row.name))) return;
+    } else if (uploadId) {
       api.abortUpload(uploadId).catch(() => undefined);
     }
+    uploader?.pause();
+    if (uploader) removeResumeRecord(projectId, uploader.fingerprint);
     uploadersRef.current.delete(id);
     setRows((prev) => prev.filter((r) => r.id !== id));
-    setAnnouncement(`${row?.name ?? "File"} removed.`);
+    if (row?.serverStatus !== "verified") setAnnouncement(`${row?.name ?? "File"} removed.`);
   }
 
   // Poll upload verification after storage completion.
@@ -488,7 +510,12 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
             ) : null}
           </div>
           <div className="mt-3">
-            <UploadList rows={rows} onPause={pauseRow} onResume={resumeRow} onRemove={removeRow} />
+            <UploadList
+              rows={rows}
+              onPause={pauseRow}
+              onResume={resumeRow}
+              onRemove={(id) => void removeRow(id)}
+            />
           </div>
           {previousVerified.length > 0 ? (
             <fieldset className="mt-4 space-y-2 text-sm">
@@ -511,6 +538,13 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
                   <label htmlFor={`prev-${u.id}`}>
                     {u.filename} ({KIND_LABEL[u.mediaKind]}, {formatBytes(u.expectedBytes)})
                   </label>
+                  <Button
+                    variant="ghost"
+                    onClick={() => void removeVerified(u.id, u.filename)}
+                    aria-label={`Remove ${u.filename} from the project`}
+                  >
+                    Remove
+                  </Button>
                 </div>
               ))}
             </fieldset>

@@ -25,7 +25,8 @@ x-app-env: &app-env
   RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-3600}
   DELIVERY_URL_TTL_SECONDS: ${DELIVERY_URL_TTL_SECONDS:-300}
   # The web proxy forwards each visitor's address for public share throttling.
-  # Only trust it where the API is reachable solely through that proxy.
+  # Only trust it where browsers reach the web app solely through an edge that
+  # overwrites X-Forwarded-For (the edge service below) and the API is private.
   PUBLIC_DELIVERY_TRUST_FORWARDED_FOR: ${PUBLIC_DELIVERY_TRUST_FORWARDED_FOR:-true}
 
 services:
@@ -137,6 +138,16 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    # Not published: browsers go through the edge, which sets X-Forwarded-For.
+    expose:
+      - "3000"
+
+  edge:
+    image: caddy:2.10.2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
     ports:
       - "127.0.0.1:3000:3000"
 
