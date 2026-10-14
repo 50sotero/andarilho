@@ -73,6 +73,18 @@ def main() -> int:
                 raise
             print("bucket CORS is configured server-wide by this storage provider")
 
+    try:
+        _apply_lifecycle(s3, bucket)
+        print("lifecycle rule applied")
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") not in TOLERATED | {"InvalidArgument"}:
+            raise
+        # MinIO cleans up stale multipart uploads itself and rejects this rule.
+        print("abort-multipart lifecycle rule not supported by this provider; skipped")
+    return 0
+
+
+def _apply_lifecycle(s3, bucket: str) -> None:
     s3.put_bucket_lifecycle_configuration(
         Bucket=bucket,
         LifecycleConfiguration={
@@ -86,8 +98,6 @@ def main() -> int:
             ]
         },
     )
-    print("lifecycle rule applied")
-    return 0
 
 
 if __name__ == "__main__":

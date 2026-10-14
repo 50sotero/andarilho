@@ -4,7 +4,22 @@
 
 Andarilho turns a continuous walkthrough video and overlapping photos of a real place into a browser-based, walkable 3D experience. A floor plan is optional and helps establish scale, align rooms, and build the geometry used for walking.
 
-This document is the application skeleton and implementation blueprint. **The repository currently contains the blueprint, not a running application.** The directory tree, application commands, contracts, and code examples below describe what to implement. Research was checked on 14 October 2026. Performance numbers, limits, and milestones are proposed engineering targets unless explicitly identified as upstream facts.
+This document is the application skeleton and implementation blueprint. **The repository now contains the first implementation of this blueprint**: the API, CPU worker, viewer package, web app, Compose stack and CPU-only CI. The GPU reconstruction stages (COLMAP, Splatfacto, SplatTransform) are wired as pinned recipes behind the `gpu` worker capability but have not yet been run on a Linux NVIDIA host. HomeQ/Matterport imports (section 15) and the DeepSeek client (section 16) are not implemented yet. The HTTP shapes are pinned in [docs/api-contract.md](docs/api-contract.md).
+
+### Quickstart
+
+```bash
+corepack pnpm install --frozen-lockfile
+corepack pnpm check
+corepack pnpm --filter @andarilho/viewer dev
+docker compose -f infra/compose.yaml up --build
+docker compose -f infra/compose.yaml exec api alembic upgrade head
+docker compose -f infra/compose.yaml exec api python /app/scripts/seed-fixture.py --subject <supabase-user-id>
+```
+
+The viewer dev page walks the synthetic two-room fixture without a GPU or credentials. Python checks: `uv run pytest` and `uv run ruff check .` in `services/api` and `services/worker` (tests need PostgreSQL; see `TEST_DATABASE_URL`). Local object storage uses `pgsty/minio`, a maintained community build of MinIO, because the official MinIO images are no longer published.
+
+The directory tree, application commands, contracts, and code examples below describe the target design. Research was checked on 14 October 2026. Performance numbers, limits, and milestones are proposed engineering targets unless explicitly identified as upstream facts.
 
 ## Contents
 
