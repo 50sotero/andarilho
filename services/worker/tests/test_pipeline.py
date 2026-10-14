@@ -216,7 +216,10 @@ def test_older_scene_revision_never_takes_the_active_draft_back(db, seed, sup):
         run_id=old_run, scene_revision_id=rev2,
     )  # fmt: skip
     assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
-    assert seed.one("SELECT validation_state AS v FROM scene_revisions WHERE id = %s", rev2)["v"] == "valid"
+    assert (
+        seed.one("SELECT validation_state AS v FROM scene_revisions WHERE id = %s", rev2)["v"]
+        == "valid"
+    )
     assert seed.one(active, pid)["a"] == new["id"]
 
 
