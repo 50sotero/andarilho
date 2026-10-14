@@ -20,7 +20,9 @@ Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 # Viewer derivatives must live under their own scene revision prefix.
 SceneAssetKey = Annotated[
     str,
-    Field(pattern=r"^tenants/[A-Za-z0-9_-]+/scenes/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$", max_length=512),
+    Field(
+        pattern=r"^tenants/[A-Za-z0-9_-]+/scenes/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$", max_length=512
+    ),
 ]
 Finite = Annotated[float, Field(allow_inf_nan=False)]
 NonNegative = Annotated[float, Field(ge=0, allow_inf_nan=False)]
@@ -110,13 +112,17 @@ class Quality(Contract):
     registered_views: Annotated[int, Field(ge=0)]
     selected_views: Annotated[int, Field(ge=0)]
     disconnected_components: Annotated[int, Field(ge=0)]
-    warnings: list[Annotated[str, Field(max_length=500)]] = Field(default_factory=list, max_length=100)
+    warnings: list[Annotated[str, Field(max_length=500)]] = Field(
+        default_factory=list, max_length=100
+    )
 
 
 class Provenance(Contract):
     recipe_digest: Annotated[str, Field(min_length=1, max_length=128)]
     capture_set_id: Id
-    geometry_source: Literal["user_confirmed_trace", "floor_plan_trace", "proposal", "synthetic_fixture"]
+    geometry_source: Literal[
+        "user_confirmed_trace", "floor_plan_trace", "proposal", "synthetic_fixture"
+    ]
 
 
 class SceneManifest(Contract):

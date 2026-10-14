@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1.7
+# Next.js web app (standalone output). Builds and serves without a GPU.
+FROM node:24-bookworm-slim AS build
+ENV PNPM_HOME=/pnpm PATH="/pnpm:$PATH" NEXT_TELEMETRY_DISABLED=1
+RUN corepack enable
+WORKDIR /repo
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY apps/web/package.json apps/web/
+COPY packages/viewer/package.json packages/viewer/
+COPY packages/scene-contract/package.json packages/scene-contract/
+RUN pnpm install --frozen-lockfile --filter @andarilho/web...
+COPY apps/web/ apps/web/
+COPY packages/ packages/
+# Only NEXT_PUBLIC_* values are build-time; never pass secrets here.
+ARG NEXT_PUBLIC_APP_URL
+ARG NEXT_PUBLIC_SUPABASE_URL
+ARG NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+ENV NEXT_PUBLIC_APP_URL=$NEXT_PUBLIC_APP_URL \
+    NEXT_PUBLIC_SUPABASE_URL=$NEXT_PUBLIC_SUPABASE_URL \
+    NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY=$NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+RUN pnpm --filter @andarilho/web build
+
+FROM node:24-bookworm-slim AS runtime
+ENV NODE_ENV=production NEXT_TELEMETRY_DISABLED=1 PORT=3000 HOSTNAME=0.0.0.0
+WORKDIR /app
+COPY --from=build --chown=node:node /repo/apps/web/.next/standalone ./
+COPY --from=build --chown=node:node /repo/apps/web/.next/static ./apps/web/.next/static
+COPY --from=build --chown=node:node /repo/apps/web/public ./apps/web/public
+USER node
+EXPOSE 3000
+CMD ["node", "apps/web/server.js"]

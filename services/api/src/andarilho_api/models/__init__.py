@@ -558,9 +558,7 @@ class IdempotencyRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint(
-            "project_id", "operation", "idempotency_key", name="uq_idempotency_scope"
-        ),
+        UniqueConstraint("project_id", "operation", "idempotency_key", name="uq_idempotency_scope"),
     )
 
 
