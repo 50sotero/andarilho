@@ -300,10 +300,12 @@ def revoke_share(share_id: uuid.UUID, subject: Subject, db: Db):
 
 def _client_key(request: Request, settings: Settings) -> str:
     if settings.public_delivery_trust_forwarded_for:
+        # The nearest trusted hop (the web proxy) appends the visitor it observed;
+        # earlier entries are client-supplied and must not choose the bucket.
         forwarded = request.headers.get("x-forwarded-for", "")
-        first = forwarded.split(",")[0].strip()
-        if first:
-            return first[:64]
+        nearest = forwarded.split(",")[-1].strip()
+        if nearest:
+            return nearest[:64]
     return request.client.host if request.client else "unknown"
 
 

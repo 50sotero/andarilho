@@ -37,3 +37,18 @@ jobs:
           docker run --rm --gpus all andarilho-worker-gpu:smoke nvidia-smi
           docker run --rm --gpus all andarilho-worker-gpu:smoke colmap -h
           docker run --rm --gpus all andarilho-worker-gpu:smoke ns-train splatfacto --help
+      # The real pipeline: FFmpeg frames -> COLMAP -> Splatfacto training/export ->
+      # normalization, through the worker's pinned recipe and stage code. Fails if
+      # any stage fails or produces no render asset.
+      - name: capture pipeline smoke
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          docker run --rm --gpus all             -v "$RUNNER_TEMP/fixture:/data:ro" -v "$RUNNER_TEMP/out:/out"             andarilho-worker-gpu:smoke             python -m andarilho_worker.smoke --video /data/capture.mp4 --out /out --max-seconds 4800
+          test -s "$RUNNER_TEMP/out/report.json"
+          cat "$RUNNER_TEMP/out/report.json"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gpu-smoke-report
+          path: ${{ runner.temp }}/out/report.json
+          if-no-files-found: ignore

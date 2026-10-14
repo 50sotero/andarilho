@@ -287,3 +287,19 @@ def test_scene_isolation(client, auth, setup):
         ).status_code
         == 404
     )
+
+
+def test_public_rate_limit_keys_on_nearest_forwarded_hop(settings):
+    from starlette.requests import Request
+
+    from andarilho_api.routes.scenes import _client_key
+
+    def request(forwarded: str) -> Request:
+        headers = [(b"x-forwarded-for", forwarded.encode())]
+        return Request({"type": "http", "headers": headers, "client": ("10.0.0.5", 1)})
+
+    trusted = settings.model_copy(update={"public_delivery_trust_forwarded_for": True})
+    # Visitors behind the web proxy get their own buckets; a spoofed prefix is ignored.
+    assert _client_key(request("203.0.113.9"), trusted) == "203.0.113.9"
+    assert _client_key(request("6.6.6.6, 203.0.113.9"), trusted) == "203.0.113.9"
+    assert _client_key(request("203.0.113.9"), settings) == "10.0.0.5"

@@ -161,7 +161,13 @@ export function createBackendProxyHandler(deps: BackendProxyDeps) {
       if (value) headers.set(name, value);
     }
 
-    if (!validated.isPublic) {
+    if (validated.isPublic) {
+      // The API throttles public share delivery per visitor; without this every
+      // visitor would share the web container's address. Forward only the
+      // nearest hop's view (the rightmost entry), which a client cannot forge.
+      const client = clientAddress(request.headers);
+      if (client) headers.set("X-Forwarded-For", client);
+    } else {
       const token = await deps.getAccessToken();
       if (!token) {
         return errorResponse(401, "UNAUTHENTICATED", "You are not signed in.", {
@@ -229,4 +235,12 @@ export function createBackendProxyHandler(deps: BackendProxyDeps) {
       headers: responseHeaders,
     });
   };
+}
+
+/** The address the nearest trusted hop observed: the rightmost X-Forwarded-For entry. */
+export function clientAddress(headers: Headers): string | null {
+  const forwarded = headers.get("x-forwarded-for");
+  const candidate = forwarded?.split(",").at(-1)?.trim() || headers.get("x-real-ip")?.trim();
+  if (!candidate || candidate.length > 64 || !/^[0-9A-Fa-f:.]+$/.test(candidate)) return null;
+  return candidate;
 }

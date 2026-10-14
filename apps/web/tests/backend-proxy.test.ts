@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  clientAddress,
   createBackendProxyHandler,
   isAllowedOrigin,
   validateProxyPath,
@@ -182,6 +183,25 @@ describe("backend proxy handler", () => {
     expect(res.status).toBe(200);
     expect(getAccessToken).not.toHaveBeenCalled();
     expect(new Headers(fetchMock.mock.calls[0]![1].headers).get("authorization")).toBeNull();
+  });
+
+  it("forwards only the nearest hop's visitor address on public delivery", async () => {
+    const { handle, fetchMock } = setup();
+    await handle(
+      req("v1/public/scenes/delivery", {
+        method: "POST",
+        headers: {
+          Origin: APP,
+          "Content-Type": "application/json",
+          "X-Forwarded-For": "6.6.6.6, 203.0.113.9",
+        },
+        body: JSON.stringify({ token: "t" }),
+      }),
+      ["v1", "public", "scenes", "delivery"],
+    );
+    const sent = new Headers(fetchMock.mock.calls[0]![1].headers);
+    expect(sent.get("x-forwarded-for")).toBe("203.0.113.9");
+    expect(clientAddress(new Headers({ "x-forwarded-for": "not an ip" }))).toBeNull();
   });
 
   it("returns 401 without a session for private routes", async () => {

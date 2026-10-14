@@ -53,6 +53,7 @@ class ObjectInfo:
 
 class ObjectStore(Protocol):
     def put_bytes(self, key: str, data: bytes, content_type: str = ...) -> ObjectInfo: ...
+    def create_new(self, key: str, data: bytes, content_type: str = ...) -> ObjectInfo | None: ...
     def put_file(self, key: str, path: Path, content_type: str = ...) -> ObjectInfo: ...
     def get_bytes(self, key: str, version: str | None = None, max_bytes: int = ...) -> bytes: ...
     def download(self, key: str, dest: Path, version: str | None = None) -> str: ...
@@ -88,6 +89,20 @@ class LocalObjectStore:
         tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
         tmp.write_bytes(data)
         os.replace(tmp, path)
+        return ObjectInfo(key, len(data), None)
+
+    def create_new(self, key: str, data: bytes, content_type: str = "application/octet-stream"):
+        """Atomically create ``key``; return ``None`` if it already exists."""
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(data)
+        try:
+            os.link(tmp, path)  # fails if the destination exists; never replaces it
+        except FileExistsError:
+            return None
+        finally:
+            tmp.unlink(missing_ok=True)
         return ObjectInfo(key, len(data), None)
 
     def put_file(self, key: str, path: Path, content_type: str = "application/octet-stream"):
@@ -184,6 +199,24 @@ class S3ObjectStore:
                 ChecksumAlgorithm="SHA256",
             )
         except Exception as exc:  # botocore raises many types
+            raise self._wrap(exc) from exc
+        return ObjectInfo(key, len(data), resp.get("VersionId"))
+
+    def create_new(self, key: str, data: bytes, content_type: str = "application/octet-stream"):
+        """Conditional create (``If-None-Match: *``); return ``None`` if ``key`` exists."""
+        try:
+            resp = self.client.put_object(
+                Bucket=self.bucket,
+                Key=check_key(key),
+                Body=data,
+                ContentType=content_type,
+                ChecksumAlgorithm="SHA256",
+                IfNoneMatch="*",
+            )
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if code in ("PreconditionFailed", "412", "ConditionalRequestConflict"):
+                return None
             raise self._wrap(exc) from exc
         return ObjectInfo(key, len(data), resp.get("VersionId"))
 
@@ -314,14 +347,19 @@ class S3ObjectStore:
 
 
 def put_immutable(store: ObjectStore, key: str, data: bytes, content_type: str) -> ObjectInfo:
-    """Write ``data`` once; an identical existing object is reused, a different one is an error."""
+    """Write ``data`` once; an identical existing object is reused, a different one is an error.
+
+    The create is atomic (conditional), so a stale attempt racing a retry can never
+    replace bytes that the fenced winner already committed to a manifest.
+    """
+    created = store.create_new(key, data, content_type)
+    if created is not None:
+        return created
     existing = store.head(key)
-    if existing is not None:
-        current = store.get_bytes(key)
-        if hashlib.sha256(current).digest() == hashlib.sha256(data).digest():
-            return existing
-        raise StageError("ARTIFACT_CONFLICT")
-    return store.put_bytes(key, data, content_type)
+    current = store.get_bytes(key)
+    if existing is not None and hashlib.sha256(current).digest() == hashlib.sha256(data).digest():
+        return existing
+    raise StageError("ARTIFACT_CONFLICT")
 
 
 def put_json(store: ObjectStore, key: str, value: Mapping[str, Any]) -> tuple[ObjectInfo, str]:

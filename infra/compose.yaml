@@ -24,6 +24,9 @@ x-app-env: &app-env
   UPLOAD_MAX_TOTAL_BYTES: ${UPLOAD_MAX_TOTAL_BYTES:-2147483648}
   RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-3600}
   DELIVERY_URL_TTL_SECONDS: ${DELIVERY_URL_TTL_SECONDS:-300}
+  # The web proxy forwards each visitor's address for public share throttling.
+  # Only trust it where the API is reachable solely through that proxy.
+  PUBLIC_DELIVERY_TRUST_FORWARDED_FOR: ${PUBLIC_DELIVERY_TRUST_FORWARDED_FOR:-true}
 
 services:
   postgres:

@@ -222,3 +222,17 @@ def test_reconstruct_reports_disconnected_capture(db, seed, store, settings):
     error = seed.one("SELECT error FROM reconstruction_runs WHERE id = %s", run_id)["error"]
     assert error["code"] == "DISCONNECTED_CAPTURE"
     assert error["suggestedAction"] and "details" in error
+
+
+def test_put_immutable_never_replaces_committed_bytes(tmp_path):
+    from andarilho_worker.artifacts import LocalObjectStore, put_immutable
+    from andarilho_worker.errors import StageError
+
+    store = LocalObjectStore(tmp_path)
+    key = "tenants/p1/scenes/r1/collision.glb"
+    assert store.create_new(key, b"winner") is not None
+    assert store.create_new(key, b"stale") is None  # atomic create refuses to overwrite
+    assert put_immutable(store, key, b"winner", "model/gltf-binary") is not None
+    with pytest.raises(StageError):
+        put_immutable(store, key, b"stale", "model/gltf-binary")
+    assert store.get_bytes(key) == b"winner"
