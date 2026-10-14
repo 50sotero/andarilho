@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>Andarilho viewer mode</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: system-ui, sans-serif;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: #0b0d10;
+        color: #e5e7eb;
+      }
+      #app {
+        display: grid;
+        grid-template-rows: auto 1fr;
+        height: 100%;
+      }
+      header {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        padding: 8px 12px;
+        background: #111827;
+      }
+      header button,
+      header select {
+        font: inherit;
+        padding: 6px 10px;
+        border-radius: 6px;
+        border: 1px solid #374151;
+        background: #1f2937;
+        color: inherit;
+      }
+      header button:disabled {
+        opacity: 0.45;
+      }
+      #status {
+        margin-left: auto;
+        font-size: 0.875rem;
+        color: #9ca3af;
+      }
+      #stage {
+        position: relative;
+        min-height: 0;
+      }
+      #pad {
+        position: absolute;
+        width: 120px;
+        height: 120px;
+        margin: -60px 0 0 -60px;
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.35);
+        pointer-events: none;
+        display: none;
+      }
+      #hint {
+        position: absolute;
+        left: 12px;
+        bottom: 12px;
+        font-size: 0.8rem;
+        color: #9ca3af;
+        pointer-events: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <button id="walk" type="button" disabled>Walk</button>
+        <button id="exit" type="button" disabled>Exit</button>
+        <button id="reset" type="button">Reset position</button>
+        <label>
+          Quality
+          <select id="quality">
+            <option value="auto">Auto</option>
+            <option value="desktop">Desktop</option>
+            <option value="mobile">Mobile</option>
+            <option value="low">Low</option>
+          </select>
+        </label>
+        <label>
+          Collision
+          <select id="collision">
+            <option value="glb">Fixture GLB</option>
+            <option value="layout">Layout (browser-built)</option>
+          </select>
+        </label>
+        <label><input id="overlay" type="checkbox" /> Collision overlay</label>
+        <span id="status" role="status" aria-live="polite">idle</span>
+      </header>
+      <div id="stage">
+        <div id="pad" aria-hidden="true"></div>
+        <p id="hint">
+          Walk: WASD / arrows, mouse to look, Escape to release. Touch: left pad moves, right side
+          looks.
+        </p>
+      </div>
+    </div>
+    <script type="module" src="/dev/main.ts"></script>
+  </body>
+</html>
