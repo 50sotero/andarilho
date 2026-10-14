@@ -2,6 +2,11 @@
  * Viewer mode (README section 14): loads the tiny synthetic fixture straight
  * from packages/scene-contract/fixtures and lets you walk it. No API, GPU or
  * cloud credentials are involved.
+ *
+ * `?bundle=/bundle` opens a smoke-run scene bundle instead (served from
+ * VIEWER_BUNDLE_DIR by vite.config.ts). Its geometry is an unreviewed proposal,
+ * so it opens for inspection; add `&review=confirm` to stand in for the review
+ * step and walk the proposal in this dev session only.
  */
 import type { Layout, SceneManifest } from "@andarilho/scene-contract";
 import layoutJson from "@andarilho/scene-contract/fixtures/synthetic-two-room.layout.json";
@@ -10,8 +15,50 @@ import collisionUrl from "@andarilho/scene-contract/fixtures/synthetic-two-room.
 import renderUrl from "@andarilho/scene-contract/fixtures/synthetic-two-room.splat.ply?url";
 import { createViewer, isQualityProfileName, type ViewerHandle, type ViewerState } from "../src";
 
-const manifest = manifestJson as unknown as SceneManifest;
-const layout = layoutJson as unknown as Layout;
+interface DevScene {
+  manifest: SceneManifest;
+  layout: Layout;
+  renderUrl: string;
+  collisionUrl: string;
+  label: string;
+}
+
+const fixture: DevScene = {
+  manifest: manifestJson as unknown as SceneManifest,
+  layout: layoutJson as unknown as Layout,
+  renderUrl,
+  collisionUrl,
+  label: "synthetic fixture",
+};
+
+async function fetchJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { cache: "no-store" });
+  if (!response.ok) throw new Error(`${url}: HTTP ${response.status}`);
+  return (await response.json()) as T;
+}
+
+/** A smoke-run bundle: manifest.json, layout.json, the render asset and collision.glb. */
+async function loadBundle(base: string, confirmReview: boolean): Promise<DevScene> {
+  const root = base.replace(/\/+$/, "");
+  const manifest = await fetchJson<SceneManifest>(`${root}/manifest.json`);
+  const layout = await fetchJson<Layout>(`${root}/layout.json`);
+  const renderName = manifest.assets.render.key.split("/").pop() ?? "";
+  const reviewed = confirmReview
+    ? {
+        ...manifest,
+        navigation: { ...manifest.navigation, mode: "approved_collision", approved: true },
+      }
+    : manifest;
+  return {
+    manifest: reviewed as SceneManifest,
+    layout,
+    renderUrl: `${root}/${renderName}`,
+    collisionUrl: `${root}/collision.glb`,
+    label: `bundle ${root}${confirmReview ? " (proposal confirmed for this dev session)" : ""}`,
+  };
+}
+
+let scene = fixture;
 
 function el<T extends HTMLElement>(id: string): T {
   const found = document.getElementById(id);
@@ -60,14 +107,14 @@ function mount(): void {
     container: stage,
     source: {
       kind: "urls",
-      manifest,
-      renderUrl,
-      collisionUrl: useLayout ? null : collisionUrl,
-      layout: useLayout ? layout : null,
+      manifest: scene.manifest,
+      renderUrl: scene.renderUrl,
+      collisionUrl: useLayout ? null : scene.collisionUrl,
+      layout: useLayout ? scene.layout : null,
     },
     quality: isQualityProfileName(quality) ? quality : "auto",
     onStateChange: (state) => {
-      status.textContent = describe(state);
+      status.textContent = `${scene.label}: ${describe(state)}`;
       walkButton.disabled = !(state.status === "ready" && state.mode === "walkable");
       exitButton.disabled = state.status !== "walking";
     },
@@ -110,7 +157,20 @@ setInterval(() => {
   position.textContent = feet ? `feet ${feet.map((v) => v.toFixed(2)).join(", ")}` : "";
 }, 250);
 
-mount();
+const params = new URLSearchParams(window.location.search);
+const bundle = params.get("bundle");
+if (bundle) {
+  loadBundle(bundle, params.get("review") === "confirm")
+    .then((loaded) => {
+      scene = loaded;
+      mount();
+    })
+    .catch((error: unknown) => {
+      status.textContent = `bundle could not be loaded: ${String(error)}`;
+    });
+} else {
+  mount();
+}
 
 if (import.meta.hot) {
   import.meta.hot.dispose(() => viewer?.dispose());

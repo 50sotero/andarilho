@@ -7,9 +7,13 @@ Used by the manual GPU smoke workflow and for local experiments on a GPU host:
 It drives ``preparing`` → ``camera_reconstruction`` → ``training`` →
 ``normalizing`` through the same stage functions, pinned recipe, subprocess
 supervision and output contracts as the worker, using a local object store.
-The geometry and packaging stages need the database and are not run. The
-render asset and a JSON report are written to ``--out``; the process exits
-non-zero if any stage fails, so a broken toolchain cannot pass silently.
+The geometry and packaging stages need the database and are not run; instead
+``--out/bundle`` receives what they would package for review, built by the same
+functions: the render asset, the automatic single-room layout proposal, its
+collision GLB and a scene manifest, checked by the same scene validator (the
+viewer's dev page opens it with ``?bundle=``). A JSON report is written to
+``--out``; the process exits non-zero if any stage fails or the bundle does not
+validate, so a broken toolchain cannot pass silently.
 """
 
 from __future__ import annotations
@@ -25,8 +29,10 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from andarilho_worker.artifacts import LocalObjectStore
+from andarilho_worker.artifacts import LocalObjectStore, ObjectStore
 from andarilho_worker.errors import StageError
+from andarilho_worker.geometry.layout import collision_glb, rectangle_layout, validate_layout
+from andarilho_worker.manifest import asset_entry, build_manifest, scene_prefix
 from andarilho_worker.recipes import recipe_for
 from andarilho_worker.runner import ProcessRunner
 from andarilho_worker.settings import Settings
@@ -37,6 +43,7 @@ from andarilho_worker.stages.base import (
     StageContext,
     StageServices,
 )
+from andarilho_worker.validation import canonical_json, validate_scene
 
 CAPTURE_STAGES = ("preparing", "camera_reconstruction", "training", "normalizing")
 
@@ -47,6 +54,78 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def write_bundle(
+    store: ObjectStore,
+    outputs: dict[str, Any],
+    bundle: Path,
+    *,
+    project_id: str,
+    run_id: str,
+    recipe_digest: str,
+) -> dict[str, Any]:
+    """Package the normalized scene as review would see it, without a database.
+
+    Mirrors ``geometry_proposal`` (rectangle layout from the proposal bounds) and
+    ``packaging`` (manifest), then runs the scene validator. The proposal stays
+    ``inspection_only``: walking it needs a reviewed layout, as in the product.
+    """
+    bounds = outputs["proposalBounds"]
+    layout = rectangle_layout(
+        bounds["minXZ"], bounds["maxXZ"], elevation=bounds["floorY"], height=bounds["height"]
+    )
+    findings = [f.as_dict() for f in validate_layout(layout)]
+    if findings:
+        return {"findings": findings}
+    bundle.mkdir(parents=True, exist_ok=True)
+    revision_id = str(uuid.uuid4())
+    prefix = scene_prefix(project_id, revision_id)
+    render_format = str(outputs["renderFormat"])
+    render_path = bundle / f"scene.{render_format}"
+    render_sha = store.download(str(outputs["renderKey"]), render_path)
+    collision_path = bundle / "collision.glb"
+    collision_path.write_bytes(collision_glb(layout))
+    files = {prefix + render_path.name: render_path, prefix + collision_path.name: collision_path}
+    quality = {k: v for k, v in (outputs.get("coverage") or {}).items() if k != "registeredRatio"}
+    manifest = build_manifest(
+        scene_id=str(uuid.uuid4()),
+        scene_revision_id=revision_id,
+        revision=1,
+        run_id=run_id,
+        layout=layout,
+        layout_revision=1,
+        render=asset_entry(
+            prefix + render_path.name, render_path, render_format, sha256=render_sha
+        ),
+        collision=asset_entry(prefix + collision_path.name, collision_path, "glb"),
+        poster=None,
+        world_from_decoded_render=outputs["worldFromDecodedRender"],
+        scale_status=str(outputs["scaleStatus"]),
+        geometry_source="proposal",
+        recipe_digest=recipe_digest,
+        capture_set_id=str(outputs["captureSetId"]),
+        quality=quality,
+    )
+
+    def fetch(key: str) -> Path:
+        if key not in files:
+            raise FileNotFoundError(key)
+        return files[key]
+
+    findings = [
+        f.as_dict() for f in validate_scene(manifest, fetch, project_id=project_id, layout=layout)
+    ]
+    (bundle / "manifest.json").write_bytes(canonical_json(manifest))
+    (bundle / "layout.json").write_text(json.dumps(layout, indent=2), encoding="utf-8")
+    return {
+        "renderFile": f"{bundle.name}/{render_path.name}",
+        "renderBytes": render_path.stat().st_size,
+        "renderSha256": render_sha,
+        "bounds": manifest["bounds"],
+        "spawn": manifest["spawn"],
+        "findings": findings,
+    }
 
 
 def run_smoke(video: Path, out: Path, quality: str, max_seconds: int) -> dict[str, Any]:
@@ -109,13 +188,16 @@ def run_smoke(video: Path, out: Path, quality: str, max_seconds: int) -> dict[st
         result = STAGES[stage](ctx)
         outputs = {**outputs, **dict(result.outputs)}
         report["stages"].append({"stage": stage, "seconds": round(time.monotonic() - started, 1)})
-    render = store.get_bytes(outputs["renderKey"], max_bytes=4 * 1024**3)
-    target = out / f"scene.{outputs['renderFormat']}"
-    target.write_bytes(render)
+    bundle = write_bundle(
+        store,
+        outputs,
+        out / "bundle",
+        project_id=project_id,
+        run_id=run_id,
+        recipe_digest=recipe.digest,
+    )
     report.update(
-        renderFile=target.name,
-        renderBytes=len(render),
-        renderSha256=hashlib.sha256(render).hexdigest(),
+        bundle=bundle,
         coverage=outputs.get("coverage"),
         splatCount=outputs.get("splatCount"),
         frameCount=outputs.get("frameCount"),
@@ -138,6 +220,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"smoke failed: {exc.code}: {exc}", file=sys.stderr)
         return 1
     print(json.dumps(report, indent=2))
+    if report["bundle"]["findings"]:
+        print("smoke failed: the packaged scene does not validate", file=sys.stderr)
+        return 1
     return 0
 
 
