@@ -115,15 +115,25 @@ def run(ctx: StageContext) -> StageResult:
         code, reason = rejected.code, rejected.reason
 
         def reject(conn: Any, job: Any) -> None:
-            conn.execute(
+            row = conn.execute(
                 """
                 UPDATE uploads SET status = 'rejected', rejection_code = %s, updated_at = now(),
                        media_metadata = media_metadata || %s
                 WHERE id = %s AND status = 'uploaded_unverified'
                   AND EXISTS (SELECT 1 FROM projects p WHERE p.id = uploads.project_id
                               AND p.lifecycle = 'active')
+                RETURNING immutable_key
                 """,
                 (code, Jsonb({"rejectionReason": reason}), upload_id),
+            ).fetchone()
+            if row is None:
+                return
+            # Rejected bytes keep counting toward the project quota until they are
+            # gone: delete every version, then clear the key that releases the quota.
+            ctx.store.delete_prefix(row["immutable_key"])
+            conn.execute(
+                "UPDATE uploads SET immutable_key = NULL, storage_version = NULL WHERE id = %s",
+                (upload_id,),
             )
 
         return finish(

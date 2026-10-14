@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import uuid
 
-from sqlalchemy import and_, func, not_, select
+from sqlalchemy import and_, func, not_, or_, select
 from sqlalchemy.orm import Session
 
 from andarilho_api.errors import ApiError, validation_failed
@@ -65,7 +65,11 @@ def check_upload(
     # Initiated uploads past their expiry no longer hold quota.
     holding = and_(
         Upload.project_id == project_id,
-        Upload.status.in_(COUNTED_STATUSES),
+        or_(
+            Upload.status.in_(COUNTED_STATUSES),
+            # A rejected upload holds quota until the worker deletes its stored object.
+            and_(Upload.status == "rejected", Upload.immutable_key.is_not(None)),
+        ),
         not_(and_(Upload.status == "initiated", Upload.expires_at <= func.now())),
     )
     used = db.execute(

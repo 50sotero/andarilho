@@ -193,6 +193,20 @@ def test_abort_upload_and_release_quota(client, auth, db, settings):
     assert _init(client, auth, pid, size=10).status_code == 201
 
 
+def test_rejected_upload_holds_quota_until_its_object_is_deleted(client, auth, db, settings):
+    pid = create_project(client, auth)["id"]
+    upload_id = _init(client, auth, pid, size=settings.upload_max_total_bytes).json()["upload"][
+        "id"
+    ]
+    row = db.get(Upload, uuid.UUID(upload_id))
+    row.status, row.immutable_key = "rejected", f"tenants/{pid}/originals/{upload_id}"
+    db.commit()
+    assert _init(client, auth, pid, size=10).status_code == 413
+    row.immutable_key = None  # the worker deleted the stored object
+    db.commit()
+    assert _init(client, auth, pid, size=10).status_code == 201
+
+
 def test_upload_tenant_isolation(client, auth, db):
     pid = create_project(client, auth)["id"]
     upload_id = _init(client, auth, pid).json()["upload"]["id"]

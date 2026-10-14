@@ -110,7 +110,10 @@ class StageContext:
         return self.recipe.get("params", {})  # type: ignore[return-value]
 
     def attempt_key(self, name: str) -> str:
-        return attempt_prefix(self.project_id, self.run_id, self.stage, self.fencing_token) + name
+        prefix = attempt_prefix(
+            self.project_id, self.run_id, self.stage, self.job_id, self.fencing_token
+        )
+        return prefix + name
 
     def outputs(self) -> Mapping[str, Any]:
         return self.input_manifest.get("outputs", {})  # type: ignore[return-value]

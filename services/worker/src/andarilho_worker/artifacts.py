@@ -1,7 +1,7 @@
 """Object storage abstraction and artifact bookkeeping.
 
 Keys always live under ``tenants/{project_id}/``. Stage outputs go to immutable
-attempt paths ``tenants/{project_id}/runs/{run_id}/attempts/{stage}/{fence}/...``
+attempt paths ``tenants/{project_id}/runs/{run_id}/attempts/{stage}/{job_id}/{fence}/...``
 so a retried or late attempt can never overwrite another attempt's output;
 viewer derivatives go to ``tenants/{project_id}/scenes/{scene_revision_id}/``
 and are written with :func:`put_immutable` (never overwritten with different bytes).
@@ -32,8 +32,10 @@ def check_key(key: str) -> str:
     return key
 
 
-def attempt_prefix(project_id: str, run_id: str, stage: str, fence: int) -> str:
-    return f"tenants/{project_id}/runs/{run_id}/attempts/{stage}/{fence}/"
+def attempt_prefix(project_id: str, run_id: str, stage: str, job_id: str, fence: int) -> str:
+    # The job ID keeps concurrent jobs of one run (e.g. two layout revisions, each
+    # starting at fence 1) from sharing mutable intermediate objects.
+    return f"tenants/{project_id}/runs/{run_id}/attempts/{stage}/{job_id}/{fence}/"
 
 
 def scene_prefix(project_id: str, scene_revision_id: str) -> str:

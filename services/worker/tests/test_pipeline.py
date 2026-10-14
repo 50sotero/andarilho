@@ -80,7 +80,8 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
         last["input_manifest"]["outputs"]
     )
     assert any(
-        "/attempts/packaging/1/result.json" in k for k in store.list_keys(f"tenants/{pid}/runs/")
+        "/attempts/packaging/" in k and k.endswith("/1/result.json")
+        for k in store.list_keys(f"tenants/{pid}/runs/")
     )
 
     # --- user layout save (API-style), then the layout pipeline --------------
@@ -362,6 +363,13 @@ def test_upload_inspection(db, seed, store, sup, monkeypatch, data, kind, status
         assert row["media_metadata"]["format"] in ("jpeg", "png", "pdf", "mp4")
     if kind == "photo" and status == "verified":
         assert row["media_metadata"]["width"] in (32, 64)
+    stored = store.list_keys(f"tenants/{pid}/originals/")
+    keyed = seed.one("SELECT immutable_key FROM uploads WHERE id = %s", uid)["immutable_key"]
+    if status == "rejected":
+        # Rejected bytes are deleted and the key cleared, which releases the quota.
+        assert stored == [] and keyed is None
+    else:
+        assert stored == [keyed]
 
 
 def test_inspection_rejects_pdf_with_too_many_pages(db, seed, store, sup):
@@ -494,3 +502,22 @@ def test_run_with_unknown_recipe_digest_is_rejected(db, seed, sup):
     assert drain(db, sup) == [("validating", "failed")]
     run = seed.one("SELECT status, error FROM reconstruction_runs WHERE id = %s", run_id)
     assert run["status"] == "failed" and run["error"]["code"] == "RECIPE_MISMATCH"
+
+
+def test_concurrent_layout_revisions_do_not_share_intermediates(db, seed, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    rev = seed.one("SELECT * FROM scene_revisions")
+    thin, thick = copy.deepcopy(rev["layout"]), copy.deepcopy(rev["layout"])
+    for wall in thick["walls"]:
+        wall["thickness"] = 0.2
+    # Both revisions are queued before either runs, so both jobs start at fence 1.
+    rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], thin)
+    rev3 = _save_layout(seed, rev, pid, run_id, 3, rev["id"], thick)
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 6
+    m2, m3 = (
+        seed.one("SELECT manifest FROM scene_revisions WHERE id = %s", r)["manifest"]
+        for r in (rev2, rev3)
+    )
+    assert m2["assets"]["collision"]["sha256"] != m3["assets"]["collision"]["sha256"]
