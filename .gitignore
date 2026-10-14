@@ -1,0 +1,46 @@
+# dependencies and build output
+node_modules/
+.next/
+dist/
+coverage/
+*.tsbuildinfo
+.turbo/
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+
+# secrets and local config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# captures, media, checkpoints and generated scenes (never commit)
+/data/
+/scratch/
+*.mp4
+*.mov
+*.MOV
+*.heic
+*.ply
+*.sog
+*.spz
+*.ckpt
+*.pt
+outputs/
+# synthetic fixtures are explicitly allowed
+!packages/scene-contract/fixtures/**
+!packages/viewer/public/fixtures/**
+
+# editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
