@@ -9,6 +9,17 @@ from andarilho_worker.recipes import INTAKE
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
 MIN_PHOTOS_WITHOUT_VIDEO = int(INTAKE["minPhotosWithoutVideo"])
+# The types the upload inspection recognises by signature (its metadata ``format``).
+INSPECTED_CONTENT_TYPES = {"pdf": "application/pdf", "png": "image/png", "jpeg": "image/jpeg"}
+
+
+def _content_type(item: dict[str, Any]) -> str | None:
+    """How an upload's bytes are read: its inspected signature, else its declared type.
+
+    The API's scene route decides a floor plan's type the same way.
+    """
+    found = (item.get("metadata") or {}).get("format")
+    return INSPECTED_CONTENT_TYPES.get(found, item.get("contentType"))
 
 
 def _load(conn: Any, ctx: StageContext) -> dict[str, Any]:
@@ -79,6 +90,7 @@ def run(ctx: StageContext) -> StageResult:
                 "storageVersion": item.get("storageVersion"),
                 "sha256": item["sha256"],
                 "bytes": head.size,
+                "contentType": _content_type(item),
                 "metadata": item.get("metadata") or {},
             }
         )

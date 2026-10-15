@@ -245,8 +245,9 @@ def jpeg_with_size(width: int, height: int) -> bytes:
     return b"\xff\xd8" + sof + b"\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01" + b"\xff\xd9"
 
 
-def _stored_upload(seed, store, pid, kind: str, data: bytes, status: str = "verified") -> dict:
-    """An upload row with its bytes stored, and its capture-set input entry."""
+def _stored_upload(seed, store, pid, kind: str, data: bytes, status: str = "verified",
+                   **entry: object) -> dict:  # fmt: skip
+    """An upload row with its bytes stored, and its capture-set input entry (plus ``entry``)."""
     import hashlib
     import uuid
 
@@ -264,7 +265,37 @@ def _stored_upload(seed, store, pid, kind: str, data: bytes, status: str = "veri
         status,
     )  # fmt: skip
     return {"uploadId": uid, "mediaKind": kind, "key": key, "storageVersion": None,
-            "sha256": digest, "bytes": len(data)}  # fmt: skip
+            "sha256": digest, "bytes": len(data), **entry}  # fmt: skip
+
+
+@pytest.mark.parametrize(
+    ("declared", "inspected", "expected"),
+    [
+        ("application/octet-stream", "png", "image/png"),  # the signature wins
+        ("image/png", "pdf", "application/pdf"),
+        ("image/jpeg", None, "image/jpeg"),  # no recognised signature: the declared type
+    ],
+)
+def test_validation_hands_on_the_floor_plan_with_its_inspected_type(
+    db, seed, store, settings, declared, inspected, expected
+):
+    # scene_analysis reads the plan by this type; without it no plan reached the model.
+    pid = seed.project()
+    video = _stored_upload(seed, store, pid, "video", b"\x00\x00\x00\x18ftypisom" + b"v" * 64)
+    metadata = {"format": inspected} if inspected else {}
+    plan = _stored_upload(seed, store, pid, "floor_plan", b"plan" * 16, contentType=declared,
+                          metadata=metadata)  # fmt: skip
+    seed.run(pid, quality="preview", capture_set_id=seed.capture_set(pid, [video, plan]))
+    job = queue.claim(db, "w", "cpu")
+    assert Supervisor(db, store, settings).execute(job) == "succeeded"
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'preparing'")[
+        "input_manifest"
+    ]["outputs"]
+    assert outputs["floorPlan"] == {
+        "uploadId": plan["uploadId"], "key": plan["key"], "sha256": plan["sha256"],
+        "contentType": expected,
+    }  # fmt: skip
+    assert [i["uploadId"] for i in outputs["inputs"]] == [video["uploadId"]]
 
 
 @pytest.mark.parametrize("include_photos", [False, True])
