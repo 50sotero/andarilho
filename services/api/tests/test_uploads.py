@@ -10,7 +10,7 @@ from conftest import BUCKET
 from factories import create_project, verified_upload
 from sqlalchemy import select
 
-from andarilho_api.models import Job, Upload
+from andarilho_api.models import Job, ReconstructionRun, Upload
 
 MIB = 1024 * 1024
 
@@ -356,6 +356,34 @@ def test_upload_backing_a_run_cannot_be_removed(client, auth, db):
     row = db.get(Upload, uuid.UUID(video))
     db.refresh(row)
     assert row.status == "verified"
+
+
+@pytest.mark.parametrize("include_photos", [False, True])
+def test_photos_a_succeeded_run_never_read_can_be_removed(client, auth, db, include_photos):
+    pid = create_project(client, auth)["id"]
+    video = verified_upload(db, pid)
+    photo = verified_upload(db, pid, kind="photo")
+    cs = client.post(
+        f"/v1/projects/{pid}/capture-sets", json={"uploadIds": [video, photo]}, headers=auth()
+    )
+    started = client.post(
+        f"/v1/projects/{pid}/runs",
+        json={
+            "captureSetId": cs.json()["id"],
+            "quality": "preview",
+            "includeSupplementaryPhotos": include_photos,
+        },
+        headers=auth(**{"Idempotency-Key": f"key-photos-{include_photos}"}),
+    )
+    assert started.status_code == 202, started.text
+    run = db.get(ReconstructionRun, uuid.UUID(started.json()["runId"]))
+    run.status = "succeeded"
+    db.commit()
+    # The video backs the scene either way.
+    assert client.delete(f"/v1/uploads/{video}", headers=auth()).status_code == 409
+    # The worker left the photo out of a video run without supplementary photos.
+    expected = 409 if include_photos else 204
+    assert client.delete(f"/v1/uploads/{photo}", headers=auth()).status_code == expected
 
 
 def test_deleting_a_removed_upload_requeues_failed_cleanup(client, auth, db):

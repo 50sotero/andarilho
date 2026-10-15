@@ -344,28 +344,31 @@ def delete_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store
 
 
 def _retained(db: Session, upload: Upload) -> bool:
-    """True when a capture set using this upload backs an active or succeeded run.
+    """True when an active or succeeded run reads this upload.
 
     Those runs (and the scenes and retries built on them) read the original
     bytes, so the upload stays until the project or its retention policy removes it.
+    A run that excludes supplementary photos from a capture set with a video never
+    reads its photos (the worker drops them in validation), so it keeps none.
     """
-    uses_upload = or_(
-        CaptureSet.inputs.contains([{"uploadId": str(upload.id)}]),
-        CaptureSet.floor_plan_upload_id == upload.id,
-    )
-    return bool(
-        db.execute(
-            select(
-                exists().where(
-                    ReconstructionRun.project_id == upload.project_id,
-                    ReconstructionRun.capture_set_id == CaptureSet.id,
-                    ReconstructionRun.status.in_((*ACTIVE_RUN_STATUSES, "succeeded")),
-                    CaptureSet.project_id == upload.project_id,
-                    uses_upload,
-                )
+    conditions = [
+        ReconstructionRun.project_id == upload.project_id,
+        ReconstructionRun.capture_set_id == CaptureSet.id,
+        ReconstructionRun.status.in_((*ACTIVE_RUN_STATUSES, "succeeded")),
+        CaptureSet.project_id == upload.project_id,
+        or_(
+            CaptureSet.inputs.contains([{"uploadId": str(upload.id)}]),
+            CaptureSet.floor_plan_upload_id == upload.id,
+        ),
+    ]
+    if upload.media_kind == "photo":
+        conditions.append(
+            or_(
+                ReconstructionRun.include_supplementary_photos.is_(True),
+                ~CaptureSet.inputs.contains([{"mediaKind": "video"}]),
             )
-        ).scalar_one()
-    )
+        )
+    return bool(db.execute(select(exists().where(*conditions))).scalar_one())
 
 
 def _remove_verified(db: Session, upload: Upload) -> None:
