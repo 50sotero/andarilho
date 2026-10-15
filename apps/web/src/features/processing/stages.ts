@@ -120,3 +120,17 @@ export function canRetryRun(run: Pick<Run, "status" | "error">): boolean {
   // whether a fresh run could succeed, so decide from the stable error code.
   return !CAPTURE_FAILURE_CODES.has(run.error?.code ?? "");
 }
+
+/**
+ * The event cursor for the next poll: the API's ``nextCursor`` while more pages
+ * remain, otherwise the newest event received, so a short history is not fetched
+ * again on every poll.
+ */
+export function nextEventCursor(
+  after: number | null,
+  events: readonly { id: number }[],
+  nextCursor: number | null,
+): number | null {
+  if (nextCursor !== null) return nextCursor;
+  return events.reduce<number | null>((max, e) => (max === null || e.id > max ? e.id : max), after);
+}

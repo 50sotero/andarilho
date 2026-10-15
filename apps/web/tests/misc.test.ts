@@ -11,6 +11,7 @@ import { revisionPending } from "@/features/review/ReviewEditor";
 import {
   canRetryRun,
   formatStageProgress,
+  nextEventCursor,
   runActions,
   stageStates,
 } from "@/features/processing/stages";
@@ -315,5 +316,22 @@ describe("starting a run from the capture page", () => {
     expect(startReadiness({ ...ready, allRowsSettled: false }).canSubmit).toBe(false);
     expect(startReadiness({ ...ready, blockingErrors: 1 }).canSubmit).toBe(false);
     expect(startReadiness({ ...ready, inputCount: 0 }).canSubmit).toBe(false);
+  });
+});
+
+describe("nextEventCursor", () => {
+  it("follows the API's cursor while more pages remain", () => {
+    expect(nextEventCursor(null, [{ id: 1 }, { id: 2 }], 2)).toBe(2);
+  });
+
+  it("moves past the last event when the history fits in one page", () => {
+    // nextCursor is null for a short history; refetching it every poll would be wasted.
+    expect(nextEventCursor(null, [{ id: 4 }, { id: 9 }, { id: 7 }], null)).toBe(9);
+    expect(nextEventCursor(9, [{ id: 10 }], null)).toBe(10);
+  });
+
+  it("keeps the cursor when nothing new arrived", () => {
+    expect(nextEventCursor(9, [], null)).toBe(9);
+    expect(nextEventCursor(null, [], null)).toBeNull();
   });
 });

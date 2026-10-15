@@ -13,6 +13,7 @@ import {
   formatElapsed,
   formatStageProgress,
   isTerminalRun,
+  nextEventCursor,
   runActions,
   stageLabel,
   stageStates,
@@ -93,7 +94,11 @@ export function ProcessingView({
             return merged.slice(-MAX_EVENTS);
           });
         }
-        if (jobData.nextCursor !== null) cursorRef.current.after = jobData.nextCursor;
+        cursorRef.current.after = nextEventCursor(
+          cursorRef.current.after,
+          jobData.events,
+          jobData.nextCursor,
+        );
       }
       setPollError(null);
       return { terminal: isTerminalRun(latestRun?.status) };
