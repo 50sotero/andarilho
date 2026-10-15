@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import struct
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import pytest
+from exif_fixtures import exif_tiff, jpeg_with_exif
 
 from andarilho_worker import queue
 from andarilho_worker.errors import StageError
@@ -193,11 +195,13 @@ def test_validation_skips_photos_a_video_run_leaves_out(db, seed, store, setting
         assert [i["uploadId"] for i in inputs] == [video["uploadId"]]
 
 
-def _preparing_job(seed, store, pid, *, codec="h264", photos=1):
+def _preparing_job(seed, store, pid, *, codec="h264", photos=1, photo_bytes=None):
     run_id, job_id = seed.run(pid, quality="preview", first_stage="preparing")
     inputs = []
     sources = [("video", b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64)]
-    sources += [("photo", b"\xff\xd8\xff" + bytes([i]) * 64) for i in range(photos)]
+    if photo_bytes is None:
+        photo_bytes = [b"\xff\xd8\xff" + bytes([i]) * 64 for i in range(photos)]
+    sources += [("photo", data) for data in photo_bytes]
     for n, (kind, data) in enumerate(sources):
         uid = f"{kind}-{n:04d}" if kind == "photo" else f"{kind}-0000"
         key = f"tenants/{pid}/originals/{uid}"
@@ -303,6 +307,28 @@ def test_prepare_groups_photos_by_dimensions(db, seed, store, settings, monkeypa
     folders = {name.split("/")[0] for name in outputs["frameNames"] if name.startswith("photos")}
     # Portrait and landscape photos get separate COLMAP camera folders.
     assert folders == {"photos_1600x1200", "photos_1200x1600"}
+
+
+def test_prepare_gives_photos_from_different_cameras_their_own_folders(
+    db, seed, store, settings, monkeypatch
+):
+    monkeypatch.setattr(prepare_mod, "tool_available", lambda name: True)
+    sup = Supervisor(db, store, settings, runner=FakeMediaRunner())
+    pid = seed.project()
+    iphone = exif_tiff(make="Apple", model="iPhone 15", focal_mm=6.1)
+    pixel = exif_tiff(make="Google", model="Pixel 8", focal_mm=6.9)
+    no_exif = b"\xff\xd8\xff" + b"\x00" * 64
+    photos = [jpeg_with_exif(iphone), jpeg_with_exif(iphone), jpeg_with_exif(pixel), no_exif]
+    _preparing_job(seed, store, pid, photo_bytes=photos)
+    assert sup.execute(queue.claim(db, "w", "cpu")) == "succeeded"
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'camera_reconstruction'")[
+        "input_manifest"
+    ]["outputs"]
+    folders = Counter(n.split("/")[0] for n in outputs["frameNames"] if n.startswith("photos"))
+    # All four normalize to 1600x1200: the two iPhone photos share a camera folder,
+    # the Pixel photo gets its own, and the photo without EXIF keeps the size folder.
+    assert sorted(folders.values()) == [1, 1, 2] and folders["photos_1600x1200"] == 1
+    assert all(f.startswith("photos_1600x1200") for f in folders)
 
 
 def test_prepare_rejects_unsupported_codec(db, seed, store, settings, monkeypatch):

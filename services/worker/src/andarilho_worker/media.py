@@ -90,6 +90,108 @@ def jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+# EXIF tags that tell cameras apart: the make and model in IFD0, and in the Exif
+# sub-IFD the lens and focal length (a phone's wide and ultra-wide lenses differ).
+_EXIF_MAKE, _EXIF_MODEL, _EXIF_SUB_IFD = 0x010F, 0x0110, 0x8769
+_EXIF_FOCAL_LENGTH, _EXIF_LENS_MODEL = 0x920A, 0xA434
+_EXIF_TYPE_SIZES = {1: 1, 2: 1, 3: 2, 4: 4, 5: 8, 7: 1, 9: 4, 10: 8}
+_EXIF_MAX_ENTRIES = 512
+_EXIF_MAX_VALUE_BYTES = 256
+
+
+def camera_identity(data: bytes) -> str | None:
+    """Describe the camera and lens that took a JPEG, from its EXIF.
+
+    Returns None when the file carries none (stripped by a messaging app, or a
+    PNG). Only the EXIF segment before the image data is read; malformed EXIF
+    counts as none.
+    """
+    tiff = _exif_payload(data)
+    if tiff is None or tiff[:2] not in (b"II", b"MM"):
+        return None
+    order = "<" if tiff[:2] == b"II" else ">"
+    try:
+        if struct.unpack_from(order + "H", tiff, 2)[0] != 42:
+            return None
+        ifd0 = _exif_entries(tiff, order, struct.unpack_from(order + "I", tiff, 4)[0])
+        sub: dict[int, tuple[int, bytes]] = {}
+        if ifd0.get(_EXIF_SUB_IFD, (0, b""))[0] == 4:
+            offset = struct.unpack(order + "I", ifd0[_EXIF_SUB_IFD][1][:4])[0]
+            sub = _exif_entries(tiff, order, offset)
+    except struct.error:
+        return None
+    parts = [
+        _exif_text(ifd0.get(_EXIF_MAKE)),
+        _exif_text(ifd0.get(_EXIF_MODEL)),
+        _exif_text(sub.get(_EXIF_LENS_MODEL)),
+        _exif_focal(sub.get(_EXIF_FOCAL_LENGTH), order),
+    ]
+    return "|".join(parts) if any(parts) else None
+
+
+def _exif_payload(data: bytes) -> bytes | None:
+    i = 2
+    n = len(data)
+    if data[:2] != b"\xff\xd8":
+        return None
+    while i + 4 <= n:
+        if data[i] != 0xFF:
+            return None
+        marker = data[i + 1]
+        if marker == 0xFF:
+            i += 1
+            continue
+        if marker == 0x01 or 0xD0 <= marker <= 0xD7:
+            i += 2
+            continue
+        if marker in (0xD9, 0xDA):
+            return None
+        length = struct.unpack(">H", data[i + 2 : i + 4])[0]
+        segment = data[i + 4 : i + 2 + length]
+        if marker == 0xE1 and segment[:6] == b"Exif\x00\x00":
+            return segment[6:]
+        i += 2 + length
+    return None
+
+
+def _exif_entries(tiff: bytes, order: str, offset: int) -> dict[int, tuple[int, bytes]]:
+    """One IFD's entries as ``{tag: (type, raw value bytes)}``, skipping bad ones."""
+    if offset < 8 or offset + 2 > len(tiff):
+        return {}
+    count = struct.unpack_from(order + "H", tiff, offset)[0]
+    entries: dict[int, tuple[int, bytes]] = {}
+    for k in range(min(count, _EXIF_MAX_ENTRIES)):
+        pos = offset + 2 + 12 * k
+        if pos + 12 > len(tiff):
+            break
+        tag, kind, n = struct.unpack_from(order + "HHI", tiff, pos)
+        size = _EXIF_TYPE_SIZES.get(kind, 0) * n
+        if size == 0 or size > _EXIF_MAX_VALUE_BYTES:
+            continue
+        if size <= 4:
+            raw = tiff[pos + 8 : pos + 8 + size]
+        else:
+            at = struct.unpack_from(order + "I", tiff, pos + 8)[0]
+            raw = tiff[at : at + size]
+        if len(raw) == size:
+            entries[tag] = (kind, raw)
+    return entries
+
+
+def _exif_text(entry: tuple[int, bytes] | None) -> str:
+    if entry is None or entry[0] != 2:
+        return ""
+    text = entry[1].split(b"\x00", 1)[0].decode("ascii", "replace")
+    return "".join(c for c in text if c.isprintable()).strip()[:64]
+
+
+def _exif_focal(entry: tuple[int, bytes] | None, order: str) -> str:
+    if entry is None or entry[0] != 5:
+        return ""
+    num, den = struct.unpack(order + "II", entry[1][:8])
+    return f"{num / den:.1f}mm" if den else ""
+
+
 def parse_ffprobe(stdout: str) -> dict[str, Any]:
     info = json.loads(stdout or "{}")
     streams = info.get("streams", [])

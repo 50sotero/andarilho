@@ -18,6 +18,7 @@ per source instead of forcing a shared calibration onto unrelated cameras.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import shutil
@@ -37,6 +38,7 @@ from andarilho_worker.keyframes import (
 from andarilho_worker.media import (
     MAX_VIDEO_SECONDS,
     VIDEO_CODECS,
+    camera_identity,
     jpeg_dimensions,
     parse_ffprobe,
 )
@@ -159,6 +161,14 @@ def extract_keyframes(
     return [i / rate for i in picked], stats, scores[picked]
 
 
+EXIF_HEAD_BYTES = 256 * 1024  # EXIF sits in one segment (at most 64 KiB) near the start
+
+
+def _head(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        return handle.read(EXIF_HEAD_BYTES)
+
+
 def is_webp(head: bytes) -> bool:
     return len(head) >= 12 and head[:4] == b"RIFF" and head[8:12] == b"WEBP"
 
@@ -277,7 +287,9 @@ def run(ctx: StageContext) -> StageResult:
     if photos:
         # COLMAP gives each folder one camera and rejects a folder whose images differ
         # in size, so photos are grouped by their output dimensions (e.g. portrait
-        # and landscape shots land in separate camera folders).
+        # and landscape shots land in separate camera folders) and, where EXIF names
+        # it, by the camera and lens: unrelated phones must not share intrinsics.
+        # Photos without EXIF cannot be told apart and share their size's folder.
         staging = images.parent / "photo-staging"
         staging.mkdir(parents=True, exist_ok=True)
         for k, photo in enumerate(photos):
@@ -298,6 +310,9 @@ def run(ctx: StageContext) -> StageResult:
             if size is None:
                 raise StageError("INVALID_MEDIA", details={"uploadId": photo["uploadId"]})
             group = f"photos_{size[0]}x{size[1]}"
+            camera = camera_identity(_head(local[photo["uploadId"]]))
+            if camera is not None:
+                group += "_" + hashlib.sha256(camera.encode()).hexdigest()[:8]
             (images / group).mkdir(parents=True, exist_ok=True)
             out.replace(images / group / out.name)
             source_map[f"{group}/{out.name}"] = {"uploadId": photo["uploadId"], "photo": True}
