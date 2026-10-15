@@ -294,9 +294,11 @@ def test_from_settings_takes_the_worker_ai_settings(tmp_path):
         ai_model="model-x",
         opencode_api_key_file=str(tmp_path / "key"),
         ai_timeout_seconds=45.0,
+        ai_max_output_tokens=9000,
     )
     client = VisionClient.from_settings(settings)
     assert client._url == "https://gateway.test/v1/chat/completions"
     assert client._model == "model-x"
     assert client._key_file == str(tmp_path / "key")
     assert client._timeout.read == 45.0
+    assert client._max_output_tokens == 9000

@@ -543,7 +543,15 @@ Points with a reprojection error under 2 px and a track of at least three views 
 - the boxes of the objects visible in each keyframe, with identities that stay consistent across frames;
 - for each object, its category, an estimated size, whether it is solid, where it is mounted, and a hand-drawn shape made of box and cylinder parts with colors.
 
-The reply is validated and normalized before anything uses it. The stage writes `analysis.json` under its own attempt prefix: the keyframes' camera poses, intrinsics and original image sizes, and the reply. Its `analysisStatus` is `complete`; `unavailable` when the provider fails, with a reason of `no_key`, `no_credit`, `auth`, `rate_limited`, `timeout`, `server`, `network`, `bad_status` or `bad_reply`; or `disabled` when no provider is configured. A failure never fails the run. The geometric proposal goes ahead without the analysis, and the stage's warnings say what happened.
+The reply is validated and normalized before anything uses it. The stage writes `analysis.json` under its own attempt prefix: the keyframes' camera poses, intrinsics and original image sizes, and the reply. Its `analysisStatus` is one of:
+
+- `complete`;
+- `unavailable` when the provider fails, with a reason of `no_key`, `no_credit`, `auth`, `rate_limited`, `timeout`, `server`, `network` or `bad_status`;
+- `invalid` when the reply cannot be used (reason `bad_reply`);
+- `disabled` when `AI_SCENE_ANALYSIS` is off, which is the default;
+- `skipped` for the synthetic recipe.
+
+Only `disabled` and `skipped` send nothing and write no `analysis.json`. A failure never fails the run. The geometric proposal goes ahead without the analysis, and the stage's warnings, which packaging adds to the scene's quality warnings, say what happened.
 
 **Layout proposal** (`geometry_proposal`, CPU) turns the walk and the analysis into rooms, doors and furniture.
 
@@ -551,7 +559,7 @@ The reply is validated and normalized before anything uses it. The stage writes 
 - *Doors.* Each door is grounded by casting rays from its bottom edge onto the floor, using the poses of the keyframes that show it, and is then attached to the nearest wall. A door that leads to a space the walk never reached is `closed`: a textured panel that blocks walking.
 - *Furniture.* Each object is grounded the same way, with rays from its box bottom onto the floor. Its detections are fused across frames, turned to face away from the nearest wall, pushed flush against it, and clamped inside its room.
 
-Without an analysis the proposal is the single room around the walk, as before: its sides snap to the wall evidence, and the spawn is where the walk started.
+Without an analysis the proposal is the single room around the walk, as before: its sides snap to the wall evidence, and the spawn is where the walk started. An analysis whose rooms, doors and furniture do not make a valid layout is dropped the same way, and the stage's `diagnostics` (in its result manifest) record what was placed, what was dropped and why.
 
 ### Stage F: package and validate (packaging, scene_validation)
 
@@ -561,19 +569,21 @@ Scene validation checks the manifest against the JSON Schema, the asset prefixes
 
 ### Reference smoke run
 
-The worker's own stage code runs locally through `andarilho_worker.smoke`, with the pinned recipe, subprocess supervision and output checks, and without a database. On a GPU host, a video runs `preparing`, `camera_reconstruction` and `normalizing`:
+The worker's own stage code runs locally through `andarilho_worker.smoke`, with the pinned recipe, subprocess supervision and output checks, and without a database. On a GPU host, a video runs `preparing`, `camera_reconstruction`, `normalizing` and `scene_analysis`:
 
 ```bash
 python -m andarilho_worker.smoke --video /data/capture.mp4 --out /out --quality preview
 ```
 
-From a stored `dataset.tar`, it runs `normalizing` only, so it needs no GPU:
+From a stored `dataset.tar`, it runs `normalizing` and `scene_analysis` only, so it needs no GPU:
 
 ```bash
 python -m andarilho_worker.smoke --dataset /data/dataset.tar --out /out
 ```
 
-Either way it then proposes the layout and textures the model on the CPU, and writes a bundle to `--out/bundle`: the proposal, the textured model, its collision GLB, the poster and a manifest. The scene validator checks the bundle, and the process exits non-zero when a stage or the bundle fails. The viewer's dev page opens the bundle with `?bundle=`. The `--dataset` run does not rerun frame selection, and it records that as a warning.
+The scene analysis is off unless asked for. `--analysis` calls the model that the `AI_*` and `OPENCODE_API_KEY_FILE` variables configure, as the worker does. `--analysis-reply reply.json` answers with a recorded reply instead (the model's JSON), so a run can be reproduced offline. Either way, `--out/analysis` receives the images the model is shown (`frame-<n>.jpg`), the request text and the reply.
+
+The runner then proposes the layout and textures the model on the CPU, and writes a bundle to `--out/bundle`: the proposal, the textured model, its collision GLB, the poster and a manifest. The scene validator checks the bundle, and the process exits non-zero when a stage or the bundle fails. The report includes the proposal's diagnostics. The viewer's dev page opens the bundle with `?bundle=`. The `--dataset` run does not rerun frame selection, and it records that as a warning.
 
 ### Worker orchestration contract
 
@@ -1105,7 +1115,13 @@ OPENCODE_API_KEY_FILE=/path/outside/the/repository/opencode-key
 AI_MAX_OUTPUT_TOKENS=2048
 AI_TIMEOUT_SECONDS=60
 AI_MAX_CONCURRENCY=2
+# The worker's scene analysis
+AI_SCENE_ANALYSIS=true
+AI_SCENE_TIMEOUT_SECONDS=180
+AI_SCENE_MAX_OUTPUT_TOKENS=8192
 ```
+
+`AI_PROVIDER` switches on the API's failed-run advice, and `AI_MAX_OUTPUT_TOKENS`, `AI_TIMEOUT_SECONDS` and `AI_MAX_CONCURRENCY` bound it. `AI_SCENE_ANALYSIS` switches on the worker's scene analysis. Its call carries a dozen images and answers with every object's parts, so it has its own timeout and reply budget. Both read the same base URL, model and key file. Compose also builds the web app's capture-page privacy notice from `AI_SCENE_ANALYSIS`.
 
 The configured inference path follows OpenCode's current API-family documentation. The model table also shows a shorter compatible path; keep the base URL explicit, test the chosen route once, and avoid silently switching providers or models on failure.
 

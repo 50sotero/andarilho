@@ -129,10 +129,12 @@ services:
       # Scene analysis (scene_analysis stage): off unless AI_SCENE_ANALYSIS is true. When on,
       # the worker sends downscaled keyframes, registered photos and the floor plan to the
       # model above; the key comes from the same read-only secret as the API's AI advice.
+      # Its timeout and reply budget are its own: one call carries a dozen images.
       AI_SCENE_ANALYSIS: ${AI_SCENE_ANALYSIS:-false}
       AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/openai/v1}
       AI_MODEL: ${AI_MODEL:-deepseek-v4.1-flash}
-      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-120}
+      AI_SCENE_TIMEOUT_SECONDS: ${AI_SCENE_TIMEOUT_SECONDS:-180}
+      AI_SCENE_MAX_OUTPUT_TOKENS: ${AI_SCENE_MAX_OUTPUT_TOKENS:-8192}
       OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
     secrets:
       - opencode_api_key
@@ -153,6 +155,8 @@ services:
         NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
         NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-https://example.supabase.co}
         NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:-example-publishable-key}
+        # The capture page's privacy notice follows the worker's switch, so the two agree.
+        NEXT_PUBLIC_AI_SCENE_ANALYSIS: ${AI_SCENE_ANALYSIS:-false}
     environment:
       API_INTERNAL_URL: http://api:8000
       # The proxy waits for AI advice as long as the API may (same setting).

@@ -174,9 +174,9 @@ def _floor_plan_jpeg(ctx: StageContext, long_edge: int, jpeg_quality: int) -> by
     return jpeg
 
 
-def _ask(settings: Any, content: list[dict[str, Any]], frames: set[int]) -> _Outcome:
+def _ask(ctx: StageContext, content: list[dict[str, Any]], frames: set[int]) -> _Outcome:
     """One call to the model, with its failures reduced to the artifact's status."""
-    client = VisionClient.from_settings(settings)
+    client = ctx.services.vision or VisionClient.from_settings(ctx.services.settings)
     try:
         completion = client.complete_json(SYSTEM_PROMPT, content)
         reply = normalise_reply(completion.data, frames)
@@ -253,7 +253,7 @@ def run(ctx: StageContext) -> StageResult:
 
     ctx.progress("Asking the AI model about rooms, doors and furniture.", keyframes=len(pairs))
     ctx.cancellation.raise_if_cancelled()
-    outcome = _ask(settings, content, set(chosen))
+    outcome = _ask(ctx, content, set(chosen))
     ctx.cancellation.raise_if_cancelled()
 
     artifact = {

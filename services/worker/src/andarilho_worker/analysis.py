@@ -107,7 +107,7 @@ are placeholders:
    "objects": [{"id": "o1", "box": [0.10, 0.30, 0.50, 0.95], "bottomVisible": true}]}],
  "objects": [{"id": "o1", "category": "wardrobe", "label": "white two-door wardrobe",
    "mount": "floor", "solid": true, "size": [1.2, 2.0, 0.6],
-   "parts": [{"shape": "box", "min": [0, 0, 0], "max": [1, 2, 1], "color": "#f5f5f0"}]}]}
+   "parts": [{"shape": "box", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#f5f5f0"}]}]}
 Boxes are [x0, y0, x1, y1] as fractions of the image, with 0 <= x0 < x1 <= 1 and \
 0 <= y0 < y1 <= 1, y counting down from the top. Give an entry in "frames" for every frame that \
 shows a room, a door or an object."""

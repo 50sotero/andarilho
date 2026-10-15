@@ -263,7 +263,9 @@ maintenance jobs (`upload_inspection`, `project_cleanup`, `upload_cleanup` and
 `invalid`, `disabled` or `skipped`; `analysisKey`, present only when an analysis record
 was written under the stage's own attempt prefix; and `analysisWarnings`, user-facing
 strings that may be empty. They are worker outputs in the job's result. The routes
-above do not return them.
+above do not return them, but packaging adds `analysisWarnings` to the manifest's
+`quality.warnings`, after the capture and frame warnings and before the unseen-area
+warning.
 
 ## Navigation and approval
 

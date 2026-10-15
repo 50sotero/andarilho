@@ -14,6 +14,8 @@ LOCAL_SECRETS = frozenset({"local-development-only", "local-password", "example"
 # The OpenAI-compatible gateway the API's AI advice also uses (README section 16).
 DEFAULT_AI_BASE_URL = "https://opencode.ai/inference/openai/v1"
 DEFAULT_AI_MODEL = "deepseek-v4.1-flash"
+DEFAULT_AI_SCENE_TIMEOUT_SECONDS = 180.0
+DEFAULT_AI_SCENE_MAX_OUTPUT_TOKENS = 8192
 TRUE_WORDS = frozenset({"1", "true", "yes"})
 FALSE_WORDS = frozenset({"", "0", "false", "no", "off"})
 
@@ -80,12 +82,16 @@ class Settings:
     retry_max_seconds: float = 900.0
     cleanup_reconcile_horizon_seconds: int = 900
     # Scene analysis (scene_analysis stage), off unless AI_SCENE_ANALYSIS is set. The key is
-    # read from the file OPENCODE_API_KEY_FILE names at each call; it is never logged.
+    # read from the file OPENCODE_API_KEY_FILE names at each call; it is never logged. The
+    # timeout and the reply budget have their own variables (AI_SCENE_TIMEOUT_SECONDS and
+    # AI_SCENE_MAX_OUTPUT_TOKENS): one call carries a dozen images and answers with every
+    # object's parts, far more than the API's short AI advice.
     ai_scene_analysis: bool = False
     ai_base_url: str = DEFAULT_AI_BASE_URL
     ai_model: str = DEFAULT_AI_MODEL
     opencode_api_key_file: str | None = None
-    ai_timeout_seconds: float = 120.0
+    ai_timeout_seconds: float = DEFAULT_AI_SCENE_TIMEOUT_SECONDS
+    ai_max_output_tokens: int = DEFAULT_AI_SCENE_MAX_OUTPUT_TOKENS
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -120,8 +126,15 @@ class Settings:
             ai_base_url=_text(env, "AI_BASE_URL") or DEFAULT_AI_BASE_URL,
             ai_model=_text(env, "AI_MODEL") or DEFAULT_AI_MODEL,
             opencode_api_key_file=_text(env, "OPENCODE_API_KEY_FILE"),
-            ai_timeout_seconds=_seconds(env, "AI_TIMEOUT_SECONDS", 120.0),
+            ai_timeout_seconds=_seconds(
+                env, "AI_SCENE_TIMEOUT_SECONDS", DEFAULT_AI_SCENE_TIMEOUT_SECONDS
+            ),
+            ai_max_output_tokens=_int(
+                env, "AI_SCENE_MAX_OUTPUT_TOKENS", DEFAULT_AI_SCENE_MAX_OUTPUT_TOKENS
+            ),
         )
+        if settings.ai_max_output_tokens < 1:
+            raise ValueError("AI_SCENE_MAX_OUTPUT_TOKENS must be at least 1")
         if settings.app_env == "production":
             secrets = {settings.s3_access_key_id, settings.s3_secret_access_key}
             if secrets & LOCAL_SECRETS or "local-password" in url:

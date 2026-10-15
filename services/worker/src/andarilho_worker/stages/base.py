@@ -76,6 +76,9 @@ class StageServices:
     progress: Callable[[str, Mapping[str, Any]], bool] = lambda message, progress: True
     fenced: Callable[[Callable[[Any], Any]], Any] | None = None
     read: Callable[[Callable[[Any], Any]], Any] | None = None
+    # The scene analysis's model client (``complete_json``). None builds one from the
+    # settings; the smoke runner passes one that records the request or replays a reply.
+    vision: Any = None
 
 
 @dataclass(frozen=True)

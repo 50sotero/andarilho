@@ -121,6 +121,7 @@ class VisionClient:
             model=settings.ai_model,
             key_file=settings.opencode_api_key_file,
             timeout_seconds=settings.ai_timeout_seconds,
+            max_output_tokens=settings.ai_max_output_tokens,
         )
 
     def complete_json(self, system: str, content: list[dict[str, Any]]) -> Completion:
