@@ -66,11 +66,16 @@ def test_reports_document_javascript(tmp_path):
     assert inspect(tmp_path, classic_pdf(page_tree(1, catalog)))["hasJavaScript"] is True
 
 
-def test_main_prints_one_json_verdict(tmp_path, capsys):
+def test_main_prints_one_json_verdict(tmp_path, capsys, monkeypatch):
+    # main() caps its own process's address space (on Linux). In-process, that cap would
+    # outlive this test and starve every later one, so record the call instead.
+    limited: list[bool] = []
+    monkeypatch.setattr(pdf_inspect, "_limit_memory", lambda: limited.append(True))
     good, bad = tmp_path / "good.pdf", tmp_path / "bad.pdf"
     good.write_bytes(classic_pdf(page_tree(1)))
     bad.write_bytes(b"%PDF-1.7\nnot a document")
     assert pdf_inspect.main([str(good)]) == 0
+    assert limited == [True]
     assert json.loads(capsys.readouterr().out) == {"ok": True, "pages": 1, "hasJavaScript": False}
     assert pdf_inspect.main([str(bad)]) == 0
     assert json.loads(capsys.readouterr().out) == {"ok": False, "reason": "PDF could not be parsed"}
