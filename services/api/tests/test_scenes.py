@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
 
 import pytest
-from factories import create_project, layout, scene, verified_upload
+from factories import create_project, layout, legacy_manifest, scene, verified_upload
 from sqlalchemy import select
 
 from andarilho_api.domain.canonical import sha256_hex
@@ -514,3 +514,120 @@ def test_publication_ends_when_the_last_share_expires(client, auth, db, setup):
     assert client.get(url, headers=auth()).json()["project"]["publishedRevisionId"] is None
     listed = client.get("/v1/projects", headers=auth()).json()["items"][0]
     assert listed["publishedRevisionId"] is None
+
+
+OUTDATED_MESSAGE = (
+    "This scene was made by an older version of Andarilho. Process the capture again to view it."
+)
+
+
+def test_a_manifest_1_scene_is_outdated_for_owners_and_hidden_from_the_public(
+    client, auth, db, setup
+):
+    assert _approve(client, auth, setup).status_code == 200
+    token = _share(client, auth, setup, 2).json()["token"]
+    public_url = "/v1/public/scenes/delivery"
+    assert client.post(public_url, json={"token": token}).status_code == 200
+
+    revision = db.get(SceneRevision, uuid.UUID(setup["revisionId"]))
+    revision.manifest = legacy_manifest(revision.manifest)
+    db.commit()
+
+    delivery = client.post(
+        f"/v1/scenes/{setup['sceneId']}/delivery",
+        json={"sceneRevisionId": setup["revisionId"]},
+        headers=auth(),
+    )
+    assert delivery.status_code == 409
+    assert delivery.json()["error"]["code"] == "SCENE_OUTDATED"
+    assert delivery.json()["error"]["message"] == OUTDATED_MESSAGE
+    # Public readers get the same not-found answer as for any unusable share.
+    public = client.post(public_url, json={"token": token})
+    assert public.status_code == 404
+    assert public.json()["error"]["code"] == "NOT_FOUND"
+
+
+def test_a_manifest_1_scene_cannot_be_approved(client, auth, db):
+    pid = create_project(client, auth)["id"]
+    draft = scene(db, pid)
+    revision = db.get(SceneRevision, uuid.UUID(draft["revisionId"]))
+    revision.manifest = legacy_manifest(revision.manifest)
+    revision.manifest_sha256 = sha256_hex(revision.manifest)
+    db.commit()
+    response = _approve(client, auth, draft)
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "SCENE_OUTDATED"
+
+
+def _add_normalizing_job(db, scene_row: Scene, result_manifest: dict, state="succeeded") -> Job:
+    job = Job(
+        id=uuid.uuid4(),
+        project_id=scene_row.project_id,
+        run_id=scene_row.run_id,
+        capability="cpu",
+        stage="normalizing",
+        state=state,
+        fencing_token=0,
+        input_manifest={},
+        result_manifest=result_manifest,
+    )
+    db.add(job)
+    db.commit()
+    return job
+
+
+def test_capture_evidence_is_a_private_link_to_the_runs_normalizing_output(client, auth, db, setup):
+    assert _get_scene(client, auth, setup["sceneId"]).json()["captureEvidence"] is None
+    pid, rid = setup["pid"], setup["runId"]
+    key = f"tenants/{pid}/runs/{rid}/attempts/normalizing/{uuid.uuid4()}/evidence.json"
+    scene_row = db.get(Scene, uuid.UUID(setup["sceneId"]))
+    _add_normalizing_job(db, scene_row, {"outputs": {"evidenceKey": key}})
+
+    body = _get_scene(client, auth, setup["sceneId"]).json()
+    evidence = body["captureEvidence"]
+    parsed = urlparse(evidence["url"])
+    assert parsed.netloc == "localhost:9000"
+    assert f"/tenants/{pid}/runs/{rid}/attempts/normalizing/" in parsed.path
+    assert evidence["expiresAt"]
+    # Like the floor plan, the evidence is for reviewers only.
+    db.add(ProjectMember(project_id=uuid.UUID(pid), subject="viewer-v", role="viewer"))
+    db.commit()
+    assert _get_scene(client, auth, setup["sceneId"], sub="viewer-v").status_code == 403
+    # ... and no new link to it is issued once deletion starts.
+    db.get(Project, uuid.UUID(pid)).lifecycle = "deleting"
+    db.commit()
+    assert _get_scene(client, auth, setup["sceneId"]).json()["captureEvidence"] is None
+
+
+def test_capture_evidence_is_absent_unless_the_run_produced_it(client, auth, db, setup):
+    pid, rid = setup["pid"], setup["runId"]
+    scene_row = db.get(Scene, uuid.UUID(setup["sceneId"]))
+    job = _add_normalizing_job(db, scene_row, {"outputs": {"evidenceKey": "x"}}, state="failed")
+    assert _get_scene(client, auth, setup["sceneId"]).json()["captureEvidence"] is None
+
+    job.state = "succeeded"
+    foreign_keys = [
+        f"tenants/{uuid.uuid4()}/runs/{rid}/evidence.json",  # another project's prefix
+        f"tenants/{pid}/runs/{uuid.uuid4()}/evidence.json",  # another run in this project
+        f"tenants/{pid}/scenes/{setup['revisionId']}/model.glb",  # not run output at all
+        "../evidence.json",
+        None,
+    ]
+    for key in foreign_keys:
+        job.result_manifest = {"outputs": {"evidenceKey": key}}
+        db.commit()
+        assert _get_scene(client, auth, setup["sceneId"]).json()["captureEvidence"] is None, key
+    job.result_manifest = {"stageResults": []}  # a succeeded job without outputs
+    db.commit()
+    assert _get_scene(client, auth, setup["sceneId"]).json()["captureEvidence"] is None
+
+
+def test_capture_evidence_ignores_layout_save_jobs(client, auth, db, setup):
+    """Layout-save jobs carry the run but not its normalizing output."""
+    pid, rid = setup["pid"], setup["runId"]
+    scene_row = db.get(Scene, uuid.UUID(setup["sceneId"]))
+    key = f"tenants/{pid}/runs/{rid}/attempts/normalizing/{uuid.uuid4()}/evidence.json"
+    job = _add_normalizing_job(db, scene_row, {"outputs": {"evidenceKey": key}})
+    job.scene_revision_id = uuid.UUID(setup["revisionId"])
+    db.commit()
+    assert _get_scene(client, auth, setup["sceneId"]).json()["captureEvidence"] is None

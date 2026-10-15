@@ -52,7 +52,7 @@ def test_submit_run_creates_run_job_ledger_atomically(client, auth, db, project)
     assert manifest["quality"] == "preview"
     assert manifest["recipe"]["digest"] == run.recipe_digest
     stages = {s["stage"]: s["capability"] for s in manifest["recipe"]["stages"]}
-    assert stages["camera_reconstruction"] == "gpu" and stages["training"] == "gpu"
+    assert stages["camera_reconstruction"] == "gpu"
     ledger = db.execute(select(UsageLedger)).scalar_one()
     assert ledger.state == "reserved" and ledger.reserved_gpu_seconds > 0
 

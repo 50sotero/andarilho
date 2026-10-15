@@ -79,6 +79,16 @@ def project_deleting() -> ApiError:
     return ApiError(409, "PROJECT_DELETING", "This project is being deleted.")
 
 
+def scene_outdated() -> ApiError:
+    # Manifest 1.0 (the Gaussian-splat render) cannot be shown; only a new run replaces it.
+    return ApiError(
+        409,
+        "SCENE_OUTDATED",
+        "This scene was made by an older version of Andarilho. "
+        "Process the capture again to view it.",
+    )
+
+
 def precondition_required(header: str) -> ApiError:
     return ApiError(
         428,

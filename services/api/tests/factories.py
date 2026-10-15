@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import uuid
@@ -82,6 +83,18 @@ def capture_set(db: Session, project_id: str, sub: str = "user-a") -> str:
     return str(cs_id)
 
 
+def legacy_manifest(doc: dict[str, Any]) -> dict[str, Any]:
+    """The same scene as manifest 1.0: a Gaussian-splat render that 2.0 retired."""
+    legacy = copy.deepcopy(doc)
+    legacy["schemaVersion"] = "1.0"
+    legacy["renderMode"] = "gaussian"
+    legacy["worldFromDecodedRender"] = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]
+    render = legacy["assets"]["render"]
+    render["key"] = render["key"].removesuffix(".glb") + ".ply"
+    render["format"] = "ply"
+    return legacy
+
+
 def manifest(
     project_id: str,
     scene_id: str,
@@ -104,23 +117,22 @@ def manifest(
         }
 
     return {
-        "schemaVersion": "1.0",
+        "schemaVersion": "2.0",
         "sceneId": scene_id,
         "sceneRevisionId": revision_id,
         "revision": 1,
         "runId": run_id,
-        "renderMode": "gaussian",
+        "renderMode": "mesh",
         "units": "m",
         "upAxis": "+Y",
         "cameraForward": "-Z",
         "scaleStatus": "estimated",
-        "worldFromDecodedRender": [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
         "geometrySpace": "world",
         "bounds": {"min": [-5, 0, -4], "max": [5, 3, 4]},
         "spawn": {"feet": [2, 0, 0], "yawRadians": 0, "floorId": "floor-0"},
         "floors": [{"id": "floor-0", "elevation": 0}],
         "assets": {
-            "render": asset("scene", "ply"),
+            "render": asset("model", "glb"),
             "collision": asset("collision", "glb"),
             "poster": asset("poster", "webp"),
         },
@@ -229,7 +241,7 @@ def active_run(
     db.add(
         UsageLedger(project_id=pid, run_id=run_id, reserved_gpu_seconds=10, reserved_cpu_seconds=10)
     )
-    stages = ["validating", "preparing", "camera_reconstruction", "training"]
+    stages = ["validating", "preparing", "camera_reconstruction", "normalizing"]
     job_ids = []
     for stage, state in zip(stages, job_states, strict=False):
         job_id = uuid.uuid4()

@@ -99,6 +99,34 @@ def _floor_plan(db: Session, scene: Scene, store: Storage, ttl: int) -> dict | N
     }
 
 
+def _capture_evidence(db: Session, scene: Scene, store: Storage, ttl: int) -> dict | None:
+    """A short-lived private URL for the run's capture evidence (review only).
+
+    The evidence is the sparse reconstruction in the run's estimated frame, which the
+    layout editor draws over the plan. It belongs to the run's own normalizing output,
+    so a key that points anywhere else is never signed.
+    """
+    job = db.execute(
+        select(Job).where(
+            Job.run_id == scene.run_id,
+            Job.project_id == scene.project_id,
+            Job.stage == "normalizing",
+            Job.state == "succeeded",
+            Job.scene_revision_id.is_(None),
+        )
+    ).scalar_one_or_none()
+    result = job.result_manifest if job is not None else None
+    outputs = result.get("outputs") if isinstance(result, dict) else None
+    key = outputs.get("evidenceKey") if isinstance(outputs, dict) else None
+    prefix = f"tenants/{scene.project_id}/runs/{scene.run_id}/"
+    if not isinstance(key, str) or not key.startswith(prefix):
+        return None
+    return {
+        "url": store.presign_get(key, ttl),
+        "expiresAt": (utcnow() + timedelta(seconds=ttl)).isoformat(),
+    }
+
+
 @router.get("/scenes/{scene_id}")
 def get_scene(
     scene_id: uuid.UUID, response: Response, subject: Subject, db: Db, store: Store, config: Config
@@ -117,17 +145,16 @@ def get_scene(
     )
     current = next((r for r in revisions if r.id == scene.current_draft_revision_id), None)
     response.headers["ETag"] = ser.etag(scene.version)
+    active, ttl = project.lifecycle == "active", config.delivery_url_ttl_seconds
     return {
         "scene": ser.scene(scene),
         "revision": ser.revision(current) if current else None,
         "revisions": [ser.revision_summary(r) for r in revisions],
-        # The original plan is private source material: owners/editors only. Deletion
-        # stops new grants at once, so a deleting project gets no fresh URL to it.
-        "floorPlan": (
-            _floor_plan(db, scene, store, config.delivery_url_ttl_seconds)
-            if project.lifecycle == "active"
-            else None
-        ),
+        # The original plan and the capture evidence are private source material:
+        # owners/editors only. Deletion stops new grants at once, so a deleting project
+        # gets no fresh URL to either.
+        "floorPlan": _floor_plan(db, scene, store, ttl) if active else None,
+        "captureEvidence": _capture_evidence(db, scene, store, ttl) if active else None,
     }
 
 

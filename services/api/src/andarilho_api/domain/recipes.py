@@ -7,9 +7,9 @@ copies it into ``recipes.json`` beside this module, so the digest recorded on a
 run is exactly the recipe the worker executes. The worker rejects a run whose
 digest it does not recognise. Budget reservations are API cost policy.
 
-The ``synthetic`` recipe skips the two GPU stages (camera_reconstruction and
-training) so a CPU-only worker can complete a fixture scene end to end. It is
-available only when ``ALLOW_SYNTHETIC_RECIPE`` is enabled (never in production).
+The ``synthetic`` recipe skips camera_reconstruction, the only GPU stage, so a
+CPU-only worker can complete a fixture scene end to end. It is available only when
+``ALLOW_SYNTHETIC_RECIPE`` is enabled (never in production).
 """
 
 from __future__ import annotations
@@ -26,11 +26,13 @@ _PINNED: dict[str, Any] = json.loads(
 # Capture intake rules the worker enforces (published to the web app).
 INTAKE: dict[str, Any] = dict(_PINNED["intake"])
 
-# Reserved seconds per quality tier (cost policy, not part of the pipeline digest).
+# Reserved (GPU, CPU) seconds per quality tier: cost policy, not part of the pipeline
+# digest. GPU time covers camera reconstruction (COLMAP) alone; CPU time includes the
+# texturing stage that now turns the reviewed layout into a textured model.
 _RESERVATIONS = {
-    "preview": (1800, 900),
-    "standard": (3600, 1200),
-    "synthetic": (0, 300),
+    "preview": (600, 2700),
+    "standard": (1200, 3000),
+    "synthetic": (0, 2100),
 }
 
 

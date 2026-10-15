@@ -123,6 +123,17 @@ def test_failed_run_advice_sends_only_sanitized_facts(ai_client, auth, db, provi
                           "promptTokens": 210, "completionTokens": 64}  # fmt: skip
 
 
+def test_failure_prompt_describes_camera_reconstruction_and_texturing(
+    ai_client, auth, db, provider
+):
+    run_id = failed_run(db, ai_client, auth)
+    assert ai_client.post(f"/v1/runs/{run_id}/advice", headers=auth()).status_code == 200
+    (request,) = provider.requests
+    prompt = json.loads(request.content)["messages"][1]["content"]
+    assert "camera reconstruction (COLMAP)" in prompt and "textured" in prompt
+    assert "Gaussian" not in prompt
+
+
 def test_advice_is_unavailable_unless_configured(client, auth, db):
     run_id = failed_run(db, client, auth)
     response = client.post(f"/v1/runs/{run_id}/advice", headers=auth())

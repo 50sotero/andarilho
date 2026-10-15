@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from andarilho_api.deps import utcnow
 from andarilho_api.domain.canonical import sha256_hex
-from andarilho_api.errors import invalid_state
+from andarilho_api.errors import invalid_state, scene_outdated
 from andarilho_api.models import SceneRevision
 from andarilho_api.schemas.scene import DeliveryEnvelope, SceneManifest
 from andarilho_api.serializers import iso
@@ -41,6 +41,10 @@ def manifest_sha256(revision: SceneRevision) -> str:
 def validated_manifest(revision: SceneRevision) -> SceneManifest:
     if revision.manifest is None:
         raise invalid_state("This scene revision has no packaged manifest yet.")
+    # Checked before the current schema so an old document gets a clear reason, not a
+    # list of validation errors the owner cannot act on.
+    if revision.manifest.get("schemaVersion") == "1.0":
+        raise scene_outdated()
     try:
         manifest = SceneManifest.model_validate(revision.manifest)
     except ValidationError:

@@ -50,12 +50,15 @@ RUN_STAGES = (
     "validating",
     "preparing",
     "camera_reconstruction",
-    "training",
     "normalizing",
     "geometry_proposal",
+    "texturing",
     "packaging",
     "scene_validation",
 )
+# Stages retired from the pipeline. Historical rows from the Gaussian-splat pipeline
+# (``training``) stay valid so old jobs remain readable; nothing new is queued in them.
+LEGACY_JOB_STAGES = ("training",)
 # Internal maintenance stages that are not part of a reconstruction run.
 MAINTENANCE_STAGES = (
     "upload_inspection",
@@ -63,7 +66,7 @@ MAINTENANCE_STAGES = (
     "upload_cleanup",
     "artifact_cleanup",
 )
-JOB_STAGES = RUN_STAGES + MAINTENANCE_STAGES
+JOB_STAGES = RUN_STAGES + LEGACY_JOB_STAGES + MAINTENANCE_STAGES
 JOB_STATES = ("queued", "running", "retry_wait", "succeeded", "failed", "cancelled")
 TERMINAL_JOB_STATES = ("succeeded", "failed", "cancelled")
 VALIDATION_STATES = ("pending", "valid", "invalid")
@@ -313,7 +316,8 @@ class Job(Base):
         CheckConstraint(_in("state", JOB_STATES), name="state"),
         CheckConstraint("attempts >= 0 AND max_attempts >= 1", name="attempts"),
         CheckConstraint(
-            f"NOT ({_in('stage', RUN_STAGES)}) OR run_id IS NOT NULL", name="run_stage_has_run"
+            f"NOT ({_in('stage', RUN_STAGES + LEGACY_JOB_STAGES)}) OR run_id IS NOT NULL",
+            name="run_stage_has_run",
         ),
         CheckConstraint(
             "stage <> 'upload_inspection' OR upload_id IS NOT NULL", name="inspection_has_upload"
