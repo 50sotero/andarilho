@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import random
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -20,10 +20,14 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
+from andarilho_worker.artifacts import attempt_prefix, scene_prefix
 from andarilho_worker.db import Database
 from andarilho_worker.errors import Cancelled, LeaseLost, error_body
 
 log = logging.getLogger(__name__)
+# Storage cleanup waits this long so that a worker which lost its lease (but may still
+# be finishing a write) has stopped before its objects are removed.
+ARTIFACT_CLEANUP_DELAY_SECONDS = 300
 
 # README section 6, verbatim CTE plus the run/project liveness predicates.
 CLAIM_SQL = """
@@ -330,6 +334,75 @@ def settle_ledger(conn: psycopg.Connection, run_id: str) -> bool:
     return row is not None
 
 
+def queue_artifact_cleanup(
+    conn: psycopg.Connection,
+    project_id: str,
+    prefixes: Sequence[str],
+    *,
+    reason: str,
+    scene_revision_id: str | None = None,
+) -> None:
+    """Queue ``artifact_cleanup`` to delete storage prefixes that no pipeline will complete.
+
+    The job has no run, revision or upload, so run budgets, the one-stage-per-run index
+    and the next-stage chain ignore it. It becomes claimable after
+    ``ARTIFACT_CLEANUP_DELAY_SECONDS``. A request identical to a queued or retrying one
+    is already covered and is not queued again. The check is not serialized with a
+    concurrent enqueue: a lock here would sit outside the project -> run -> job order
+    and could deadlock with fenced transitions. A race can therefore queue a duplicate,
+    which costs one more idempotent delete. Prefixes outside the project's tenant
+    directory are a programming error.
+    """
+    if not prefixes:
+        return
+    tenant = f"tenants/{project_id}/"
+    for prefix in prefixes:
+        if not (prefix.startswith(tenant) and prefix.endswith("/")):
+            raise ValueError(f"artifact prefix {prefix!r} is not a directory of the project")
+    unique = sorted(set(prefixes))
+    pending = conn.execute(
+        """
+        SELECT 1 FROM jobs
+        WHERE project_id = %s AND stage = 'artifact_cleanup'
+          AND state IN ('queued', 'retry_wait')
+          AND input_manifest -> 'prefixes' = %s::jsonb
+        LIMIT 1
+        """,
+        (project_id, Jsonb(unique)),
+    ).fetchone()
+    if pending is not None:
+        return
+    manifest: dict[str, Any] = {"projectId": project_id, "prefixes": unique, "reason": reason}
+    if scene_revision_id is not None:
+        manifest["sceneRevisionId"] = scene_revision_id
+    conn.execute(
+        """
+        INSERT INTO jobs (id, project_id, run_id, upload_id, scene_revision_id, capability, stage,
+                          state, priority, attempts, max_attempts, fencing_token, available_at,
+                          input_manifest)
+        VALUES (%s, %s, NULL, NULL, NULL, 'cpu', 'artifact_cleanup', 'queued', 5, 0, 3, 0,
+                now() + make_interval(secs => %s), %s)
+        """,
+        (
+            str(uuid.uuid4()),
+            project_id,
+            float(ARTIFACT_CLEANUP_DELAY_SECONDS),
+            Jsonb(manifest),
+        ),
+    )
+
+
+def _queue_scene_cleanup(conn: psycopg.Connection, project_id: str, revision_id: str) -> None:
+    """Delete the packaged files of a revision that will never be validated."""
+    queue_artifact_cleanup(
+        conn,
+        project_id,
+        [scene_prefix(project_id, revision_id)],
+        reason="revision_invalid",
+        scene_revision_id=revision_id,
+    )
+
+
 # Findings on the revision a run's own pipeline created when the run ends before
 # that revision is validated (the API writes the same cancellation finding).
 RUN_FAILED_FINDING = {
@@ -345,13 +418,26 @@ RUN_CANCELLED_FINDING = {
 def fail_run_revision(conn: psycopg.Connection, run_id: str, finding: Mapping[str, str]) -> None:
     """The run's first revision (created in geometry_proposal) stops pending.
 
-    Otherwise the scene would wait forever for a validation that never runs.
+    Otherwise the scene would wait forever for a validation that never runs. Its
+    packaged files are then unreferenced and queued for cleanup. The check reads the
+    revision afterwards because a stage's own failure hook may already have made it
+    invalid (for example scene_validation), which leaves nothing to update here. So a
+    revision that was already invalid before this call is queued too. A repeat is
+    harmless: the cleanup deletes the same prefix again, and an identical request still
+    queued is not added twice.
     """
     conn.execute(
         "UPDATE scene_revisions SET validation_state = 'invalid', validation_findings = %s "
         "WHERE run_id = %s AND revision = 1 AND validation_state = 'pending'",
         (Jsonb([dict(finding)]), run_id),
     )
+    invalid = conn.execute(
+        "SELECT id, project_id FROM scene_revisions "
+        "WHERE run_id = %s AND revision = 1 AND validation_state = 'invalid'",
+        (run_id,),
+    ).fetchall()
+    for row in invalid:
+        _queue_scene_cleanup(conn, str(row["project_id"]), str(row["id"]))
 
 
 def finalize_run_if_cancelled(conn: psycopg.Connection, run_id: str) -> bool:
@@ -419,6 +505,14 @@ def fail_revision(conn: psycopg.Connection, scene_revision_id: str | None) -> No
         "WHERE id = %s AND validation_state = 'pending'",
         (Jsonb([finding]), scene_revision_id),
     )
+    # Read back as well: a stage's failure hook may have invalidated it first, and an
+    # invalid revision never becomes valid, so its packaged files are unreferenced.
+    row = conn.execute(
+        "SELECT project_id FROM scene_revisions WHERE id = %s AND validation_state = 'invalid'",
+        (scene_revision_id,),
+    ).fetchone()
+    if row is not None:
+        _queue_scene_cleanup(conn, str(row["project_id"]), scene_revision_id)
 
 
 def fail_upload(conn: psycopg.Connection, project_id: str, upload_id: str | None) -> None:
@@ -699,7 +793,7 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
             FROM expired AS e
             WHERE j.id = e.id
             RETURNING j.id, j.project_id, j.run_id, j.upload_id, j.scene_revision_id, j.stage,
-                      j.state,
+                      j.state, j.fencing_token,
                       e.capability, e.charge_seconds
             """,
             {"err": Jsonb(lost)},
@@ -707,6 +801,7 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
         outcomes = []
         for row in rows:
             job_id, run_id = str(row["id"]), (str(row["run_id"]) if row["run_id"] else None)
+            project_id = str(row["project_id"])
             message = {
                 "queued": "Worker lease expired; re-queued.",
                 "failed": "Worker lease expired too many times.",
@@ -722,6 +817,15 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                     f"UPDATE usage_ledger SET {column} = {column} + %s WHERE run_id = %s",  # noqa: S608
                     (int(row["charge_seconds"]), run_id),
                 )
+            if run_id and row["state"] in ("failed", "cancelled"):
+                # The lost attempt wrote its outputs under the fence the bump just
+                # replaced. A job that ended here is never claimed again, so nothing
+                # would sweep them. A re-queued job is swept by its next attempt, or by
+                # the cancellation paths if it is cancelled before that attempt starts.
+                lost_attempt = attempt_prefix(
+                    project_id, run_id, row["stage"], job_id, int(row["fencing_token"]) - 1
+                )
+                queue_artifact_cleanup(conn, project_id, [lost_attempt], reason="attempt_lost")
             if run_id and row["state"] == "failed" and row["scene_revision_id"] is None:
                 fail_run(conn, run_id, lost)
             elif row["state"] == "failed" and row["stage"] == "upload_inspection":
@@ -748,6 +852,27 @@ def promote_retry_wait(db: Database) -> int:
         return cur.rowcount
 
 
+def _queue_unclaimed_attempts(conn: psycopg.Connection, rows: Sequence[Mapping[str, Any]]) -> None:
+    """Queue the outputs of every fence that a cancelled run job may have written under.
+
+    A job cancelled while queued or retrying will not be claimed again, so no later
+    attempt sweeps what its earlier fences left. Its fence counts every claim and every
+    reaper bump, so fences 1..fencing_token cover them all. Jobs that were never claimed
+    (fence 0) and rows without a run have nothing to clean.
+    """
+    by_project: dict[str, list[str]] = {}
+    for row in rows:
+        if row["run_id"] is None or int(row["fencing_token"]) < 1:
+            continue
+        project_id, run_id, job_id = str(row["project_id"]), str(row["run_id"]), str(row["id"])
+        by_project.setdefault(project_id, []).extend(
+            attempt_prefix(project_id, run_id, row["stage"], job_id, fence)
+            for fence in range(1, int(row["fencing_token"]) + 1)
+        )
+    for project_id, prefixes in by_project.items():
+        queue_artifact_cleanup(conn, project_id, prefixes, reason="cancelled_before_claim")
+
+
 def sweep_cancelled(db: Database) -> int:
     """Cancel queued/retry_wait jobs whose job, run or project was cancelled/deleted."""
     with db.transaction() as conn:
@@ -755,12 +880,13 @@ def sweep_cancelled(db: Database) -> int:
             f"""
             UPDATE jobs AS j SET state = 'cancelled', finished_at = now(), updated_at = now()
             WHERE j.state IN ('queued', 'retry_wait') AND {CANCEL_COND}
-            RETURNING j.id, j.run_id, j.stage
+            RETURNING j.id, j.project_id, j.run_id, j.stage, j.fencing_token
             """
         ).fetchall()
         runs = {str(r["run_id"]) for r in rows if r["run_id"]}
         for row in rows:
             _event(conn, str(row["id"]), row["stage"], "cancelled", "Cancelled.")
+        _queue_unclaimed_attempts(conn, rows)
         # Also finalize runs whose last running job was already acknowledged elsewhere.
         stale = conn.execute(
             """

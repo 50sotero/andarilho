@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from helpers import drain
 from pdf_fixtures import classic_pdf, encrypted_pdf, object_stream_pdf, page_tree
 from psycopg.types.json import Jsonb
 
@@ -22,17 +23,6 @@ from andarilho_worker.stages import STAGES
 from andarilho_worker.stages import inspect_upload as inspect_mod
 from andarilho_worker.supervisor import Supervisor
 from andarilho_worker.validation import manifest_sha256
-
-
-def drain(db, sup, *, limit: int = 30) -> list[tuple[str, str]]:
-    done = []
-    for _ in range(limit):
-        queue.promote_retry_wait(db)
-        job = queue.claim(db, "worker-test", "cpu")
-        if job is None:
-            break
-        done.append((job.stage, sup.execute(job)))
-    return done
 
 
 @pytest.fixture

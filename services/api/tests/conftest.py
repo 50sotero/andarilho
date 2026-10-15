@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 import uuid
 from collections.abc import Iterator
@@ -27,6 +28,10 @@ from andarilho_api.settings import Settings
 
 API_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_TEST_DB = "postgresql+psycopg://andarilho:local-password@localhost:55432/andarilho_api_test"
+# Only a private test database may be dropped: ``andarilho_<service>_test`` with an optional
+# ``_<suffix>``. The dev database (``andarilho``) and look-alikes (``andarilho_testing``,
+# ``prod_test_mirror``) do not match.
+TEST_DATABASE_NAME = re.compile(r"andarilho(_[a-z0-9]+)*_test(_[a-z0-9]+)?")
 ISSUER = "https://auth.test.invalid/auth/v1"
 AUDIENCE = "authenticated"
 BUCKET = "andarilho-test"
@@ -35,7 +40,7 @@ BUCKET = "andarilho-test"
 def _recreate_database(url: str) -> None:
     parsed = make_url(url)
     name = parsed.database
-    assert name and name.endswith("_test"), "refusing to recreate a non-test database"
+    assert name and TEST_DATABASE_NAME.fullmatch(name), "refusing to recreate a non-test database"
     admin = parsed.set(drivername="postgresql", database="postgres")
     conninfo = admin.render_as_string(hide_password=False)
     with psycopg.connect(conninfo, autocommit=True) as conn:

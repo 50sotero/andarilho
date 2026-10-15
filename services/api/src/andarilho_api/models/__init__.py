@@ -57,7 +57,12 @@ RUN_STAGES = (
     "scene_validation",
 )
 # Internal maintenance stages that are not part of a reconstruction run.
-MAINTENANCE_STAGES = ("upload_inspection", "project_cleanup", "upload_cleanup")
+MAINTENANCE_STAGES = (
+    "upload_inspection",
+    "project_cleanup",
+    "upload_cleanup",
+    "artifact_cleanup",
+)
 JOB_STAGES = RUN_STAGES + MAINTENANCE_STAGES
 JOB_STATES = ("queued", "running", "retry_wait", "succeeded", "failed", "cancelled")
 TERMINAL_JOB_STATES = ("succeeded", "failed", "cancelled")

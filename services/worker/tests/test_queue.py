@@ -317,3 +317,187 @@ def test_a_cancelled_run_stops_its_first_revision_pending(db, seed):
     assert queue.cancel_job(db, job)
     assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "cancelled"
     assert revision_findings(seed, revision_id) == ("invalid", ["RUN_CANCELLED"])
+
+
+def cleanup_jobs(seed, project_id: str) -> list[dict]:
+    return seed.all(
+        "SELECT * FROM jobs WHERE project_id = %s AND stage = 'artifact_cleanup' ORDER BY id",
+        project_id,
+    )
+
+
+def seconds_until_available(seed, job_id: str) -> float:
+    row = seed.one(
+        "SELECT EXTRACT(EPOCH FROM available_at - now()) AS s FROM jobs WHERE id = %s", job_id
+    )
+    return float(row["s"])
+
+
+def test_reaper_queues_the_lost_attempt_when_it_fails_a_run_job(db, seed):
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, max_attempts=1)
+    job = queue.claim(db, "w", "cpu")  # fence 1
+    expire(seed, job.id)
+    assert [o.state for o in queue.reap_expired(db)] == ["failed"]
+    [cleanup] = cleanup_jobs(seed, pid)
+    assert cleanup["state"] == "queued" and cleanup["run_id"] is None
+    assert cleanup["scene_revision_id"] is None and cleanup["upload_id"] is None
+    assert cleanup["input_manifest"] == {
+        "projectId": pid,
+        "prefixes": [f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/1/"],
+        "reason": "attempt_lost",
+    }
+    assert 290 < seconds_until_available(seed, cleanup["id"]) <= 300
+
+
+def test_reaper_queues_cleanup_for_cancelled_attempts_but_not_requeued_ones(db, seed):
+    pid = seed.project()
+    run_id, job_id = seed.run(pid)
+    job = queue.claim(db, "w", "cpu")
+    seed.exec("UPDATE reconstruction_runs SET cancel_requested_at = now() WHERE id = %s", run_id)
+    seed.exec("UPDATE jobs SET cancel_requested_at = now() WHERE id = %s", job.id)
+    expire(seed, job.id)
+    assert [o.state for o in queue.reap_expired(db)] == ["cancelled"]
+    [cleanup] = cleanup_jobs(seed, pid)
+    assert cleanup["input_manifest"]["prefixes"] == [
+        f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/1/"
+    ]
+
+    # A lost attempt that is re-queued is swept by its successor, not queued here.
+    pid2 = seed.project()
+    _, job2 = seed.run(pid2, max_attempts=3)
+    job = queue.claim(db, "w", "cpu")
+    assert job.id == job2
+    expire(seed, job.id)
+    assert [o.state for o in queue.reap_expired(db)] == ["queued"]
+    assert cleanup_jobs(seed, pid2) == []
+
+
+def test_failing_a_run_queues_its_first_revision_scene_prefix(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, first_stage="packaging")
+    revision_id = first_revision(seed, pid, run_id)
+    job = queue.claim(db, "w", "cpu")
+    assert queue.fail_job(db, job, error_body("INVALID_MEDIA")) == "failed"
+    [cleanup] = cleanup_jobs(seed, pid)
+    assert cleanup["run_id"] is None and cleanup["scene_revision_id"] is None
+    assert cleanup["input_manifest"] == {
+        "projectId": pid,
+        "prefixes": [f"tenants/{pid}/scenes/{revision_id}/"],
+        "reason": "revision_invalid",
+        "sceneRevisionId": revision_id,
+    }
+
+
+def test_a_stage_that_invalidates_its_revision_before_failing_still_queues_cleanup(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, first_stage="scene_validation")
+    revision_id = first_revision(seed, pid, run_id)
+
+    def invalidate(conn, _job):  # what scene_validation's failure hook does first
+        conn.execute(
+            "UPDATE scene_revisions SET validation_state = 'invalid', validation_findings = %s "
+            "WHERE id = %s",
+            (Jsonb([{"code": "MANIFEST", "message": "manifest missing"}]), revision_id),
+        )
+
+    job = queue.claim(db, "w", "cpu")
+    body = error_body("SCENE_VALIDATION_FAILED")
+    assert queue.fail_job(db, job, body, on_fail=invalidate) == "failed"
+    assert revision_findings(seed, revision_id) == ("invalid", ["MANIFEST"])  # not overwritten
+    [cleanup] = cleanup_jobs(seed, pid)
+    assert cleanup["input_manifest"]["prefixes"] == [f"tenants/{pid}/scenes/{revision_id}/"]
+
+
+def test_failing_a_layout_revision_queues_its_scene_prefix(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, first_stage="validating")
+    seed.exec("DELETE FROM jobs WHERE run_id = %s", run_id)  # only the layout job below
+    revision_id = first_revision(seed, pid, run_id)
+    seed.job(
+        pid, "packaging", {"sceneRevisionId": revision_id}, run_id=run_id,
+        scene_revision_id=revision_id,
+    )  # fmt: skip
+    job = queue.claim(db, "w", "cpu")
+    assert job.scene_revision_id == revision_id
+    assert queue.fail_job(db, job, error_body("INVALID_MEDIA")) == "failed"
+    assert revision_findings(seed, revision_id)[0] == "invalid"
+    [cleanup] = cleanup_jobs(seed, pid)
+    assert cleanup["input_manifest"]["sceneRevisionId"] == revision_id
+    assert cleanup["input_manifest"]["prefixes"] == [f"tenants/{pid}/scenes/{revision_id}/"]
+
+
+def test_identical_cleanup_requests_are_queued_once(db, seed):
+    pid = seed.project()
+    scenes = f"tenants/{pid}/scenes/{uuid.uuid4()}/"
+    attempts = f"tenants/{pid}/runs/{uuid.uuid4()}/attempts/packaging/{uuid.uuid4()}/1/"
+    with db.transaction() as conn:
+        queue.queue_artifact_cleanup(conn, pid, [attempts, scenes], reason="attempt_lost")
+        queue.queue_artifact_cleanup(conn, pid, [scenes, attempts, scenes], reason="attempt_lost")
+        queue.queue_artifact_cleanup(conn, pid, [], reason="attempt_lost")  # a no-op
+    assert len(cleanup_jobs(seed, pid)) == 1
+
+    with db.transaction() as conn:
+        queue.queue_artifact_cleanup(conn, pid, [scenes], reason="revision_invalid")
+    assert len(cleanup_jobs(seed, pid)) == 2
+
+    # Once the earlier request has finished, the same prefixes are queued again.
+    seed.exec("UPDATE jobs SET state = 'succeeded' WHERE stage = 'artifact_cleanup'")
+    with db.transaction() as conn:
+        queue.queue_artifact_cleanup(conn, pid, [scenes, attempts], reason="attempt_lost")
+    assert len(cleanup_jobs(seed, pid)) == 3
+
+
+def test_cleanup_prefixes_must_be_directories_of_the_project(db, seed):
+    pid = seed.project()
+    other = seed.project()
+    with db.transaction() as conn:
+        with pytest.raises(ValueError):
+            queue.queue_artifact_cleanup(
+                conn, pid, [f"tenants/{other}/scenes/{uuid.uuid4()}/"], reason="x"
+            )
+        with pytest.raises(ValueError):
+            queue.queue_artifact_cleanup(conn, pid, [f"tenants/{pid}/scenes/x"], reason="x")
+    assert cleanup_jobs(seed, pid) == []
+
+
+def test_cancelling_a_requeued_job_queues_every_fence_it_may_have_written(db, seed):
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, max_attempts=3)
+    queue.claim(db, "w", "cpu")  # fence 1
+    expire(seed, job_id)
+    assert [o.state for o in queue.reap_expired(db)] == ["queued"]  # fence 2, nothing queued
+    assert cleanup_jobs(seed, pid) == []
+    seed.exec("UPDATE reconstruction_runs SET cancel_requested_at = now() WHERE id = %s", run_id)
+    assert queue.sweep_cancelled(db) == 1  # cancelled before any worker claims it again
+
+    [cleanup] = cleanup_jobs(seed, pid)
+    assert cleanup["run_id"] is None
+    assert cleanup["input_manifest"] == {
+        "projectId": pid,
+        "prefixes": [
+            f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/1/",
+            f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/2/",
+        ],
+        "reason": "cancelled_before_claim",
+    }
+    assert 290 < seconds_until_available(seed, cleanup["id"]) <= 300
+
+
+def test_cancelling_a_job_that_never_ran_queues_no_cleanup(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid)
+    seed.exec("UPDATE reconstruction_runs SET cancel_requested_at = now() WHERE id = %s", run_id)
+    assert queue.sweep_cancelled(db) == 1
+    assert cleanup_jobs(seed, pid) == []
+
+
+def test_a_retrying_cleanup_request_is_not_queued_again(db, seed):
+    pid = seed.project()
+    prefix = f"tenants/{pid}/scenes/{uuid.uuid4()}/"
+    with db.transaction() as conn:
+        queue.queue_artifact_cleanup(conn, pid, [prefix], reason="revision_invalid")
+    seed.exec("UPDATE jobs SET state = 'retry_wait' WHERE stage = 'artifact_cleanup'")
+    with db.transaction() as conn:
+        queue.queue_artifact_cleanup(conn, pid, [prefix], reason="revision_invalid")
+    assert len(cleanup_jobs(seed, pid)) == 1
