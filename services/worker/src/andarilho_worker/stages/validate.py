@@ -42,6 +42,13 @@ def run(ctx: StageContext) -> StageResult:
     data = ctx.query(lambda conn: _load(conn, ctx))
     capture, uploads, run_row = data["capture"], data["uploads"], data["run"]
     inputs = list(capture["inputs"])
+    # A video run without supplementary photos never reads its photos, and the API
+    # lets their owner remove them meanwhile (the same rule decides both): leave
+    # them out before checking that every input is still verified.
+    if not run_row["include_supplementary_photos"] and any(
+        i.get("mediaKind") == "video" for i in inputs
+    ):
+        inputs = [i for i in inputs if i.get("mediaKind") != "photo"]
     synthetic = run_row["quality"] == "synthetic"
     params = ctx.params
     verified: list[dict[str, Any]] = []
@@ -77,8 +84,6 @@ def run(ctx: StageContext) -> StageResult:
         )
     videos = [i for i in verified if i["mediaKind"] == "video"]
     photos = [i for i in verified if i["mediaKind"] == "photo"]
-    if not run_row["include_supplementary_photos"] and videos:
-        photos = []
     if total_bytes > ctx.services.settings.upload_max_total_bytes:
         raise StageError("BUDGET_EXHAUSTED", "The capture set exceeds the size limit.")
     if not synthetic:

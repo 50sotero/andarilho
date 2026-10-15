@@ -144,6 +144,55 @@ def jpeg_with_size(width: int, height: int) -> bytes:
     return b"\xff\xd8" + sof + b"\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01" + b"\xff\xd9"
 
 
+def _stored_upload(seed, store, pid, kind: str, data: bytes, status: str = "verified") -> dict:
+    """An upload row with its bytes stored, and its capture-set input entry."""
+    import hashlib
+    import uuid
+
+    uid = str(uuid.uuid4())
+    key = f"tenants/{pid}/originals/{uid}"
+    store.put_bytes(key, data)
+    digest = hashlib.sha256(data).hexdigest()
+    seed.exec(
+        "INSERT INTO uploads (id, project_id, created_by, media_kind, display_filename, "
+        "declared_content_type, expected_bytes, actual_bytes, sha256, staging_key, "
+        "immutable_key, part_size, part_count, status, expires_at) VALUES (%s, %s, 'user-1', "
+        "%s, 'file', 'application/octet-stream', %s, %s, %s, %s, %s, 16777216, 1, %s, "
+        "now() + interval '1 day')",
+        uid, pid, kind, len(data), len(data), digest, f"tenants/{pid}/staging/{uid}", key,
+        status,
+    )  # fmt: skip
+    return {"uploadId": uid, "mediaKind": kind, "key": key, "storageVersion": None,
+            "sha256": digest, "bytes": len(data)}  # fmt: skip
+
+
+@pytest.mark.parametrize("include_photos", [False, True])
+def test_validation_skips_photos_a_video_run_leaves_out(db, seed, store, settings,
+                                                        include_photos):  # fmt: skip
+    pid = seed.project()
+    video = _stored_upload(seed, store, pid, "video", b"\x00\x00\x00\x18ftypisom" + b"v" * 64)
+    # Removed while the run was queued, as the API allows for an excluded photo.
+    photo = _stored_upload(seed, store, pid, "photo", b"\xff\xd8\xff" + b"p" * 64, "aborted")
+    capture = seed.capture_set(pid, [video, photo])
+    run_id, _ = seed.run(pid, quality="preview", capture_set_id=capture)
+    seed.exec(
+        "UPDATE reconstruction_runs SET include_supplementary_photos = %s WHERE id = %s",
+        include_photos, run_id,
+    )  # fmt: skip
+    job = queue.claim(db, "w", "cpu")
+    state = Supervisor(db, store, settings).execute(job)
+    if include_photos:
+        # The run reads that photo, so a removed one is a missing input.
+        assert state == "failed"
+        error = seed.one("SELECT error FROM jobs WHERE id = %s", job.id)["error"]
+        assert error["code"] == "INPUT_NOT_VERIFIED"
+    else:
+        assert state == "succeeded"
+        nxt = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'preparing'")
+        inputs = nxt["input_manifest"]["outputs"]["inputs"]
+        assert [i["uploadId"] for i in inputs] == [video["uploadId"]]
+
+
 def _preparing_job(seed, store, pid, *, codec="h264", photos=1):
     run_id, job_id = seed.run(pid, quality="preview", first_stage="preparing")
     inputs = []
