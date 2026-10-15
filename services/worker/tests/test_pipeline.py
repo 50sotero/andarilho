@@ -518,6 +518,27 @@ def test_upload_cleanup_deletes_removed_bytes_and_releases_the_key(db, seed, sto
     assert row["status"] == "aborted" and row["immutable_key"] is None
 
 
+def test_upload_cleanup_deletes_a_staging_copy_the_api_could_not(db, seed, store, sup):
+    # The API froze (or rejected) these uploads but failed to delete their staging
+    # objects, so it queued cleanup jobs.
+    pid = seed.project()
+    kept = make_upload(seed, store, pid, JPEG, "photo")
+    assert drain(db, sup) == [("upload_inspection", "succeeded")]
+    rejected = make_upload(seed, store, pid, JPEG, "photo")
+    seed.exec("DELETE FROM jobs WHERE upload_id = %s", rejected)
+    seed.exec(
+        "UPDATE uploads SET status = 'rejected', immutable_key = NULL WHERE id = %s", rejected
+    )
+    for uid in (kept, rejected):
+        store.put_bytes(f"tenants/{pid}/staging/{uid}", JPEG)
+        seed.job(pid, "upload_cleanup", {"uploadId": uid, "projectId": pid}, upload_id=uid)
+    assert drain(db, sup) == [("upload_cleanup", "succeeded")] * 2
+    assert store.list_keys(f"tenants/{pid}/staging/") == []
+    # The verified upload keeps its frozen bytes and its status.
+    row = seed.one("SELECT status, immutable_key FROM uploads WHERE id = %s", kept)
+    assert row["status"] == "verified" and store.list_keys(row["immutable_key"]) != []
+
+
 def test_inspection_out_of_retries_rejects_and_cleans_up(db, seed, store, settings):
     stages = {**STAGES, "upload_inspection": _transient_stage}
     sup = Supervisor(db, store, settings, stages=stages, delay_fn=lambda attempt: 0.0)

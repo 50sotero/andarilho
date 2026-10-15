@@ -11,6 +11,7 @@ from factories import create_project, verified_upload
 from sqlalchemy import select
 
 from andarilho_api.models import Job, ReconstructionRun, Upload
+from andarilho_api.storage import StorageError
 
 MIB = 1024 * 1024
 
@@ -78,6 +79,50 @@ def test_completing_on_a_versioned_bucket_leaves_no_staging_bytes(client, auth, 
     listed = s3.list_object_versions(Bucket=BUCKET, Prefix=row.staging_key)
     assert listed.get("Versions", []) == [] and listed.get("DeleteMarkers", []) == []
     assert s3.get_object(Bucket=BUCKET, Key=row.immutable_key)["Body"].read() == b"v" * 1000
+
+
+def _refuse_deletes(app, monkeypatch) -> None:
+    def refuse(key: str) -> None:
+        raise StorageError("delete refused")
+
+    monkeypatch.setattr(app.state.storage, "delete_all_versions", refuse)
+
+
+def _cleanup_jobs(db, upload_id: str) -> list[Job]:
+    query = select(Job).where(Job.upload_id == uuid.UUID(upload_id), Job.stage == "upload_cleanup")
+    return list(db.scalars(query))
+
+
+def test_a_failed_staging_delete_after_freezing_queues_a_cleanup(
+    client, auth, db, s3, app, monkeypatch
+):
+    pid = create_project(client, auth)["id"]
+    upload_id = _init(client, auth, pid, size=1000).json()["upload"]["id"]
+    _put_part(s3, db, upload_id, 1, b"v" * 1000)
+    _refuse_deletes(app, monkeypatch)
+    done = client.post(f"/v1/uploads/{upload_id}/complete", json={}, headers=auth())
+    assert done.status_code == 202, done.text
+    row = db.get(Upload, uuid.UUID(upload_id))
+    db.refresh(row)
+    assert row.status == "uploaded_unverified"
+    [job] = _cleanup_jobs(db, upload_id)
+    assert job.state == "queued" and job.input_manifest["stagingKey"] == row.staging_key
+
+
+def test_a_failed_staging_delete_on_rejection_queues_a_cleanup(
+    client, auth, db, s3, app, monkeypatch
+):
+    pid = create_project(client, auth)["id"]
+    upload_id = _init(client, auth, pid, size=2000).json()["upload"]["id"]
+    _put_part(s3, db, upload_id, 1, b"x" * 1500)
+    _refuse_deletes(app, monkeypatch)
+    response = client.post(f"/v1/uploads/{upload_id}/complete", json={}, headers=auth())
+    assert response.status_code == 422
+    row = db.get(Upload, uuid.UUID(upload_id))
+    db.refresh(row)
+    assert row.status == "rejected" and row.immutable_key is None
+    [job] = _cleanup_jobs(db, upload_id)
+    assert job.state == "queued" and job.input_manifest["stagingKey"] == row.staging_key
 
 
 def test_intake_policy_publishes_the_deployment_limits(client, auth, app):

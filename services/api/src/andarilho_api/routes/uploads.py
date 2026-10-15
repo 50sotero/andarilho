@@ -20,7 +20,6 @@ from andarilho_api.domain.quotas import check_upload, intake_policy
 from andarilho_api.errors import ApiError, invalid_state, validation_failed
 from andarilho_api.models import (
     ACTIVE_RUN_STATUSES,
-    TERMINAL_JOB_STATES,
     CaptureSet,
     Job,
     ReconstructionRun,
@@ -171,11 +170,13 @@ def sign_parts(
     return {"urls": urls, "expiresAt": ser.iso(expires_at)}
 
 
-def _reject(db: Session, upload: Upload, code: str) -> None:
+def _reject(db: Session, upload: Upload, code: str, *, cleanup: bool = False) -> None:
     upload.status = "rejected"
     upload.rejection_code = code
     upload.multipart_upload_id = None
     upload.updated_at = utcnow()
+    if cleanup:
+        _queue_cleanup(db, upload)
     db.commit()
 
 
@@ -243,16 +244,16 @@ def _freeze(db: Session, storage: Storage, upload: Upload, info: ObjectInfo | No
     if info is None:
         raise _storage_unavailable()
     if info.size != upload.expected_bytes:
-        _delete_quietly(storage, upload.staging_key)
-        _reject(db, upload, "SIZE_MISMATCH")
+        deleted = _delete_staging(storage, upload.staging_key)
+        _reject(db, upload, "SIZE_MISMATCH", cleanup=not deleted)
         raise _size_mismatch()
 
     frozen_key = immutable_key(upload.project_id, upload.id)
     try:
         version = storage.copy_if_match(upload.staging_key, frozen_key, info.etag)
     except PreconditionFailed:
-        _delete_quietly(storage, upload.staging_key)
-        _reject(db, upload, "MODIFIED_DURING_COMPLETION")
+        deleted = _delete_staging(storage, upload.staging_key)
+        _reject(db, upload, "MODIFIED_DURING_COMPLETION", cleanup=not deleted)
         raise ApiError(
             409,
             "UPLOAD_MODIFIED",
@@ -291,7 +292,9 @@ def _freeze(db: Session, storage: Storage, upload: Upload, info: ObjectInfo | No
     )
     db.commit()
     # Only after commit, so a failed commit can be retried from the staging object.
-    _delete_quietly(storage, upload.staging_key)
+    if not _delete_staging(storage, upload.staging_key):
+        _queue_cleanup(db, upload)
+        db.commit()
     db.refresh(upload)
     return {"upload": ser.upload(upload)}
 
@@ -305,11 +308,18 @@ def _size_mismatch() -> ApiError:
     )
 
 
-def _delete_quietly(storage: Storage, key: str) -> None:
+def _delete_staging(storage: Storage, key: str) -> bool:
+    """Delete every version of a staging object; False when storage refused.
+
+    A staging copy left behind would keep a second full copy of the input, so a
+    caller that gets False queues an ``upload_cleanup`` job to retry.
+    """
     try:
-        storage.delete_all_versions(key)  # staging bytes must not outlive the upload
+        storage.delete_all_versions(key)
     except StorageError:
-        logger.warning("staging delete failed; cleanup will reconcile")
+        logger.warning("staging delete failed; queueing a cleanup job")
+        return False
+    return True
 
 
 @router.delete("/uploads/{upload_id}", status_code=204)
@@ -390,13 +400,18 @@ def _remove_verified(db: Session, upload: Upload) -> None:
 
 
 def _queue_cleanup(db: Session, upload: Upload) -> None:
+    """Queue ``upload_cleanup``, which deletes the staging copy and, once the upload
+    is removed or rejected, its frozen bytes. A cleanup still waiting to run reads
+    the upload's current state, so it covers this request too; a running one may
+    have read it before this change, so another is queued (both steps are idempotent).
+    """
     pending = db.execute(
         select(
             exists().where(
                 Job.project_id == upload.project_id,
                 Job.upload_id == upload.id,
                 Job.stage == "upload_cleanup",
-                Job.state.not_in(TERMINAL_JOB_STATES),
+                Job.state.in_(("queued", "retry_wait")),
             )
         )
     ).scalar_one()
@@ -415,6 +430,7 @@ def _queue_cleanup(db: Session, upload: Upload) -> None:
                 "uploadId": str(upload.id),
                 "projectId": str(upload.project_id),
                 "key": upload.immutable_key,
+                "stagingKey": upload.staging_key,
             },
         )
     )
