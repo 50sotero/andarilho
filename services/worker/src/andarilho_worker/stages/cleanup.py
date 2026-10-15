@@ -4,14 +4,16 @@
    the reaper must first bump the fence and cancel it) and cancel anything still
    queued. Otherwise defer and retry later without consuming an attempt.
 4. Delete every object and object version under ``tenants/{project_id}/`` and abort
-   its multipart uploads: those still in progress under the prefix, and those the
-   upload rows record (the API aborts an upload but keeps its ID). A part in flight
-   can still land after an abort, so every pass aborts each of them again.
+   its multipart uploads: those still in progress under the prefix, those the upload
+   rows record (the API aborts an upload but keeps its ID) and those an earlier pass
+   saw, whose IDs the job keeps in its manifest.
 5. Reconcile again after the write-grant horizon
-   (``cleanup_reconcile_horizon_seconds``): the job defers itself after the first
-   pass and only completes when a later pass finds the prefix empty, no multipart
-   upload in progress under it, and no part stored for any upload it knows of. The
-   upload rows, and with them the IDs, are deleted only then.
+   (``cleanup_reconcile_horizon_seconds``). A part in flight can still land after an
+   abort, so a pass only completes the deletion when it comes at least one horizon
+   after the last abort and finds, before aborting anything, the prefix empty, no
+   multipart upload in progress under it and no part stored for any upload it knows
+   of. Otherwise it aborts every known upload again and waits out another horizon.
+   The upload rows, and with them the IDs, are deleted only on completion.
 6. Apply the metadata policy below and record an audit event, in the fenced
    completion transaction.
 
@@ -132,32 +134,54 @@ def run(ctx: StageContext) -> StageResult:
     listed = ctx.store.list_multipart_uploads(prefix)
     recorded = ctx.query(lambda conn: _recorded_uploads(conn, ctx.project_id))
     seen = [tuple(u) for u in ctx.input_manifest.get("multipartUploads") or []]
-    uploads = sorted({*seen, *listed, *recorded})
-    uploads = [(str(key), str(uid)) for key, uid in uploads if str(key).startswith(prefix)]
-    for key, upload_id in uploads:
-        ctx.store.abort_multipart_upload(key, upload_id)
-    aborted = len(listed)
+    uploads = sorted(
+        (str(key), str(uid))
+        for key, uid in {*seen, *listed, *recorded}
+        if str(key).startswith(prefix)
+    )
+    now = time.time()
     passes = int(ctx.input_manifest.get("passes", 0)) + 1
-    first = float(ctx.input_manifest.get("firstPassAt") or time.time())
+    first = float(ctx.input_manifest.get("firstPassAt") or now)
     horizon = float(ctx.services.settings.cleanup_reconcile_horizon_seconds)
+    last_abort = ctx.input_manifest.get("multipartAbortedAt")
     totals = {
         "passes": passes,
         "firstPassAt": first,
         "objectsDeleted": int(ctx.input_manifest.get("objectsDeleted", 0)) + deleted,
-        "multipartAborted": int(ctx.input_manifest.get("multipartAborted", 0)) + aborted,
+        "multipartAborted": int(ctx.input_manifest.get("multipartAborted", 0)),
         "multipartUploads": [list(u) for u in uploads],
+        "multipartAbortedAt": last_abort,
     }
-    waited = time.time() - first
-    if passes < 2 or waited < horizon:
-        raise Deferred(max(1.0, horizon - waited), "CLEANUP_PENDING", manifest_patch=totals)
-    remaining = ctx.store.list_keys(prefix)
-    # A part that landed after this pass's abort keeps its upload's storage: the next
-    # pass aborts it again. Only an empty ListParts for every upload proves it is gone.
-    parts = sum(ctx.store.count_multipart_parts(key, upload_id) for key, upload_id in uploads)
-    if remaining or parts or ctx.store.list_multipart_uploads(prefix):
-        raise Deferred(BUSY_RETRY_SECONDS, "CLEANUP_PENDING", manifest_patch=totals)
-    if ctx.fenced(lambda conn: _busy(conn, ctx)):
-        raise Deferred(BUSY_RETRY_SECONDS, "CLEANUP_PENDING", manifest_patch=totals)
+    # A part that was in flight can land after an abort, and a check that follows an abort
+    # at once would miss it. So the deciding check runs before any abort of this pass,
+    # and only once a whole horizon has passed since the last abort.
+    since_abort = now - float(last_abort) if last_abort is not None else None
+    quiet_left = horizon - since_abort if since_abort is not None else 0.0
+    recent = bool(uploads) and since_abort is not None and quiet_left > 0
+    settled = not uploads or (since_abort is not None and not recent)
+    if passes >= 2 and now - first >= horizon and settled:
+        parts = sum(ctx.store.count_multipart_parts(key, upload_id) for key, upload_id in uploads)
+        if not (parts or listed or ctx.store.list_keys(prefix)):
+            if ctx.fenced(lambda conn: _busy(conn, ctx)):
+                raise Deferred(BUSY_RETRY_SECONDS, "CLEANUP_PENDING", manifest_patch=totals)
+            return _complete(ctx, totals, verified=len(uploads))
+    delay = max(1.0, horizon - (now - first)) if passes < 2 else BUSY_RETRY_SECONDS
+    if recent and not listed:
+        # An early pass: aborting again would only move the quiet interval further away.
+        raise Deferred(max(delay, quiet_left, 1.0), "CLEANUP_PENDING", manifest_patch=totals)
+    if uploads:
+        for key, upload_id in uploads:
+            ctx.store.abort_multipart_upload(key, upload_id)
+        totals["multipartAborted"] += len(listed)
+        totals["multipartAbortedAt"] = now
+        delay = max(delay, horizon, 1.0)
+    raise Deferred(delay, "CLEANUP_PENDING", manifest_patch=totals)
+
+
+def _complete(ctx: StageContext, totals: dict[str, Any], *, verified: int) -> StageResult:
+    # The audit event keeps counts only, not the uploads' keys and IDs.
+    stats = {k: v for k, v in totals.items() if k not in ("multipartUploads", "multipartAbortedAt")}
+    stats["multipartVerified"] = verified
 
     def commit(conn: Any, job: Any) -> None:
         lifecycle = conn.execute(
@@ -167,7 +191,4 @@ def run(ctx: StageContext) -> StageResult:
             raise StageError("INTERNAL_ERROR", "The project is not being deleted.")
         scrub(conn, ctx.project_id, ctx.job_id, stats)
 
-    # The audit event keeps counts only, not the uploads' keys and IDs.
-    stats = {k: v for k, v in totals.items() if k != "multipartUploads"}
-    stats["multipartVerified"] = len(uploads)
     return finish(ctx, {"cleanup": stats}, commit=commit, store_manifest=False)

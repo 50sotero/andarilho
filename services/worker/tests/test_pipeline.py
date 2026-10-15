@@ -1013,18 +1013,62 @@ def test_project_cleanup_completes_only_once_no_multipart_part_is_left(db, seed,
 
     assert _run_cleanup(db, sup) == ["deferred"]  # first pass, then the reconcile horizon
     assert late.multipart_uploads == {} and late.aborts == {"mp-late": 1, "mp-live": 1}
-    # A part landed after the second abort too: the upload still holds storage, so the
+    # The check before the next abort finds the parts that landed after the first, so the
     # project stays deleting and its upload row, with the ID, is kept.
     assert _run_cleanup(db, sup) == ["deferred"]
+    assert late.aborts == {"mp-late": 2, "mp-live": 2}
     # mp-live is no longer listed and has no row: the job's own record keeps it checked.
     assert late.stored_parts == {"mp-late": 1, "mp-live": 1}
     assert seed.one("SELECT lifecycle FROM projects WHERE id = %s", pid)["lifecycle"] == "deleting"
     assert seed.one("SELECT multipart_upload_id FROM uploads WHERE project_id = %s", pid)
-    # The third abort leaves nothing, so the deletion completes.
+    assert _run_cleanup(db, sup) == ["deferred"]  # parts landed after the second abort too
+    assert late.stored_parts == {}  # the third abort left nothing
+    # A later check, with no abort before it, finds nothing, so the deletion completes.
     assert _run_cleanup(db, sup) == ["succeeded"]
-    assert late.stored_parts == {} and late.aborts == {"mp-late": 3, "mp-live": 3}
+    assert late.aborts == {"mp-late": 3, "mp-live": 3}
     assert seed.one("SELECT lifecycle FROM projects WHERE id = %s", pid)["lifecycle"] == "deleted"
     assert seed.one("SELECT 1 FROM uploads WHERE project_id = %s", pid) is None
+
+
+def _age_cleanup(seed, seconds: float, *fields: str) -> None:
+    """Move the cleanup job's recorded times back, as if ``seconds`` had passed."""
+    row = seed.one("SELECT id, input_manifest FROM jobs WHERE stage = 'project_cleanup'")
+    manifest = dict(row["input_manifest"])
+    for field in fields:
+        manifest[field] = float(manifest[field]) - seconds
+    seed.exec("UPDATE jobs SET input_manifest = %s WHERE id = %s", Jsonb(manifest), row["id"])
+
+
+def test_project_cleanup_checks_multipart_parts_only_a_horizon_after_the_last_abort(
+    db, seed, store, settings
+):
+    # A part in flight during an abort can land afterwards, so the deciding check never
+    # follows an abort at once: it waits out a whole horizon with no abort in between.
+    pid = _deleting_project(seed, store)
+    store.multipart_uploads["mp-1"] = f"tenants/{pid}/staging/{uuid.uuid4()}"
+    seed.job(pid, "project_cleanup", {"projectId": pid, "prefix": f"tenants/{pid}/"}, priority=10)
+    sup = Supervisor(db, store, replace(settings, cleanup_reconcile_horizon_seconds=600),
+                     delay_fn=lambda attempt: 0.0)  # fmt: skip
+    deleting = "SELECT lifecycle FROM projects WHERE id = %s"
+
+    assert _run_cleanup(db, sup) == ["deferred"]
+    wait = _cleanup_jobs(seed, pid)[0]["wait"].total_seconds()
+    assert 590 < wait <= 600  # the next pass comes a whole horizon after the abort
+    store.stored_parts["mp-1"] = 1  # a part in flight lands after the abort
+
+    # An early pass neither aborts again, which would push the quiet interval back, nor
+    # completes: the part is still stored.
+    assert _run_cleanup(db, sup) == ["deferred"]
+    assert store.stored_parts == {"mp-1": 1}
+    assert seed.one(deleting, pid)["lifecycle"] == "deleting"
+
+    # A horizon later, the check before any abort finds the part: abort and wait again.
+    _age_cleanup(seed, 700, "firstPassAt", "multipartAbortedAt")
+    assert _run_cleanup(db, sup) == ["deferred"]
+    assert store.stored_parts == {} and seed.one(deleting, pid)["lifecycle"] == "deleting"
+    _age_cleanup(seed, 700, "firstPassAt", "multipartAbortedAt")
+    assert _run_cleanup(db, sup) == ["succeeded"]
+    assert seed.one(deleting, pid)["lifecycle"] == "deleted"
 
 
 def test_a_requeued_project_cleanup_waits_longer_and_never_gives_up(db, seed, store, settings):
