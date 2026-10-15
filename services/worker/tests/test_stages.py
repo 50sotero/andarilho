@@ -501,7 +501,7 @@ def test_reconstruct_records_the_camera_path_in_walk_order(db, seed, store, sett
         job_id,
     )  # fmt: skip
     assert sup.execute(queue.claim(db, "gpu-worker", "gpu")) == "succeeded"
-    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'training'")[
+    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'normalizing'")[
         "input_manifest"
     ]["outputs"]
     record = json.loads(store.get_bytes(outputs["camerasKey"]))

@@ -21,7 +21,7 @@ from typing import Any
 
 import numpy as np
 
-from andarilho_worker.geometry.layout import _wall_pieces, ensure_valid_layout
+from andarilho_worker.geometry.layout import _wall_pieces, ensure_valid_layout, floor_supports
 from andarilho_worker.geometry.polygon import point_in_polygon, signed_area, triangulate
 from andarilho_worker.geometry.textured import TexturedPart
 
@@ -29,6 +29,8 @@ CEILING_HEIGHT = 2.5  # ceiling height above a floor that has no walls
 ATLAS_RETRIES = 20
 ATLAS_GROWTH = 1.25
 CORNER_TOLERANCE = 1e-6
+# How far beyond a wall face to look for the floor it is seen from, metres.
+FACE_PROBE = 0.1
 UP = np.array([0.0, 1.0, 0.0])
 
 
@@ -161,9 +163,28 @@ def _vertical(
     return _surface(name, kind, p, u_axis, UP, outer, [], extras)
 
 
+def _faces_floor(
+    floor: Mapping[str, Any], p0: np.ndarray, p1: np.ndarray, normal: np.ndarray
+) -> bool:
+    """Whether the floor lies just beyond a wall face, at any of a few points along it."""
+    return any(
+        floor_supports(floor, tuple(p0 + f * (p1 - p0) + FACE_PROBE * normal))
+        for f in (0.25, 0.5, 0.75)
+    )
+
+
 def _wall_surfaces(
-    wall: Mapping[str, Any], openings: list[Mapping[str, Any]], elevation: float
+    wall: Mapping[str, Any],
+    openings: list[Mapping[str, Any]],
+    floor: Mapping[str, Any],
 ) -> list[Surface]:
+    """The faces of a wall's pieces that can be seen from its floor.
+
+    The walk happens on the floor, so a side face with no floor beyond it (the outside
+    of an exterior wall) is never in view: it is left out, which also keeps it from
+    counting as unseen in the coverage. Caps and sill or lintel faces are always kept.
+    """
+    elevation = float(floor["elevation"])
     start = np.array(wall["start"], dtype=np.float64)
     end = np.array(wall["end"], dtype=np.float64)
     length = math.dist(wall["start"], wall["end"])
@@ -175,8 +196,10 @@ def _wall_surfaces(
         p0 = np.asarray(p0_raw, dtype=np.float64)
         p1 = np.asarray(p1_raw, dtype=np.float64)
         off = half_t * left
-        out.append(_vertical(f"{name}:a", kind, p0 + off, p1 + off, left, y0, y1, extras))
-        out.append(_vertical(f"{name}:b", kind, p0 - off, p1 - off, -left, y0, y1, extras))
+        if _faces_floor(floor, p0 + off, p1 + off, left):
+            out.append(_vertical(f"{name}:a", kind, p0 + off, p1 + off, left, y0, y1, extras))
+        if _faces_floor(floor, p0 - off, p1 - off, -left):
+            out.append(_vertical(f"{name}:b", kind, p0 - off, p1 - off, -left, y0, y1, extras))
         # A piece end at the wall's own extended ends is a corner; any other end is an
         # opening edge and gets a cap facing away from the piece.
         s0 = float(np.dot(p0 - start, d))
@@ -241,8 +264,8 @@ def layout_surfaces(layout: Mapping[str, Any]) -> list[Surface]:
                 _horizontal(name, "ceiling", ceiling_y, outer, holes, up=False, extras=extras)
             )
     for wall in layout.get("walls", []):
-        elevation = float(floors[wall["floorId"]]["elevation"])
-        surfaces.extend(_wall_surfaces(wall, openings_by_wall.get(wall["id"], []), elevation))
+        floor = floors[wall["floorId"]]
+        surfaces.extend(_wall_surfaces(wall, openings_by_wall.get(wall["id"], []), floor))
     for obstacle in layout.get("obstacles", []):
         elevation = float(floors[obstacle["floorId"]]["elevation"])
         surfaces.extend(_obstacle_surfaces(obstacle, elevation))

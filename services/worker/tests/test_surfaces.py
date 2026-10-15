@@ -50,6 +50,10 @@ def _room_with_door_and_window() -> dict:
     return layout
 
 
+def _synthetic() -> dict:
+    return json.loads((FIXTURES / "synthetic-two-room.layout.json").read_text())
+
+
 @pytest.fixture
 def room() -> dict:
     return _room_with_door_and_window()
@@ -61,19 +65,21 @@ def surfaces(room):
 
 
 def test_door_and_window_yield_expected_kinds(surfaces):
+    # Every wall of a lone room is exterior, so each piece keeps one long face (the room side)
+    # beside its caps and its sill or lintel faces.
     counts = Counter(s.kind for s in surfaces)
     assert counts == {
-        "wall": 16,
-        "closed_opening": 4,
-        "sill": 5,
-        "lintel": 10,
+        "wall": 10,
+        "closed_opening": 3,
+        "sill": 4,
+        "lintel": 8,
         "floor": 1,
         "ceiling": 1,
     }
 
 
 def test_synthetic_fixture_surfaces_cover_obstacle_and_divider():
-    layout = json.loads((FIXTURES / "synthetic-two-room.layout.json").read_text())
+    layout = _synthetic()
     surfaces = layout_surfaces(layout)
     counts = Counter(s.kind for s in surfaces)
     assert counts["floor"] == 1 and counts["ceiling"] == 1
@@ -147,12 +153,14 @@ def _face_centre_xz(s: Surface) -> np.ndarray:
     return np.array([centre[0], centre[2]])
 
 
-def test_long_faces_point_away_from_their_wall_centreline(room, surfaces):
+@pytest.mark.parametrize("name", ["room", "synthetic"])
+def test_long_faces_point_away_from_their_wall_centreline(name):
     # A long face sits half a wall thickness off the centreline, and its normal must point away
-    # from the centreline. Probing the room on either side cannot tell the two normals apart.
-    walls = {w["id"]: w for w in room["walls"]}
-    faces = _long_faces(surfaces)
-    assert len(faces) == 2 * len({s.name[:-2] for s in faces})
+    # from the centreline. The synthetic divider keeps both faces, so both sides are checked.
+    layout = _room_with_door_and_window() if name == "room" else _synthetic()
+    walls = {w["id"]: w for w in layout["walls"]}
+    faces = _long_faces(layout_surfaces(layout))
+    assert faces
     for s in faces:
         wall = walls[s.extras["wallId"]]
         start = np.array(wall["start"], dtype=np.float64)
@@ -168,21 +176,27 @@ def test_long_faces_point_away_from_their_wall_centreline(room, surfaces):
 
 
 def test_room_side_faces_point_into_the_room(room, surfaces):
-    # Looking 0.2 m along its normal, the room-side face must end up in the room and the outer
-    # face must end up outside it.
+    # Looking 0.2 m along its normal, a long face must end up in the room. The outer face of an
+    # exterior wall is never seen from the floor, so each piece of a lone room keeps only one.
     floor = room["floors"][0]
-    pairs: dict[str, list[tuple[bool, bool]]] = {}
+    pieces: Counter[str] = Counter()
     for s in _long_faces(surfaces):
         centre = _face_centre_xz(s)
         normal = np.array([s.normal[0], s.normal[2]])
-        on_room_side = floor_supports(floor, centre)
-        ahead_in_room = floor_supports(floor, centre + 0.2 * normal)
-        pairs.setdefault(s.name[:-2], []).append((on_room_side, ahead_in_room))
-    assert pairs
-    for piece, flags in pairs.items():
-        # Each wall piece has exactly one long face on the room side, and it faces the room.
-        assert sum(on for on, _ in flags) == 1, piece
-        assert all(on == ahead for on, ahead in flags), piece
+        assert floor_supports(floor, centre), s.name
+        assert floor_supports(floor, centre + 0.2 * normal), s.name
+        pieces[s.name[:-2]] += 1
+    assert pieces and set(pieces.values()) == {1}
+
+
+def test_interior_walls_keep_both_long_faces():
+    # The divider has floor on both sides, so both of its long faces can be seen; an outer wall
+    # keeps only its room side.
+    pieces = Counter(s.name[:-2] for s in _long_faces(layout_surfaces(_synthetic())))
+    divider = {piece for piece in pieces if piece.startswith("wall-divider")}
+    assert len(divider) == 3  # the two segments either side of the door and its lintel
+    for piece, count in pieces.items():
+        assert count == (2 if piece in divider else 1), piece
 
 
 def _holed_room() -> dict:
@@ -356,7 +370,7 @@ def _rectangle_with_obstacles(footprints: list[list[list[float]]]) -> dict:
 
 
 def _obstacle_layouts() -> dict[str, dict]:
-    synthetic = json.loads((FIXTURES / "synthetic-two-room.layout.json").read_text())
+    synthetic = _synthetic()
     clockwise = [[1.0, 1.0], [1.0, 2.0], [2.0, 2.0], [2.0, 1.0]]  # signed area is negative
     concave = [[1.0, 1.0], [2.0, 1.0], [2.0, 1.5], [1.5, 1.5], [1.5, 2.0], [1.0, 2.0]]
     return {

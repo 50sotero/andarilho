@@ -1,8 +1,8 @@
 {
   "generatedFrom": "services/worker/src/andarilho_worker/recipes.py",
   "preview": {
-    "name": "preview-v1",
-    "digest": "sha256:3d6e1882f1d03ce7bde039df520d01d643681fca54fd61e0697442db29a49235",
+    "name": "preview-v2",
+    "digest": "sha256:042a94c2abe77c833744de0a6228da34911fedcf954a89db6b9bd9fa03637e0f",
     "stages": [
       {
         "stage": "validating",
@@ -17,15 +17,15 @@
         "capability": "gpu"
       },
       {
-        "stage": "training",
-        "capability": "gpu"
-      },
-      {
         "stage": "normalizing",
         "capability": "cpu"
       },
       {
         "stage": "geometry_proposal",
+        "capability": "cpu"
+      },
+      {
+        "stage": "texturing",
         "capability": "cpu"
       },
       {
@@ -48,14 +48,17 @@
       "keyframeOversample": 3,
       "sequentialOverlap": 20,
       "seed": 42,
-      "renderShDegree": 1,
-      "iterations": 7000,
-      "saveSteps": 2000
+      "texture": {
+        "texelSize": 0.01,
+        "pageSize": 2048,
+        "maxPages": 8,
+        "jpegQuality": 85
+      }
     }
   },
   "standard": {
-    "name": "standard-v1",
-    "digest": "sha256:e387231082956b1c465ab1cb9afff9c3cb30bcf08178de1ee88eb4ba1d606e6a",
+    "name": "standard-v2",
+    "digest": "sha256:4ec80d83f42a361cce721066e20226cb12c40760f08ceddc9bd4226e745faf4e",
     "stages": [
       {
         "stage": "validating",
@@ -70,15 +73,15 @@
         "capability": "gpu"
       },
       {
-        "stage": "training",
-        "capability": "gpu"
-      },
-      {
         "stage": "normalizing",
         "capability": "cpu"
       },
       {
         "stage": "geometry_proposal",
+        "capability": "cpu"
+      },
+      {
+        "stage": "texturing",
         "capability": "cpu"
       },
       {
@@ -101,14 +104,17 @@
       "keyframeOversample": 3,
       "sequentialOverlap": 20,
       "seed": 42,
-      "renderShDegree": 1,
-      "iterations": 30000,
-      "saveSteps": 5000
+      "texture": {
+        "texelSize": 0.01,
+        "pageSize": 2048,
+        "maxPages": 8,
+        "jpegQuality": 85
+      }
     }
   },
   "synthetic": {
-    "name": "synthetic-v1",
-    "digest": "sha256:1897ad0c290a61437bd86455a9af2030582ad21bacb543460071afd0a0b76f66",
+    "name": "synthetic-v2",
+    "digest": "sha256:4a0ce8370b807761da499aace7624d60e833c3b62e1c66b01d0d37189130e7c5",
     "stages": [
       {
         "stage": "validating",
@@ -127,6 +133,10 @@
         "capability": "cpu"
       },
       {
+        "stage": "texturing",
+        "capability": "cpu"
+      },
+      {
         "stage": "packaging",
         "capability": "cpu"
       },
@@ -136,7 +146,13 @@
       }
     ],
     "params": {
-      "fixture": "synthetic-two-room"
+      "fixture": "synthetic-two-room",
+      "texture": {
+        "texelSize": 0.01,
+        "pageSize": 2048,
+        "maxPages": 8,
+        "jpegQuality": 85
+      }
     }
   },
   "intake": {

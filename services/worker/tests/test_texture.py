@@ -384,9 +384,9 @@ def _faces_into_room(layout, surface) -> bool:
 
 
 def test_walls_the_cameras_faced_are_covered(room_run, room_prefill):
-    # A closed room's back faces are never visible from inside, so the kind-level "wall"
-    # figure is bounded near one half; the faced walls are the meaningful measure. They are
-    # counted before hole filling, so colours copied in from neighbours do not count as seen.
+    # The walls the cameras faced are the meaningful measure: the kind-level "wall" figure also
+    # holds caps and walls behind the cameras. They are counted before hole filling, so colours
+    # copied in from neighbours do not count as seen.
     faced_seen = faced_total = truth_seen = 0
     for surface, chart in zip(room_run.surfaces, room_run.charts, strict=True):
         if not _faces_into_room(room_run.layout, surface):
@@ -405,21 +405,21 @@ def test_walls_the_cameras_faced_are_covered(room_run, room_prefill):
     assert all(0.0 <= value <= 1.0 for value in room_run.mesh.coverage.values())
 
 
-def _faces_out_of_room(layout, surface) -> bool:
-    """True for the long wall face on the outside of the room, which a camera inside never faces."""
-    return (
-        surface.kind == "wall"
-        and surface.name.endswith((":a", ":b"))
-        and not _faces_into_room(layout, surface)
-    )
-
-
-def test_outer_wall_faces_stay_unseen_from_inside_a_large_room():
-    # An outer face lies 0.1 m behind the room-side face. From 3.5 m or more that gap falls inside
-    # the depth tolerance (2% of the depth plus 3 cm), so the depth test alone would let the outer
-    # face through. The facing gate (cos >= min_cos) keeps it unseen: with the gate open, the same
-    # frames paint it.
+def _divided_hall() -> dict:
+    """The 12 x 10 m room with a full-height divider 4.5 m east of its middle."""
     layout = rectangle_layout((-6.0, -5.0), (6.0, 5.0), elevation=0.0, height=2.5)
+    divider = dict(layout["walls"][0], id="wall-divider", start=[4.5, -5.0], end=[4.5, 5.0])
+    layout["walls"].append(divider)
+    return layout
+
+
+def test_divider_face_turned_away_from_every_camera_stays_unseen():
+    # The divider has floor on both sides, so both long faces are textured, but every camera is
+    # on its west side. The east face lies 0.1 m behind the west one, and from 3.9 m or more that
+    # gap falls inside the depth tolerance (2% of the depth plus 3 cm), so the depth test alone
+    # would let it through. The facing gate (cos >= min_cos) keeps it unseen: with the gate
+    # open, the same frames paint it.
+    layout = _divided_hall()
     surfaces = layout_surfaces(layout)
     frames = _big_room_frames(surfaces)
     params = TextureParams(texel_size=0.02)
@@ -427,27 +427,28 @@ def test_outer_wall_faces_stay_unseen_from_inside_a_large_room():
     open_gate = texture_layout(layout, frames, dataclasses.replace(params, min_cos=-1.0))
     atlas = build_atlas(surfaces, texel_size=gated.texel_size)
 
-    assert sum(_faces_out_of_room(layout, s) for s in surfaces) == 4
-    outer_total = outer_painted = inner_total = inner_seen = 0
+    far_total = far_painted = near_total = near_seen = 0
     for surface, placement in zip(surfaces, atlas.placements, strict=True):
-        if surface.kind != "wall":
+        if surface.extras.get("wallId") != "wall-divider" or surface.kind != "wall":
+            continue
+        if not surface.name.endswith((":a", ":b")):
             continue
         pixels, _, inside = chart_texels(surface, placement, atlas)
         px = pixels[inside]
         gated_rgb = gated.pages[placement.page][px[:, 1], px[:, 0]]
         open_rgb = open_gate.pages[placement.page][px[:, 1], px[:, 0]]
-        if _faces_out_of_room(layout, surface):
+        if surface.normal[0] > 0:  # faces east, away from every camera
             assert np.all(gated_rgb == UNSEEN), surface.name
-            outer_total += len(px)
-            outer_painted += int(np.any(open_rgb != UNSEEN, axis=1).sum())
+            far_total += len(px)
+            far_painted += int(np.any(open_rgb != UNSEEN, axis=1).sum())
         else:
-            inner_total += len(px)
-            inner_seen += int(np.any(gated_rgb != UNSEEN, axis=1).sum())
-    # The room-side faces must be seen, so the unseen outer faces are not an empty atlas; and the
-    # open gate must paint the outer faces, so it is the gate that keeps them unseen.
-    assert inner_seen > 0.9 * inner_total
-    assert outer_painted > 0.5 * outer_total
-    assert outer_total > 50_000
+            near_total += len(px)
+            near_seen += int(np.any(gated_rgb != UNSEEN, axis=1).sum())
+    # The west face must be seen, so the unseen east face is not an empty atlas; and the open
+    # gate must paint the east face, so it is the gate that keeps it unseen.
+    assert near_seen > 0.9 * near_total
+    assert far_painted > 0.5 * far_total
+    assert far_total > 50_000
 
 
 def test_floor_is_in_view_and_reproduced(room_run):

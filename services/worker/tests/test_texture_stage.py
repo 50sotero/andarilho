@@ -347,9 +347,8 @@ def test_real_run_paints_the_layout_from_the_video_frames(db, store, settings, t
         assert _shows_colour(pages, face), f"no texel shows the face colour {face.tolist()}"
     coverage = outputs["textureCoverage"]
     assert coverage["floor"] > 0.9 and coverage["ceiling"] > 0.9, coverage
-    # Each wall is two faces and only the room side is ever in view from inside, so the
-    # walls' share is about half of their area (see the open issue on the coverage metric).
-    assert 0.4 < coverage["wall"] < 0.6, coverage
+    # Only the room side of an outer wall is textured, and the walk faces all of it.
+    assert coverage["wall"] > 0.9, coverage
     assert all(0.0 <= value <= 1.0 for value in coverage.values())
     # The reconstruction's quality and the run's normalizing facts pass through unchanged.
     assert outputs["coverage"]["registeredViews"] == CAMERAS

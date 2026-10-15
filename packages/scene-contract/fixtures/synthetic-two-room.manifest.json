@@ -29,8 +29,8 @@
     "render": {
       "key": "tenants/fixture-project/scenes/fixture-revision/model.glb",
       "format": "glb",
-      "bytes": 256480,
-      "sha256": "c875e2f9d0a41650d8bfc3cd65f786fbfcf670950e9ea5271be9cf78d943f7c2"
+      "bytes": 208812,
+      "sha256": "7744e97a514efde70a5300ca77cccd23247e3ccdf144e41cd5b766ca1e37871d"
     },
     "collision": {
       "key": "tenants/fixture-project/scenes/fixture-revision/collision.glb",
