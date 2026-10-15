@@ -430,6 +430,23 @@ def test_expired_uploads_are_refused_as_expired_and_no_longer_listed(client, aut
     assert [u["id"] for u in detail["uploads"]] == [live]
 
 
+def test_removed_and_rejected_uploads_are_no_longer_listed(client, auth, db):
+    pid = create_project(client, auth)["id"]
+    removed, rejected, live = (_init(client, auth, pid, size=10).json()["upload"]["id"]
+                               for _ in range(3))  # fmt: skip
+    # As a removal and a failed inspection leave them, before and after their cleanup.
+    db.get(Upload, uuid.UUID(removed)).status = "aborted"
+    db.get(Upload, uuid.UUID(rejected)).status = "rejected"
+    db.commit()
+    detail = client.get(f"/v1/projects/{pid}", headers=auth()).json()
+    assert [u["id"] for u in detail["uploads"]] == [live]
+    # Each is still readable on its own, so a client can show why a file went away.
+    for upload_id, status in ((removed, "aborted"), (rejected, "rejected")):
+        response = client.get(f"/v1/uploads/{upload_id}", headers=auth())
+        assert response.status_code == 200
+        assert response.json()["upload"]["status"] == status
+
+
 def _run(client, auth, pid, capture_set_id, key):
     return client.post(
         f"/v1/projects/{pid}/runs",

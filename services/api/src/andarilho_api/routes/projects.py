@@ -111,13 +111,15 @@ def list_projects(
 
 def _project_detail(db: Session, project: Project, role: str) -> dict[str, Any]:
     pid = project.id
-    # An upload past its expiry can never be resumed (the worker marks it expired and
-    # later deletes it), so listing it would only make every response longer.
+    # Only uploads that can still be used are listed. One past its expiry can never be
+    # resumed (the worker marks it expired and later deletes it), and a removed (aborted)
+    # or rejected one is final, its bytes deleted by cleanup. Listing those would make
+    # every response longer with each removal and count files the user no longer has.
     uploads = db.execute(
         select(Upload)
         .where(
             Upload.project_id == pid,
-            Upload.status != "expired",
+            Upload.status.not_in(("expired", "aborted", "rejected")),
             or_(Upload.status != "initiated", Upload.expires_at > utcnow()),
         )
         .order_by(Upload.created_at, Upload.id)
