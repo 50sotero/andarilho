@@ -134,6 +134,24 @@ def _lock_scene(db: Session, scene_id: uuid.UUID, subject: str, roles: tuple[str
     return project, lock_row(db, Scene, scoped.id)
 
 
+def _publication_changed(
+    db: Session, revision_ids: list[uuid.UUID | None], *, skip: uuid.UUID | None = None
+) -> None:
+    """Bump the version of each scene holding one of these revisions (except ``skip``).
+
+    Publishing is guarded by the scene ETag: a tab that read a scene before its
+    revision was published or unpublished must get a conflict, not publish over it.
+    """
+    ids = {r for r in revision_ids if r is not None}
+    if not ids:
+        return
+    holders = select(SceneRevision.scene_id).where(SceneRevision.id.in_(ids))
+    for held in db.execute(
+        select(Scene).where(Scene.id.in_(holders), Scene.id != skip).with_for_update()
+    ).scalars():
+        held.version += 1
+
+
 @router.put("/scenes/{scene_id}/layout", status_code=202)
 def save_layout(
     scene_id: uuid.UUID,
@@ -302,11 +320,13 @@ def create_share(
         expires_at=expires_at,
     )
     db.add(share)
+    previous = project.published_revision_id
     project.published_revision_id = revision.id
     project.updated_at = utcnow()
     # Publishing changes what the scene's viewers see: a tab still holding the old
     # ETag must get a conflict instead of silently publishing over this.
     scene.version += 1
+    _publication_changed(db, [previous], skip=scene.id)
     if revision.manifest_sha256 is None:
         revision.manifest_sha256 = manifest_sha256(revision)
     audit.record(
@@ -333,7 +353,8 @@ def revoke_share(share_id: uuid.UUID, subject: Subject, db: Db):
         now = utcnow()
         share.revoked_at = now
         db.flush()
-        if project.published_revision_id == share.scene_revision_id:
+        previous = project.published_revision_id
+        if previous == share.scene_revision_id:
             # Point at the newest revision that still has a live link (this one if it
             # has others); only clear the pointer when no public link remains at all.
             live = (
@@ -354,6 +375,7 @@ def revoke_share(share_id: uuid.UUID, subject: Subject, db: Db):
                     .limit(1)
                 ).scalar_one_or_none()
                 project.updated_at = now
+                _publication_changed(db, [previous, project.published_revision_id])
         audit.record(
             db,
             project_id=project.id,

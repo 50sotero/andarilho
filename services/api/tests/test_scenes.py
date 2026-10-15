@@ -369,6 +369,31 @@ def test_publishing_invalidates_the_scene_etag(client, auth, setup):
     assert _share(client, auth, setup, 3).status_code == 201
 
 
+def test_unpublishing_by_revocation_invalidates_the_scene_etag(client, auth, setup):
+    assert _approve(client, auth, setup).status_code == 200
+    first = _share(client, auth, setup, 2).json()["share"]["id"]
+    second = _share(client, auth, setup, 3).json()["share"]["id"]
+    # Revoking one of two links keeps the revision published: the ETag stands.
+    assert client.delete(f"/v1/shares/{first}", headers=auth()).status_code == 204
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"4"'
+    # Revoking the last link unpublishes it.
+    assert client.delete(f"/v1/shares/{second}", headers=auth()).status_code == 204
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"5"'
+    # A tab that loaded the scene while it was published cannot publish on that state.
+    assert _share(client, auth, setup, 4).status_code == 409
+    assert _share(client, auth, setup, 5).status_code == 201
+
+
+def test_publishing_another_scene_invalidates_the_previously_published_one(client, auth, db, setup):
+    assert _approve(client, auth, setup).status_code == 200
+    assert _share(client, auth, setup, 2).status_code == 201
+    newer = {"pid": setup["pid"], **scene(db, setup["pid"])}
+    assert _approve(client, auth, newer).status_code == 200
+    assert _share(client, auth, newer, 2).status_code == 201
+    # The first scene's revision is no longer the published one.
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"4"'
+
+
 def test_revoking_newest_share_keeps_older_live_link_published(client, auth, db, setup):
     assert _approve(client, auth, setup).status_code == 200
     assert _share(client, auth, setup, 2).status_code == 201
