@@ -14,7 +14,7 @@ import {
   stageStates,
 } from "@/features/processing/stages";
 import { expiryFromDays } from "@/features/sharing/SharePanel";
-import { awaitingRevision, fallbackLayout } from "@/features/projects/PrivateWalk";
+import { awaitingRevision, awaitingScene, fallbackLayout } from "@/features/projects/PrivateWalk";
 import { removalMode, startReadiness } from "@/features/capture/CaptureFlow";
 import { rejectionMessage } from "@/features/uploads/UploadList";
 import { RefreshBudget, envelopeExpired } from "@/components/viewer/envelope";
@@ -202,6 +202,22 @@ describe("private walk while the first revision validates", () => {
     expect(awaitingRevision(sceneWith(valid, [valid]))).toBe(false);
     const invalid = rev("rev-1", "invalid");
     expect(awaitingRevision(sceneWith(invalid, [invalid]))).toBe(false);
+  });
+});
+
+describe("private walk before the run creates the scene", () => {
+  const scene = { id: "scene-1", version: 1, currentDraftRevisionId: null };
+  const runs = (...statuses: Run["status"][]) => statuses.map((status) => ({ status }));
+
+  it("keeps checking while a run is still processing", () => {
+    expect(awaitingScene({ scene: null, runs: runs("failed", "running") })).toBe(true);
+    expect(awaitingScene({ scene: null, runs: runs("queued") })).toBe(true);
+  });
+
+  it("stops once the scene exists or no run is processing", () => {
+    expect(awaitingScene({ scene, runs: runs("running") })).toBe(false);
+    expect(awaitingScene({ scene: null, runs: runs("failed", "cancelled") })).toBe(false);
+    expect(awaitingScene(null)).toBe(false);
   });
 });
 

@@ -7,7 +7,7 @@ import { ViewerClient } from "@/components/viewer/ViewerClient";
 import { LayoutPlan } from "@/features/review/LayoutPlan";
 import { api } from "@/lib/api/client";
 import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
-import type { DeliveryEnvelope, Layout, SceneDetail } from "@/lib/api/types";
+import type { DeliveryEnvelope, Layout, ProjectDetail, Run, SceneDetail } from "@/lib/api/types";
 import { usePolling } from "@/lib/use-polling";
 import { useProject } from "./use-project";
 
@@ -35,6 +35,20 @@ export function awaitingRevision(scene: SceneDetail): boolean {
 }
 
 /**
+ * True while a run is still processing and has not created the project's scene yet
+ * (the scene appears partway through a run): worth checking the project again.
+ */
+export function awaitingScene(
+  detail: { scene: ProjectDetail["scene"]; runs: Pick<Run, "status">[] } | null,
+): boolean {
+  return (
+    detail !== null &&
+    detail.scene === null &&
+    detail.runs.some((r) => r.status === "queued" || r.status === "running")
+  );
+}
+
+/**
  * The 2D plan shown beside (or instead of) the 3D walk. Only the current draft's
  * layout is loaded, so it is offered only when the draft is the revision being walked;
  * an older delivered revision has no matching plan here.
@@ -49,7 +63,7 @@ export function fallbackLayout(
 }
 
 export function PrivateWalk({ projectId }: { projectId: string }) {
-  const { detail, error: projectError } = useProject(projectId);
+  const { detail, error: projectError, reload } = useProject(projectId);
   const [scene, setScene] = useState<SceneDetail | null>(null);
   const [envelope, setEnvelope] = useState<DeliveryEnvelope | null>(null);
   const [error, setError] = useState<FriendlyError | null>(null);
@@ -97,6 +111,16 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
       signal.cancelled = true;
     };
   }, [fetchEnvelope]);
+
+  // The page may open before the run has created the scene: refresh the project until
+  // it has one (or the run ends), then the scene's own checks take over.
+  usePolling(
+    async () => {
+      await reload();
+      return { terminal: false };
+    },
+    { enabled: awaitingScene(detail), key: projectId },
+  );
 
   // The first revision may still be validating when the page opens: keep checking
   // until it becomes walkable (or stops being pending) instead of waiting for a reload.
