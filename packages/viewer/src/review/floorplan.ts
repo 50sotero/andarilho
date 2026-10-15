@@ -1,4 +1,4 @@
-import type { Layout, LayoutFloor, Opening, Wall } from "@andarilho/scene-contract";
+import type { Furniture, Layout, LayoutFloor, Opening, Wall } from "@andarilho/scene-contract";
 import { ShapeUtils, Vector2 } from "three";
 import type { Aabb, CollisionMesh, Vec2, Vec3 } from "../types";
 
@@ -7,16 +7,20 @@ import type { Aabb, CollisionMesh, Vec2, Vec3 } from "../types";
  * collision packaging: floor polygons with holes are triangulated (ear
  * clipping), walls are extruded with thickness/height and split around open
  * openings with a lintel (and sill) instead of a solid wall across the
- * opening, and obstacles are extruded prisms. Layout 2D points are (x, z) in
+ * opening, obstacles are extruded prisms, and each solid furniture piece is an
+ * oriented prism over its footprint. Layout 2D points are (x, z) in
  * the canonical world frame; Y is up. Nothing here applies the render
  * transform: layout coordinates are already world coordinates.
  */
 
-export type FloorplanPartKind = "floor" | "wall" | "lintel" | "sill" | "obstacle";
+export type FloorplanPartKind = "floor" | "wall" | "lintel" | "sill" | "obstacle" | "furniture";
 
 export interface FloorplanGroup {
   kind: FloorplanPartKind;
-  /** Source element ID (floor, wall or obstacle ID; opening ID for lintel/sill). */
+  /**
+   * Source element ID (floor, wall, obstacle or furniture ID; opening ID for
+   * lintel/sill).
+   */
   id: string;
   /** First index (into `indices`) of this group. */
   start: number;
@@ -193,10 +197,135 @@ function wallLength(wall: Wall): number {
   return Math.hypot(wall.end[0] - wall.start[0], wall.end[1] - wall.start[1]);
 }
 
+// ---------------------------------------------------------------------------
+// Furniture frame
+// ---------------------------------------------------------------------------
+
+/** Largest plausible furniture width or depth in metres (the API uses the same limit). */
+export const MAX_FURNITURE_WIDTH = 6;
+/** Largest plausible furniture height in metres (the API uses the same limit). */
+export const MAX_FURNITURE_HEIGHT = 4;
+
+/** Footprint corners as fractions of width (x) and depth (z), around the centre. */
+const FOOTPRINT_CORNERS: readonly Vec2[] = [
+  [-0.5, -0.5],
+  [0.5, -0.5],
+  [0.5, 0.5],
+  [-0.5, 0.5],
+];
+
+/**
+ * Maps a point of a furniture object's frame to layout (x, z) metres. The frame
+ * is centred on the footprint with x across the width and z from back to front.
+ * Yaw turns it the way three.js rotation.y does, so at yaw 0 the front faces +z
+ * and at yaw pi/2 it faces +x.
+ */
+function furnitureToLayout(item: Furniture, lx: number, lz: number): Vec2 {
+  const cos = Math.cos(item.yawRadians);
+  const sin = Math.sin(item.yawRadians);
+  const [px, pz] = item.position;
+  return [px + lx * cos + lz * sin, pz - lx * sin + lz * cos];
+}
+
+/**
+ * The four corners of a furniture object's footprint: its width x depth rectangle,
+ * turned by yaw about the centre of the footprint, in layout (x, z) metres.
+ */
+export function furnitureFootprint(item: Furniture): Vec2[] {
+  const [width, , depth] = item.size;
+  return FOOTPRINT_CORNERS.map(([u, w]) => furnitureToLayout(item, u * width, w * depth));
+}
+
+/**
+ * World position of a corner of a part box of a furniture object standing on a
+ * floor at `elevation`. The corner is given as fractions (u, v, w) of the object
+ * box: u across the width, v up from the floor and w from back to front, each in
+ * [0, 1]. Part boxes are described this way, so a part's min and max are corners.
+ */
+export function furniturePartCorner(item: Furniture, corner: Vec3, elevation: number): Vec3 {
+  const [width, height, depth] = item.size;
+  const [x, z] = furnitureToLayout(item, (corner[0] - 0.5) * width, (corner[2] - 0.5) * depth);
+  return [x, elevation + corner[1] * height, z];
+}
+
+/** Colours are written as #rrggbb (the same form the API accepts). */
+const COLOR_PATTERN = /^#[0-9a-fA-F]{6}$/;
+
+function unitNumber(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
+}
+
+/** True when the furniture has the finite numbers its footprint is computed from. */
+function hasFootprint(item: Furniture): boolean {
+  return (
+    finitePoint(item.position) &&
+    Number.isFinite(item.yawRadians) &&
+    Array.isArray(item.size) &&
+    item.size.length === 3 &&
+    item.size.every((v) => Number.isFinite(v))
+  );
+}
+
+/**
+ * Checks one furniture piece: its floor, its frame and size limits, and its parts.
+ * The id is checked by the caller, because it shares a namespace with openings and
+ * obstacles.
+ */
+function furnitureIssues(
+  item: Furniture,
+  path: string,
+  floors: ReadonlyMap<string, LayoutFloor>,
+  issues: LayoutIssue[],
+): void {
+  const err = (at: string, message: string) =>
+    issues.push({ severity: "error", path: at, message });
+  if (!floors.has(item.floorId)) err(`${path}.floorId`, `unknown floor ${item.floorId}`);
+  if (typeof item.category !== "string" || item.category.length < 1 || item.category.length > 40) {
+    err(`${path}.category`, "category must be 1 to 40 characters");
+  }
+  if (typeof item.label === "string" && item.label.length > 120) {
+    err(`${path}.label`, "label must be at most 120 characters");
+  }
+  if (!finitePoint(item.position)) err(`${path}.position`, "position is not finite");
+  if (!Number.isFinite(item.yawRadians)) err(`${path}.yawRadians`, "yaw is not finite");
+
+  const size: readonly number[] = Array.isArray(item.size) ? item.size : [];
+  if (size.length !== 3 || !size.every((v) => Number.isFinite(v) && v > 0)) {
+    err(`${path}.size`, "size must be three positive numbers");
+  } else {
+    const [width, height, depth] = item.size;
+    if (Math.max(width, depth) > MAX_FURNITURE_WIDTH || height > MAX_FURNITURE_HEIGHT) {
+      err(`${path}.size`, "furniture is implausibly large");
+    }
+  }
+
+  if (!Array.isArray(item.parts) || item.parts.length < 1 || item.parts.length > 32) {
+    err(`${path}.parts`, "furniture needs between 1 and 32 parts");
+    return;
+  }
+  item.parts.forEach((part, p) => {
+    const at = `${path}.parts[${p}]`;
+    if (part.shape !== "box" && part.shape !== "cylinder") {
+      err(`${at}.shape`, "shape must be a box or a cylinder");
+    }
+    const { min, max } = part;
+    const isCorner = (v: unknown) => Array.isArray(v) && v.length === 3 && v.every(unitNumber);
+    if (!isCorner(min) || !isCorner(max)) {
+      err(at, "part corners must be numbers from 0 to 1");
+    } else if (min.some((lo, k) => lo >= max[k]!)) {
+      err(at, "part min must be below max on every axis");
+    }
+    if (typeof part.color !== "string" || !COLOR_PATTERN.test(part.color)) {
+      err(`${at}.color`, "color must be #rrggbb");
+    }
+  });
+}
+
 /**
  * Validates a confirmed layout: degenerate and self-intersecting polygons,
  * dangling references, negative thickness, impossible heights, openings that do
- * not fit their wall or overlap, and a spawn outside the walkable floor.
+ * not fit their wall or overlap, furniture outside its limits, and a spawn outside
+ * the walkable floor or inside solid furniture.
  */
 export function validateLayout(layout: Layout): LayoutIssue[] {
   const issues: LayoutIssue[] = [];
@@ -241,9 +370,17 @@ export function validateLayout(layout: Layout): LayoutIssue[] {
     }
   });
 
+  // Openings, obstacles and furniture share one id namespace, as the API requires.
+  const claimedIds = new Set<string>();
+  const claimId = (path: string, id: string) => {
+    if (claimedIds.has(id)) err(`${path}.id`, `duplicate id ${id}`);
+    claimedIds.add(id);
+  };
+
   const byWall = new Map<string, { opening: Opening; index: number }[]>();
   (layout.openings ?? []).forEach((opening, o) => {
     const path = `openings[${o}]`;
+    claimId(path, opening.id);
     const wall = walls.get(opening.wallId);
     if (!wall) {
       err(`${path}.wallId`, `unknown wall ${opening.wallId}`);
@@ -278,11 +415,18 @@ export function validateLayout(layout: Layout): LayoutIssue[] {
 
   (layout.obstacles ?? []).forEach((obstacle, o) => {
     const path = `obstacles[${o}]`;
+    claimId(path, obstacle.id);
     if (!floors.has(obstacle.floorId)) err(`${path}.floorId`, `unknown floor ${obstacle.floorId}`);
     ringIssues(obstacle.footprint, `${path}.footprint`, issues);
     if (!(obstacle.height > 0) || obstacle.height > MAX_ELEMENT_HEIGHT) {
       err(`${path}.height`, "impossible obstacle height");
     }
+  });
+
+  const furniture = layout.furniture ?? [];
+  furniture.forEach((item, f) => {
+    claimId(`furniture[${f}]`, item.id);
+    furnitureIssues(item, `furniture[${f}]`, floors, issues);
   });
 
   const spawn = layout.spawn;
@@ -303,6 +447,15 @@ export function validateLayout(layout: Layout): LayoutIssue[] {
         (ob) => ob.floorId === floor.id && pointInPolygon(p, normalizeRing(ob.footprint)),
       );
       if (inObstacle) err("spawn", "spawn is inside an obstacle");
+      // Furniture that is not solid can be walked through, so only solid pieces count.
+      const inFurniture = furniture.some(
+        (item) =>
+          item.solid !== false &&
+          item.floorId === floor.id &&
+          hasFootprint(item) &&
+          pointInPolygon(p, furnitureFootprint(item)),
+      );
+      if (inFurniture) err("spawn", "spawn is inside a piece of furniture");
       if (Math.abs(spawn.feet[1] - floor.elevation) > 0.5) {
         issues.push({
           severity: "warning",
@@ -513,10 +666,21 @@ export function layoutToCollisionMesh(
     builder.prism(obstacle.footprint, base, base + obstacle.height);
   }
 
+  for (const item of layout.furniture ?? []) {
+    // A piece that is not solid is drawn but does not block walking, so it adds no collision.
+    if (item.solid === false) continue;
+    const base = elevation.get(item.floorId) ?? 0;
+    builder.begin("furniture", item.id);
+    builder.prism(furnitureFootprint(item), base, base + item.size[1]);
+  }
+
   return builder.build();
 }
 
-/** Axis-aligned bounds of a layout (floors, walls and obstacles), in world meters. */
+/**
+ * Axis-aligned bounds of a layout (floors, walls, obstacles and furniture), in world
+ * meters. Furniture counts even when it is not solid, so it is never cut off.
+ */
 export function layoutBounds(layout: Layout): Aabb {
   const min: Vec3 = [Infinity, Infinity, Infinity];
   const max: Vec3 = [-Infinity, -Infinity, -Infinity];
@@ -542,6 +706,13 @@ export function layoutBounds(layout: Layout): Aabb {
   for (const ob of layout.obstacles ?? []) {
     const base = elevation.get(ob.floorId) ?? 0;
     for (const p of ob.footprint) add(p[0], base + ob.height, p[1]);
+  }
+  for (const item of layout.furniture ?? []) {
+    const base = elevation.get(item.floorId) ?? 0;
+    for (const p of furnitureFootprint(item)) {
+      add(p[0], base, p[1]);
+      add(p[0], base + item.size[1], p[1]);
+    }
   }
   return { min, max };
 }

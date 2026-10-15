@@ -135,6 +135,10 @@ export type { MeshSceneHandle, MeshSceneOptions } from "./render/mesh-scene";
 export {
   LayoutValidationError,
   MAX_ELEMENT_HEIGHT,
+  MAX_FURNITURE_HEIGHT,
+  MAX_FURNITURE_WIDTH,
+  furnitureFootprint,
+  furniturePartCorner,
   groupProjectedArea,
   isDegeneratePolygon,
   isSelfIntersecting,
