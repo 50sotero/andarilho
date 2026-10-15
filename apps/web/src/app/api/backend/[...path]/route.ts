@@ -1,6 +1,6 @@
-import { createBackendProxyHandler } from "@/lib/api/backend-proxy";
+import { adviceTimeoutMs, createBackendProxyHandler } from "@/lib/api/backend-proxy";
 import { getAccessToken } from "@/lib/auth/server";
-import { getApiInternalUrl, getAppOrigin } from "@/lib/env";
+import { getAiTimeoutSeconds, getApiInternalUrl, getAppOrigin } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
 
@@ -9,6 +9,7 @@ const handle = createBackendProxyHandler({
   getAppOrigin,
   getApiBaseUrl: getApiInternalUrl,
   fetch: (input, init) => fetch(input, init),
+  adviceTimeoutMs: adviceTimeoutMs(getAiTimeoutSeconds()),
 });
 
 type RouteContext = { params: Promise<{ path: string[] }> };

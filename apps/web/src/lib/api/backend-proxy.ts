@@ -12,8 +12,21 @@
 
 export const MAX_PROXY_BODY_BYTES = 1024 * 1024; // JSON only; media goes straight to storage.
 export const UPSTREAM_TIMEOUT_MS = 30_000;
+/** The API's default AI_TIMEOUT_SECONDS (services/api settings). */
+export const DEFAULT_AI_TIMEOUT_SECONDS = 60;
 
-const ALLOWED_RESOURCES = new Set(["projects", "uploads", "jobs", "runs", "scenes", "shares"]);
+const ALLOWED_RESOURCES = new Set([
+  "projects",
+  "uploads",
+  "jobs",
+  "runs",
+  "scenes",
+  "shares",
+  "imports",
+  "intake-policy",
+]);
+/** Optional AI advice for a failed run waits on the provider (README section 16). */
+const ADVICE_PATH = /^v1\/runs\/[^/]+\/advice$/;
 const PUBLIC_PATHS = new Set(["v1/public/scenes/delivery"]);
 const SAFE_METHODS = new Set(["GET", "HEAD"]);
 
@@ -52,6 +65,27 @@ export function validateProxyPath(segments: readonly string[]): ValidatedPath | 
   if (PUBLIC_PATHS.has(path)) return { path, isPublic: true };
   if (!ALLOWED_RESOURCES.has(segments[1]!)) return null;
   return { path, isPublic: false };
+}
+
+/**
+ * How long the proxy waits for the API on an AI advice request: the API may wait
+ * up to one provider timeout for a concurrency slot, then make two attempts of up
+ * to one timeout each, so a shorter proxy timeout would discard valid answers
+ * while the API keeps its slot busy.
+ */
+export function adviceTimeoutMs(aiTimeoutSeconds: number): number {
+  return Math.ceil((3 * aiTimeoutSeconds + 15) * 1000);
+}
+
+/** The upstream timeout for a validated path. */
+export function upstreamTimeoutMs(
+  path: string,
+  deps: Pick<BackendProxyDeps, "timeoutMs" | "adviceTimeoutMs">,
+): number {
+  if (ADVICE_PATH.test(path)) {
+    return deps.adviceTimeoutMs ?? adviceTimeoutMs(DEFAULT_AI_TIMEOUT_SECONDS);
+  }
+  return deps.timeoutMs ?? UPSTREAM_TIMEOUT_MS;
 }
 
 /** Mutations must come from our own origin (CSRF defence for cookie authentication). */
@@ -127,6 +161,8 @@ export interface BackendProxyDeps {
   fetch: (input: string, init: RequestInit) => Promise<Response>;
   maxBodyBytes?: number;
   timeoutMs?: number;
+  /** For `POST /v1/runs/{id}/advice`; see {@link adviceTimeoutMs}. */
+  adviceTimeoutMs?: number;
 }
 
 export function createBackendProxyHandler(deps: BackendProxyDeps) {
@@ -200,7 +236,7 @@ export function createBackendProxyHandler(deps: BackendProxyDeps) {
         body,
         redirect: "manual",
         cache: "no-store",
-        signal: AbortSignal.timeout(deps.timeoutMs ?? UPSTREAM_TIMEOUT_MS),
+        signal: AbortSignal.timeout(upstreamTimeoutMs(validated.path, deps)),
       });
     } catch {
       return errorResponse(

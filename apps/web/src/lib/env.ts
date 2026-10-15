@@ -34,3 +34,13 @@ export function getAppOrigin(): string {
 export function getApiInternalUrl(): string {
   return required("API_INTERNAL_URL", process.env.API_INTERNAL_URL).replace(/\/+$/, "");
 }
+
+/**
+ * Server-only: the API's AI provider timeout (AI_TIMEOUT_SECONDS, the same setting
+ * the API reads), so the proxy waits long enough for AI advice. Defaults to the
+ * API's default; out-of-range values fall back to it as the API would reject them.
+ */
+export function getAiTimeoutSeconds(): number {
+  const value = Number(process.env.AI_TIMEOUT_SECONDS);
+  return Number.isFinite(value) && value > 0 && value <= 300 ? value : 60;
+}

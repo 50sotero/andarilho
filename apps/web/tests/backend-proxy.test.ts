@@ -1,8 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  adviceTimeoutMs,
   clientAddress,
   createBackendProxyHandler,
   isAllowedOrigin,
+  UPSTREAM_TIMEOUT_MS,
+  upstreamTimeoutMs,
   validateProxyPath,
   type BackendProxyDeps,
 } from "@/lib/api/backend-proxy";
@@ -47,6 +50,23 @@ describe("validateProxyPath", () => {
       path: "v1/public/scenes/delivery",
       isPublic: true,
     });
+  });
+
+  it("allows removing an attached tour", () => {
+    expect(validateProxyPath(["v1", "imports", "abc"])).toEqual({
+      path: "v1/imports/abc",
+      isPublic: false,
+    });
+  });
+
+  it("waits longer for AI advice than for other routes", () => {
+    expect(upstreamTimeoutMs("v1/projects/abc", {})).toBe(UPSTREAM_TIMEOUT_MS);
+    // Slot wait plus two provider attempts at the API's default 60 s, with margin.
+    expect(upstreamTimeoutMs("v1/runs/abc/advice", {})).toBe(195_000);
+    expect(upstreamTimeoutMs("v1/runs/abc/advice", { adviceTimeoutMs: adviceTimeoutMs(300) })).toBe(
+      915_000,
+    );
+    expect(upstreamTimeoutMs("v1/runs/abc/retry", {})).toBe(UPSTREAM_TIMEOUT_MS);
   });
 
   it("rejects non-/v1 and unknown paths", () => {
