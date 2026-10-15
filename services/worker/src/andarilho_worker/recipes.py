@@ -24,22 +24,21 @@ RUN_STAGES = (
     "validating",
     "preparing",
     "camera_reconstruction",
-    "training",
     "normalizing",
     "geometry_proposal",
+    "texturing",
     "packaging",
     "scene_validation",
 )
-GPU_STAGES = frozenset({"camera_reconstruction", "training"})
-LAYOUT_STAGES = ("geometry_proposal", "packaging", "scene_validation")
+# Only COLMAP needs a GPU; texturing and everything after it run on the CPU.
+GPU_STAGES = frozenset({"camera_reconstruction"})
+# A layout save re-runs these stages on the revision's own layout, reusing the run's frames
+# and poses (see stages/texture.py).
+LAYOUT_STAGES = ("geometry_proposal", "texturing", "packaging", "scene_validation")
 
 TOOL_VERSIONS = {
     # Must match infra/Dockerfile.worker-gpu; verify each tool's --help in that image.
     "colmap": "3.12.5",
-    "nerfstudio": "1.1.5",
-    "gsplat": "1.4.0",  # the exact version nerfstudio 1.1.5 requires
-    "torch": "2.7.1+cu128",
-    "splat-transform": "1.4.0",
     "ffmpeg": "debian-bookworm",
 }
 
@@ -127,25 +126,6 @@ ARGV: dict[str, tuple[str, ...]] = {
         "colmap", "image_undistorter", "--image_path", "{images}", "--input_path", "{model}",
         "--output_path", "{output}", "--output_type", "COLMAP", "--max_image_size", "{long_edge}",
     ),
-    "ns_train": (
-        "ns-train", "splatfacto", "--data", "{data}", "--output-dir", "{output_dir}",
-        "--experiment-name", "andarilho", "--timestamp", "{timestamp}",
-        "--max-num-iterations", "{iterations}", "--steps-per-save", "{save_steps}",
-        "--machine.seed", "{seed}", "--vis", "tensorboard",
-        "--viewer.quit-on-train-completion", "True",
-        "colmap", "--colmap-path", "sparse/0", "--images-path", "images",
-        "--downscale-factor", "1",
-    ),
-    "ns_export": (
-        "ns-export", "gaussian-splat", "--load-config", "{config}", "--output-dir", "{output_dir}",
-    ),
-    # CPU SOG compression: deterministic, and it needs no Vulkan driver, which neither
-    # worker container has (WebGPU device creation fails without one). Spherical
-    # harmonic bands above {sh_degree} are dropped first (see renderShDegree).
-    "splat_transform": (
-        "splat-transform", "--quiet", "--gpu", "cpu",
-        "{input}", "--filter-harmonics", "{sh_degree}", "{output}",
-    ),
 }  # fmt: skip
 
 _PLACEHOLDER = re.compile(r"\{([a-z_]+)\}")
@@ -229,9 +209,9 @@ TIMEOUTS = {
     "validating": 300,
     "preparing": 1800,
     "camera_reconstruction": 3 * 3600,
-    "training": 3 * 3600,
     "normalizing": 1800,
     "geometry_proposal": 600,
+    "texturing": 1800,
     "packaging": 600,
     "scene_validation": 600,
 }
@@ -256,12 +236,10 @@ COMMON = {
     "keyframeOversample": 3,
     "sequentialOverlap": 20,
     "seed": 42,
-    # Highest spherical-harmonic band kept in the SOG render asset. Splatfacto trains
-    # degree 3; on the CPU, SOG's k-means over those bands is what is slow. Measured
-    # on the first real preview scene (163k splats, PLY 40.5 MB): degree 0 took 3 s
-    # (2.2 MB), degree 1 took 58 s (3.1 MB), and degree 2 and 3 did not finish in
-    # 600 s. The archived PLY keeps every band.
-    "renderShDegree": 1,
+    # The textured model (texturing stage): the target texel size in metres, coarsened
+    # automatically when the atlas would need more than maxPages pages of pageSize texels,
+    # and the JPEG quality of the atlas pages. Like every parameter, it is in the digest.
+    "texture": {"texelSize": 0.01, "pageSize": 2048, "maxPages": 8, "jpegQuality": 85},
 }
 
 # Capture intake rules shared with the API, which publishes them to the web app
@@ -274,22 +252,22 @@ INTAKE = {
 
 RECIPES: dict[str, Recipe] = {
     "preview": Recipe(
-        "preview-v1",
+        "preview-v2",
         "preview",
         _specs(RUN_STAGES),
-        {**COMMON, "iterations": 7000, "saveSteps": 2000},
+        {**COMMON},
     ),
     "standard": Recipe(
-        "standard-v1",
+        "standard-v2",
         "standard",
         _specs(RUN_STAGES),
-        {**COMMON, "iterations": 30000, "saveSteps": 5000},
+        {**COMMON},
     ),
     "synthetic": Recipe(
-        "synthetic-v1",
+        "synthetic-v2",
         "synthetic",
         _specs([s for s in RUN_STAGES if s not in GPU_STAGES]),
-        {"fixture": "synthetic-two-room"},
+        {"fixture": "synthetic-two-room", "texture": COMMON["texture"]},
     ),
 }
 

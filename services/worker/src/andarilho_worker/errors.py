@@ -72,6 +72,11 @@ CATALOG: dict[str, tuple[str, str]] = {
         "A required intermediate result is missing.",
         "Retry the run.",
     ),
+    "SCENE_OUTDATED": (
+        "This scene was made by an older version of Andarilho. "
+        "Process the capture again to rebuild it.",
+        "Process the capture again.",
+    ),
     "WORKER_LOST": (
         "Processing stopped unexpectedly too many times.",
         "Retry the run.",

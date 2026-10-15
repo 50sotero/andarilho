@@ -18,6 +18,7 @@ from pdf_fixtures import classic_pdf, encrypted_pdf, object_stream_pdf, page_tre
 from psycopg.types.json import Jsonb
 
 from andarilho_worker import queue
+from andarilho_worker.geometry.glb import inspect_textured_glb
 from andarilho_worker.runner import ProcessFailed, RunResult
 from andarilho_worker.stages import STAGES
 from andarilho_worker.stages import inspect_upload as inspect_mod
@@ -39,6 +40,7 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
         ("preparing", "succeeded"),
         ("normalizing", "succeeded"),
         ("geometry_proposal", "succeeded"),
+        ("texturing", "succeeded"),
         ("packaging", "succeeded"),
         ("scene_validation", "succeeded"),
     ]
@@ -49,6 +51,8 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
     rev = seed.one("SELECT * FROM scene_revisions")
     assert rev["validation_state"] == "valid" and rev["revision"] == 1
     manifest = rev["manifest"]
+    assert manifest["schemaVersion"] == "2.0" and manifest["renderMode"] == "mesh"
+    assert "worldFromDecodedRender" not in manifest
     assert manifest["sceneRevisionId"] == str(rev["id"])
     assert manifest["sceneId"] == str(rev["scene_id"]) and manifest["runId"] == run_id
     assert manifest["navigation"]["mode"] == "approved_collision"
@@ -56,10 +60,14 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
     assert rev["manifest_sha256"] == manifest_sha256(manifest)
     prefix = f"tenants/{pid}/scenes/{rev['id']}/"
     assert set(store.list_keys(prefix)) == {
-        prefix + "scene.ply",
+        prefix + "model.glb",
         prefix + "collision.glb",
         prefix + "manifest.json",
     }
+    render = manifest["assets"]["render"]
+    assert render["key"] == prefix + "model.glb" and render["format"] == "glb"
+    model = inspect_textured_glb(store.get_bytes(render["key"]))
+    assert model["unlit"] and model["triangles"] > 0
     stored = json.loads(store.get_bytes(prefix + "manifest.json"))
     assert stored == manifest
     project = seed.one("SELECT active_draft_revision_id FROM projects WHERE id = %s", pid)
@@ -70,9 +78,11 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
     assert rev["manifest_artifact_id"] is not None
     # Every stage carried earlier outputs forward and wrote an immutable attempt manifest.
     last = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'scene_validation'")
-    assert {"captureSetId", "renderKey", "collisionKey", "manifestKey"} <= set(
+    assert {"captureSetId", "modelKey", "collisionKey", "manifestKey"} <= set(
         last["input_manifest"]["outputs"]
     )
+    texturing = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'texturing'")
+    assert texturing["result_manifest"]["outputs"]["textureCoverage"]["all"] == 1.0
     assert any(
         "/attempts/packaging/" in k and k.endswith("/1/result.json")
         for k in store.list_keys(f"tenants/{pid}/runs/")
@@ -97,15 +107,17 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
         run_id=run_id, scene_revision_id=rev2,
     )  # fmt: skip
     done = drain(db, sup)
-    assert [d[1] for d in done] == ["succeeded"] * 3
+    assert [d[1] for d in done] == ["succeeded"] * 4
     second = seed.one("SELECT * FROM scene_revisions WHERE id = %s", rev2)
     assert second["validation_state"] == "valid"
     m2 = second["manifest"]
     assert m2["navigation"]["mode"] == "approved_collision"
     assert m2["provenance"]["geometrySource"] == "user_confirmed_trace"
     assert m2["spawn"]["feet"] == [-3, 0, 2]
+    # A layout save re-textures: its own model, here identical to the first (same surfaces).
+    assert m2["assets"]["render"]["key"] == f"tenants/{pid}/scenes/{rev2}/model.glb"
     assert m2["assets"]["render"]["sha256"] == manifest["assets"]["render"]["sha256"]
-    assert m2["assets"]["render"]["key"].startswith(f"tenants/{pid}/scenes/{rev2}/")
+    assert store.get_bytes(m2["assets"]["render"]["key"])[:4] == b"glTF"
     assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "succeeded"
     assert seed.one("SELECT current_draft_revision_id AS c FROM scenes")["c"] == second["id"]
 
@@ -122,8 +134,8 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
     seed.job(pid, "geometry_proposal", {"sceneRevisionId": rev3, "layoutSource": "user"},
              run_id=run_id, scene_revision_id=rev3)  # fmt: skip
     done = drain(db, sup)
-    assert done == [("geometry_proposal", "succeeded"), ("packaging", "succeeded"),
-                    ("scene_validation", "failed")]  # fmt: skip
+    assert done == [("geometry_proposal", "succeeded"), ("texturing", "succeeded"),
+                    ("packaging", "succeeded"), ("scene_validation", "failed")]  # fmt: skip
     third = seed.one(
         "SELECT validation_state, validation_findings FROM scene_revisions WHERE id = %s", rev3
     )
@@ -142,7 +154,9 @@ def test_packaging_publishes_the_poster_and_carries_it_to_layout_revisions(
         result = STAGES["preparing"](ctx)
         key = ctx.attempt_key("poster.webp")
         ctx.store.put_bytes(key, WEBP, "image/webp")
-        return replace(result, outputs={**result.outputs, "posterKey": key})
+        # The job's result manifest is what later stages read back: the poster must be in it.
+        outputs = {**result.outputs, "posterKey": key}
+        return replace(result, manifest={**result.manifest, "outputs": outputs}, outputs=outputs)
 
     sup = Supervisor(db, store, settings, delay_fn=lambda attempt: 0.0,
                      stages={**STAGES, "preparing": preparing})  # fmt: skip
@@ -161,12 +175,98 @@ def test_packaging_publishes_the_poster_and_carries_it_to_layout_revisions(
     ]  # fmt: skip
 
     rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], copy.deepcopy(rev["layout"]))
-    assert [status for _, status in drain(db, sup)] == ["succeeded"] * 3
+    assert [status for _, status in drain(db, sup)] == ["succeeded"] * 4
     second = seed.one("SELECT validation_state, manifest FROM scene_revisions WHERE id = %s", rev2)
     assert second["validation_state"] == "valid"
     carried = second["manifest"]["assets"]["poster"]
     assert carried["key"] == f"tenants/{pid}/scenes/{rev2}/poster.webp"
     assert carried["sha256"] == poster["sha256"]
+
+
+def test_packaging_carries_the_capture_quality_poster_and_unseen_area_warning(db, seed, store, sup):
+    """A captured revision's packaging reads the run's outputs, as a layout save does."""
+    from andarilho_worker.geometry.glb import write_textured_glb
+    from andarilho_worker.geometry.layout import collision_glb, rectangle_layout
+    from andarilho_worker.geometry.texture import TextureParams, procedural_texture_layout
+
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="preview")
+    seed.exec("UPDATE jobs SET state = 'succeeded' WHERE state = 'queued'")
+    layout = rectangle_layout((-1.5, -1.25), (1.5, 1.25), elevation=0.0, height=2.6)
+    scene_id, rid = str(uuid.uuid4()), str(uuid.uuid4())
+    seed.exec("INSERT INTO scenes (id, project_id, run_id, version) VALUES (%s, %s, %s, 1)",
+              scene_id, pid, run_id)  # fmt: skip
+    seed.exec(
+        "INSERT INTO scene_revisions (id, scene_id, project_id, run_id, revision, layout_revision, "
+        "layout, validation_state, approval_state, created_by) "
+        "VALUES (%s, %s, %s, %s, 1, 1, %s, 'pending', 'draft', 'user-1')",
+        rid, scene_id, pid, run_id, Jsonb(layout),
+    )  # fmt: skip
+    model_key = f"tenants/{pid}/runs/{run_id}/attempts/texturing/x/1/model.glb"
+    store.put_bytes(model_key, write_textured_glb(procedural_texture_layout(
+        layout, TextureParams(texel_size=0.05, page_size=256))))  # fmt: skip
+    collision_key = f"tenants/{pid}/runs/{run_id}/attempts/geometry_proposal/x/1/collision.glb"
+    store.put_bytes(collision_key, collision_glb(layout))
+    poster_key = f"tenants/{pid}/runs/{run_id}/attempts/preparing/x/1/poster.webp"
+    store.put_bytes(poster_key, WEBP)
+    seed.job(
+        pid, "packaging",
+        {"outputs": {
+            "sceneRevisionId": rid, "layoutSource": "user", "modelKey": model_key,
+            "collisionKey": collision_key, "posterKey": poster_key, "scaleStatus": "estimated",
+            "frameWarnings": ["Only a short walk was recorded."],
+            "textureCoverage": {"all": 0.5, "wall": 0.4, "floor": 0.9, "ceiling": 0.9},
+            "coverage": {"registeredViews": 24, "selectedViews": 24, "disconnectedComponents": 0,
+                         "warnings": ["An earlier warning."], "registeredRatio": 1.0},
+        }},
+        run_id=run_id, scene_revision_id=rid,
+    )  # fmt: skip
+    assert sup.execute(queue.claim(db, "worker-test", "cpu")) == "succeeded"
+    outputs = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'packaging'")[
+        "result_manifest"
+    ]["outputs"]
+    manifest = json.loads(store.get_bytes(outputs["manifestKey"]))
+    assert manifest["scaleStatus"] == "estimated"
+    assert manifest["quality"]["registeredViews"] == 24
+    assert manifest["quality"]["warnings"] == [
+        "An earlier warning.",
+        "Only a short walk was recorded.",
+        "About 50% of the walls, floor and ceiling were not seen in the video and are shown "
+        "in plain grey.",
+    ]
+    assert manifest["assets"]["render"]["key"] == f"tenants/{pid}/scenes/{rid}/model.glb"
+    assert manifest["assets"]["poster"]["key"] == f"tenants/{pid}/scenes/{rid}/poster.webp"
+    assert manifest["provenance"]["geometrySource"] == "user_confirmed_trace"
+    assert manifest["navigation"]["mode"] == "approved_collision"
+    assert store.get_bytes(manifest["assets"]["render"]["key"]) == store.get_bytes(model_key)
+
+
+@pytest.mark.parametrize(
+    "seen,expected",
+    [
+        (1.0, None),
+        (0.99, None),  # the threshold itself is not a warning
+        (
+            0.9899,
+            "About 1% of the walls, floor and ceiling were not seen in the video "
+            "and are shown in plain grey.",
+        ),
+        (
+            0.5,
+            "About 50% of the walls, floor and ceiling were not seen in the video "
+            "and are shown in plain grey.",
+        ),
+        (
+            0.0,
+            "About 100% of the walls, floor and ceiling were not seen in the video "
+            "and are shown in plain grey.",
+        ),
+    ],
+)
+def test_unseen_area_warning_starts_below_ninety_nine_percent(seen, expected):
+    from andarilho_worker.stages.package_scene import unseen_warning
+
+    assert unseen_warning({"all": seen, "wall": seen}) == expected
 
 
 def _scaled_layout(layout, k):
@@ -202,24 +302,28 @@ def _save_layout(seed, rev, pid, run_id, number, base_id, layout):
     return rid
 
 
-def test_calibration_scales_render_transform_without_compounding(db, seed, sup):
+def test_calibrated_layout_save_retextures_and_does_not_compound(db, seed, store, sup):
     pid = seed.project()
     run_id, _ = seed.run(pid, quality="synthetic")
     drain(db, sup)
     rev = seed.one("SELECT * FROM scene_revisions")
-    assert rev["manifest"]["worldFromDecodedRender"][0] == 1
+    original = rev["manifest"]["assets"]["render"]["sha256"]
     calibrated = _scaled_layout(rev["layout"], 2.0)
     rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], calibrated)
-    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 4
     m2 = seed.one("SELECT manifest FROM scene_revisions WHERE id = %s", rev2)["manifest"]
-    matrix = m2["worldFromDecodedRender"]
-    assert [matrix[0], matrix[5], matrix[10], matrix[15]] == [2, 2, 2, 1]
     assert m2["scaleStatus"] == "user_measured"
-    # Re-saving the same calibrated layout must not scale the splats again.
+    # Doubled walls and floor need a different atlas: the revision gets its own model.
+    assert m2["assets"]["render"]["key"] == f"tenants/{pid}/scenes/{rev2}/model.glb"
+    assert m2["assets"]["render"]["sha256"] != original
+    assert m2["bounds"]["max"][0] > rev["manifest"]["bounds"]["max"][0]
+    # Re-saving the same calibrated layout re-textures to the same model: the layout is
+    # the absolute, already-scaled geometry, so nothing is scaled twice.
     rev3 = _save_layout(seed, rev, pid, run_id, 3, rev2, calibrated)
-    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 4
     m3 = seed.one("SELECT manifest FROM scene_revisions WHERE id = %s", rev3)["manifest"]
-    assert m3["worldFromDecodedRender"] == matrix
+    assert m3["assets"]["render"]["sha256"] == m2["assets"]["render"]["sha256"]
+    assert m3["bounds"] == m2["bounds"]
 
 
 def test_older_scene_revision_never_takes_the_active_draft_back(db, seed, sup):
@@ -246,7 +350,7 @@ def test_older_scene_revision_never_takes_the_active_draft_back(db, seed, sup):
          "layoutRevision": 2, "layoutSource": "user"},
         run_id=old_run, scene_revision_id=rev2,
     )  # fmt: skip
-    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 4
     assert (
         seed.one("SELECT validation_state AS v FROM scene_revisions WHERE id = %s", rev2)["v"]
         == "valid"
@@ -805,7 +909,7 @@ def test_layout_revisions_are_not_limited_by_spent_run_budget(db, seed, sup):
     seed.exec("UPDATE usage_ledger SET actual_cpu_seconds = 999999")
     before = seed.one("SELECT actual_cpu_seconds, state FROM usage_ledger")
     rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], copy.deepcopy(rev["layout"]))
-    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 4
     assert (
         seed.one("SELECT validation_state FROM scene_revisions WHERE id = %s", rev2)[
             "validation_state"
@@ -833,7 +937,7 @@ def test_layout_revision_of_a_scene_built_by_an_older_recipe(db, seed, sup):
     # A deployment changed the recipe after this scene was reconstructed.
     seed.exec("UPDATE reconstruction_runs SET recipe_digest = 'sha256:older' WHERE id = %s", run_id)
     rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], rev["layout"])
-    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 4
     second = seed.one("SELECT validation_state, manifest FROM scene_revisions WHERE id = %s", rev2)
     assert second["validation_state"] == "valid"
     # The scene keeps the reconstruction's recipe as provenance.
@@ -868,7 +972,7 @@ def test_concurrent_layout_revisions_do_not_share_intermediates(db, seed, sup):
     # Both revisions are queued before either runs, so both jobs start at fence 1.
     rev2 = _save_layout(seed, rev, pid, run_id, 2, rev["id"], thin)
     rev3 = _save_layout(seed, rev, pid, run_id, 3, rev["id"], thick)
-    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 6
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 8
     m2, m3 = (
         seed.one("SELECT manifest FROM scene_revisions WHERE id = %s", r)["manifest"]
         for r in (rev2, rev3)

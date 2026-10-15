@@ -6,6 +6,7 @@ import json
 import struct
 import tarfile
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -35,7 +36,17 @@ from andarilho_worker.geometry.colmap import (
     write_points3d_bin,
 )
 from andarilho_worker.geometry.frame import frame_from_sparse, reliable_points
-from andarilho_worker.recipes import ARGV, RECIPES, recipe_for, render_argv
+from andarilho_worker.recipes import (
+    ARGV,
+    GPU_STAGES,
+    LAYOUT_STAGES,
+    RECIPES,
+    RUN_STAGES,
+    TIMEOUTS,
+    TOOL_VERSIONS,
+    recipe_for,
+    render_argv,
+)
 from andarilho_worker.runner import ProcessFailed, RunResult
 from andarilho_worker.settings import Settings
 from andarilho_worker.stages import normalize
@@ -47,17 +58,28 @@ from andarilho_worker.supervisor import Supervisor
 def test_recipes_stage_order_and_capabilities():
     synthetic = recipe_for("synthetic")
     assert synthetic.stage_names() == [
-        "validating", "preparing", "normalizing", "geometry_proposal", "packaging",
+        "validating", "preparing", "normalizing", "geometry_proposal", "texturing", "packaging",
         "scene_validation",
     ]  # fmt: skip
     assert {s.capability for s in synthetic.stages} == {"cpu"}
     preview = recipe_for("preview")
+    assert preview.stage_names() == list(RUN_STAGES)
     caps = {s.stage: s.capability for s in preview.stages}
-    assert caps["camera_reconstruction"] == caps["training"] == "gpu"
-    assert caps["preparing"] == "cpu"
-    assert preview.next_stage("training").stage == "normalizing"
+    assert caps["camera_reconstruction"] == "gpu"
+    assert all(caps[s] == "cpu" for s in RUN_STAGES if s != "camera_reconstruction")
+    assert "training" not in caps and "training" not in TIMEOUTS
+    assert TIMEOUTS["texturing"] == 1800
+    assert preview.next_stage("camera_reconstruction").stage == "normalizing"
+    assert preview.next_stage("normalizing").stage == "geometry_proposal"
+    assert preview.next_stage("geometry_proposal").stage == "texturing"
+    assert preview.next_stage("texturing").stage == "packaging"
     assert preview.next_stage("scene_validation") is None
-    assert preview.next_stage("geometry_proposal", layout_pipeline=True).stage == "packaging"
+    # A layout save runs the layout stages only, texturing included.
+    assert preview.next_stage("geometry_proposal", layout_pipeline=True).stage == "texturing"
+    assert preview.next_stage("texturing", layout_pipeline=True).stage == "packaging"
+    assert preview.next_stage("packaging", layout_pipeline=True).stage == "scene_validation"
+    assert LAYOUT_STAGES == ("geometry_proposal", "texturing", "packaging", "scene_validation")
+    assert frozenset({"camera_reconstruction"}) == GPU_STAGES
     digests = {r.digest for r in RECIPES.values()}
     assert len(digests) == 3 and all(d.startswith("sha256:") for d in digests)
     assert recipe_for("preview").digest == recipe_for("preview").digest
@@ -65,16 +87,35 @@ def test_recipes_stage_order_and_capabilities():
         recipe_for("ultra")
 
 
+def test_recipe_names_and_parameters_after_the_textured_model():
+    assert {r.name for r in RECIPES.values()} == {
+        "preview-v2", "standard-v2", "synthetic-v2"
+    }  # fmt: skip
+    texture = {"texelSize": 0.01, "pageSize": 2048, "maxPages": 8, "jpegQuality": 85}
+    for quality in ("preview", "standard"):
+        params = recipe_for(quality).params
+        assert params["texture"] == texture
+        assert not {"iterations", "saveSteps", "renderShDegree"} & set(params)
+    synthetic = recipe_for("synthetic").params
+    assert synthetic == {"fixture": "synthetic-two-room", "texture": texture}
+
+
+def test_digest_changes_with_the_texture_parameters():
+    preview = recipe_for("preview")
+    texture = {**preview.params["texture"], "texelSize": 0.02}
+    coarser = replace(preview, params={**preview.params, "texture": texture})
+    assert coarser.digest != preview.digest
+
+
 def test_argv_templates_are_pinned():
     argv = render_argv("ffprobe", input=Path("/scratch/x.mp4"))
     assert argv[0] == "ffprobe" and argv[-1].endswith("x.mp4")
     with pytest.raises(KeyError):
         render_argv("ffprobe", input="a", extra="--evil")
-    with pytest.raises(KeyError):
-        render_argv("ns_train", data="d")
-    train = render_argv("ns_train", data="d", output_dir="o", timestamp="t", iterations=10,
-                        save_steps=5, seed=1)  # fmt: skip
-    assert "--max-num-iterations" in train and "--viewer.quit-on-train-completion" in train
+    # The splat trainer and compressor are gone: their templates and tool pins with them.
+    assert not {"ns_train", "ns_export", "splat_transform"} & set(ARGV)
+    assert not {"nerfstudio", "gsplat", "torch", "splat-transform"} & set(TOOL_VERSIONS)
+    assert set(TOOL_VERSIONS) == {"colmap", "ffmpeg"}
     assert all(isinstance(t, tuple) for t in ARGV.values())
 
 

@@ -1,8 +1,9 @@
 """``scene_validation``: validate the packaged revision and commit it as the draft.
 
-Checks: JSON Schema, finite numbers, similarity matrix, asset prefixes, spawn
-floor/bounds, asset bytes/sha256, render header, collision GLB (identity nodes,
-finite vertices within bounds), spawn capsule clearance (radius 0.25 m, height
+Checks: JSON Schema, finite numbers, asset prefixes, spawn floor/bounds, asset
+bytes/sha256, the textured render model (a GLB with unlit materials, within the
+triangle and texture budgets and inside the scene bounds), collision GLB (identity
+nodes, finite vertices within bounds), spawn capsule clearance (radius 0.25 m, height
 1.7 m) and floor support against the approved layout.
 
 On success the fenced completion transaction marks the revision ``valid`` with
@@ -62,7 +63,7 @@ def run(ctx: StageContext) -> StageResult:
     assets = ctx.scratch / "assets"
 
     def fetch(key: str) -> Path:
-        # Streamed to scratch and hashed from disk: render assets can be GiBs.
+        # Streamed to scratch and hashed from disk, so no asset is held in memory whole.
         info = ctx.store.head(key)
         if info is not None and info.size > MAX_RENDER_BYTES:
             raise StageError("BUDGET_EXHAUSTED", "The scene is too large to validate.")
