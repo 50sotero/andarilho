@@ -30,6 +30,8 @@ log = logging.getLogger(__name__)
 # Storage cleanup waits this long so that a worker which lost its lease (but may still
 # be finishing a write) has stopped before its objects are removed.
 ARTIFACT_CLEANUP_DELAY_SECONDS = 300
+# An expired upload's row is deleted this long after its expiry (see expire_uploads).
+EXPIRED_UPLOAD_RETENTION_SECONDS = 24 * 3600
 # A cleanup that used up its attempts on temporary failures (a storage outage, lost
 # workers) is queued again, waiting twice as long each time up to a day, so an outage
 # longer than the retry window cannot leave its objects until the project is deleted.
@@ -1166,10 +1168,42 @@ def sweep_cancelled(db: Database) -> int:
         return len(rows)
 
 
+def expire_uploads(db: Database) -> tuple[int, int]:
+    """Mark initiated uploads past their expiry ``expired``, and delete them a day later.
+
+    Expiry already stopped them holding quota, and the API refuses their parts. Marking
+    them makes that explicit (the API answers UPLOAD_EXPIRED and stops listing them), and
+    deleting them keeps abandoned uploads from piling up for good. The day covers the
+    API's idempotency record of the creation (at least a day): until then a replay finds
+    the row. No job ever refers to an initiated upload, but one that does is kept. Their
+    multipart data is left to the bucket's abort-incomplete-multipart lifecycle rule, as
+    when the API's own abort fails. Returns ``(expired, deleted)``.
+    """
+    with db.transaction() as conn:
+        expired = conn.execute(
+            "UPDATE uploads SET status = 'expired', updated_at = now() "
+            "WHERE status = 'initiated' AND expires_at <= now()"
+        ).rowcount
+        deleted = conn.execute(
+            """
+            DELETE FROM uploads AS u
+            WHERE u.status = 'expired'
+              AND u.expires_at <= now() - make_interval(secs => %s)
+              AND NOT EXISTS (SELECT 1 FROM jobs j
+                              WHERE j.project_id = u.project_id AND j.upload_id = u.id)
+            """,
+            (float(EXPIRED_UPLOAD_RETENTION_SECONDS),),
+        ).rowcount
+    return expired, deleted
+
+
 def maintenance(db: Database) -> dict[str, int]:
     reaped = reap_expired(db)
+    expired, deleted = expire_uploads(db)
     return {
         "reaped": len(reaped),
         "cancelled": sweep_cancelled(db),
         "promoted": promote_retry_wait(db),
+        "uploadsExpired": expired,
+        "uploadsDeleted": deleted,
     }

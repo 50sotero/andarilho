@@ -159,6 +159,36 @@ def test_the_reaper_waits_for_the_run_before_it_locks_the_job(db, seed):
     assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "cancelled"
 
 
+def initiated_upload(seed, project_id: str, expires_in: str) -> str:
+    upload_id = str(uuid.uuid4())
+    seed.exec(
+        "INSERT INTO uploads (id, project_id, created_by, media_kind, display_filename, "
+        "declared_content_type, expected_bytes, staging_key, part_size, part_count, status, "
+        "expires_at) VALUES (%s, %s, 'user-1', 'video', 'walk.mp4', 'video/mp4', 10, %s, "
+        "16777216, 1, 'initiated', now() + %s::interval)",
+        upload_id, project_id, f"tenants/{project_id}/staging/{upload_id}", expires_in,
+    )  # fmt: skip
+    return upload_id
+
+
+def test_maintenance_expires_abandoned_uploads_and_deletes_them_a_day_later(db, seed):
+    pid = seed.project()
+    live = initiated_upload(seed, pid, "1 hour")
+    lapsed = initiated_upload(seed, pid, "-1 minute")
+    old = initiated_upload(seed, pid, "-2 days")
+    referenced = initiated_upload(seed, pid, "-2 days")
+    seed.job(pid, "upload_cleanup", {"uploadId": referenced, "projectId": pid},
+             upload_id=referenced)  # fmt: skip
+
+    stats = queue.maintenance(db)
+    assert (stats["uploadsExpired"], stats["uploadsDeleted"]) == (3, 1)
+    statuses = {str(r["id"]): r["status"] for r in seed.all("SELECT id, status FROM uploads")}
+    assert statuses == {live: "initiated", lapsed: "expired", referenced: "expired"}
+    assert old not in statuses
+    # Nothing is left to do on the next pass until the lapsed one is a day old.
+    assert queue.expire_uploads(db) == (0, 0)
+
+
 def test_reaper_fails_when_attempts_exhausted(db, seed):
     pid = seed.project()
     run_id, _ = seed.run(pid, max_attempts=1)

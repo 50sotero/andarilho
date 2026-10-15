@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request, Response
-from sqlalchemy import and_, select, tuple_
+from sqlalchemy import and_, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from andarilho_api import serializers as ser
@@ -111,8 +111,16 @@ def list_projects(
 
 def _project_detail(db: Session, project: Project, role: str) -> dict[str, Any]:
     pid = project.id
+    # An upload past its expiry can never be resumed (the worker marks it expired and
+    # later deletes it), so listing it would only make every response longer.
     uploads = db.execute(
-        select(Upload).where(Upload.project_id == pid).order_by(Upload.created_at, Upload.id)
+        select(Upload)
+        .where(
+            Upload.project_id == pid,
+            Upload.status != "expired",
+            or_(Upload.status != "initiated", Upload.expires_at > utcnow()),
+        )
+        .order_by(Upload.created_at, Upload.id)
     ).scalars()
     capture_sets = db.execute(
         select(CaptureSet)

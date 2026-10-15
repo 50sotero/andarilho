@@ -168,6 +168,8 @@ def get_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store):
 
 
 def _require_open(upload: Upload) -> None:
+    if upload.status == "expired":  # marked by the worker once it passed its expiry
+        raise _expired()
     if upload.status != "initiated" or not upload.multipart_upload_id:
         raise invalid_state("This upload is no longer accepting parts.")
     if upload.expires_at <= utcnow():

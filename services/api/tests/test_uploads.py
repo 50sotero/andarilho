@@ -410,6 +410,26 @@ def test_expired_upload_rejects_parts_and_frees_quota(client, auth, db, settings
     assert _init(client, auth, pid, size=10).status_code == 201
 
 
+def test_expired_uploads_are_refused_as_expired_and_no_longer_listed(client, auth, db):
+    from datetime import UTC, datetime, timedelta
+
+    pid = create_project(client, auth)["id"]
+    lapsed, marked, live = (_init(client, auth, pid, size=10).json()["upload"]["id"]
+                            for _ in range(3))  # fmt: skip
+    db.get(Upload, uuid.UUID(lapsed)).expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    # The worker's maintenance marks an upload past its expiry this way.
+    db.get(Upload, uuid.UUID(marked)).status = "expired"
+    db.commit()
+    for upload_id in (lapsed, marked):
+        for path, body in (("parts", {"partNumbers": [1]}), ("complete", {})):
+            response = client.post(f"/v1/uploads/{upload_id}/{path}", json=body, headers=auth())
+            assert response.status_code == 409
+            assert response.json()["error"]["code"] == "UPLOAD_EXPIRED"
+    # Neither can be resumed, so the project no longer lists them.
+    detail = client.get(f"/v1/projects/{pid}", headers=auth()).json()
+    assert [u["id"] for u in detail["uploads"]] == [live]
+
+
 def _run(client, auth, pid, capture_set_id, key):
     return client.post(
         f"/v1/projects/{pid}/runs",
