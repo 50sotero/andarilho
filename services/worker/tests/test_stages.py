@@ -58,8 +58,8 @@ from andarilho_worker.supervisor import Supervisor
 def test_recipes_stage_order_and_capabilities():
     synthetic = recipe_for("synthetic")
     assert synthetic.stage_names() == [
-        "validating", "preparing", "normalizing", "geometry_proposal", "texturing", "packaging",
-        "scene_validation",
+        "validating", "preparing", "normalizing", "scene_analysis", "geometry_proposal",
+        "texturing", "packaging", "scene_validation",
     ]  # fmt: skip
     assert {s.capability for s in synthetic.stages} == {"cpu"}
     preview = recipe_for("preview")
@@ -68,9 +68,10 @@ def test_recipes_stage_order_and_capabilities():
     assert caps["camera_reconstruction"] == "gpu"
     assert all(caps[s] == "cpu" for s in RUN_STAGES if s != "camera_reconstruction")
     assert "training" not in caps and "training" not in TIMEOUTS
-    assert TIMEOUTS["texturing"] == 1800
+    assert TIMEOUTS["texturing"] == 1800 and TIMEOUTS["scene_analysis"] == 600
     assert preview.next_stage("camera_reconstruction").stage == "normalizing"
-    assert preview.next_stage("normalizing").stage == "geometry_proposal"
+    assert preview.next_stage("normalizing").stage == "scene_analysis"
+    assert preview.next_stage("scene_analysis").stage == "geometry_proposal"
     assert preview.next_stage("geometry_proposal").stage == "texturing"
     assert preview.next_stage("texturing").stage == "packaging"
     assert preview.next_stage("scene_validation") is None
@@ -89,12 +90,13 @@ def test_recipes_stage_order_and_capabilities():
 
 def test_recipe_names_and_parameters_after_the_textured_model():
     assert {r.name for r in RECIPES.values()} == {
-        "preview-v2", "standard-v2", "synthetic-v2"
+        "preview-v3", "standard-v3", "synthetic-v3"
     }  # fmt: skip
     texture = {"texelSize": 0.01, "pageSize": 2048, "maxPages": 8, "jpegQuality": 85}
     for quality in ("preview", "standard"):
         params = recipe_for(quality).params
         assert params["texture"] == texture
+        assert params["analysis"]["keyframes"] == 12 and params["analysis"]["imageLongEdge"] == 1024
         assert not {"iterations", "saveSteps", "renderShDegree"} & set(params)
     synthetic = recipe_for("synthetic").params
     assert synthetic == {"fixture": "synthetic-two-room", "texture": texture}
@@ -784,7 +786,8 @@ def test_normalizing_hands_the_frame_and_the_evidence_to_the_proposal(
     )  # fmt: skip
     sup = Supervisor(db, store, settings, stages=STAGES)
     assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
-    row = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
+    # scene_analysis comes next and passes every earlier output on to the proposal.
+    row = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'scene_analysis'")
     outputs = row["input_manifest"]["outputs"]
     assert outputs["scaleStatus"] == "estimated"
     assert similarity_matrix_problem(outputs["worldFromColmap"]) is None

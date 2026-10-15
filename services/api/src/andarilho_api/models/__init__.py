@@ -51,6 +51,7 @@ RUN_STAGES = (
     "preparing",
     "camera_reconstruction",
     "normalizing",
+    "scene_analysis",
     "geometry_proposal",
     "texturing",
     "packaging",

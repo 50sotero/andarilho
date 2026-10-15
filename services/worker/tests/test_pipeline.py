@@ -39,6 +39,7 @@ def test_synthetic_recipe_end_to_end(db, seed, store, sup):
         ("validating", "succeeded"),
         ("preparing", "succeeded"),
         ("normalizing", "succeeded"),
+        ("scene_analysis", "succeeded"),
         ("geometry_proposal", "succeeded"),
         ("texturing", "succeeded"),
         ("packaging", "succeeded"),

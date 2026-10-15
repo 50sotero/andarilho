@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from andarilho_worker.stages import (
+    analyze_scene,
     cleanup,
     cleanup_artifacts,
     cleanup_upload,
@@ -23,6 +24,7 @@ STAGES: dict[str, Stage] = {
     "preparing": prepare.run,
     "camera_reconstruction": reconstruct.run,
     "normalizing": normalize.run,
+    "scene_analysis": analyze_scene.run,
     "geometry_proposal": propose_geometry.run,
     "texturing": texture.run,
     "packaging": package_scene.run,

@@ -25,6 +25,7 @@ RUN_STAGES = (
     "preparing",
     "camera_reconstruction",
     "normalizing",
+    "scene_analysis",
     "geometry_proposal",
     "texturing",
     "packaging",
@@ -210,6 +211,7 @@ TIMEOUTS = {
     "preparing": 1800,
     "camera_reconstruction": 3 * 3600,
     "normalizing": 1800,
+    "scene_analysis": 600,
     "geometry_proposal": 600,
     "texturing": 1800,
     "packaging": 600,
@@ -240,6 +242,16 @@ COMMON = {
     # automatically when the atlas would need more than maxPages pages of pageSize texels,
     # and the JPEG quality of the atlas pages. Like every parameter, it is in the digest.
     "texture": {"texelSize": 0.01, "pageSize": 2048, "maxPages": 8, "jpegQuality": 85},
+    # The scene analysis (scene_analysis stage): how many posed keyframes and registered
+    # photos are shown to the AI model, and how they are downscaled before they leave the
+    # worker. The floor plan is sent at its own size limit.
+    "analysis": {
+        "keyframes": 12,
+        "maxPhotos": 6,
+        "imageLongEdge": 1024,
+        "floorPlanLongEdge": 1600,
+        "jpegQuality": 80,
+    },
 }
 
 # Capture intake rules shared with the API, which publishes them to the web app
@@ -252,19 +264,19 @@ INTAKE = {
 
 RECIPES: dict[str, Recipe] = {
     "preview": Recipe(
-        "preview-v2",
+        "preview-v3",
         "preview",
         _specs(RUN_STAGES),
         {**COMMON},
     ),
     "standard": Recipe(
-        "standard-v2",
+        "standard-v3",
         "standard",
         _specs(RUN_STAGES),
         {**COMMON},
     ),
     "synthetic": Recipe(
-        "synthetic-v2",
+        "synthetic-v3",
         "synthetic",
         _specs([s for s in RUN_STAGES if s not in GPU_STAGES]),
         {"fixture": "synthetic-two-room", "texture": COMMON["texture"]},

@@ -1,6 +1,7 @@
-"""Migration 0006: texturing joins the run stages; retired training rows stay valid.
+"""Migrations 0006 and 0007: texturing, then scene_analysis, join the run stages.
 
-These tests move the shared test database down to 0005 and back to head. Each restores
+Retired training rows stay valid throughout. These tests move the shared test database
+down (to 0005 or 0006) and back to head. Each restores
 head in a ``finally`` so that later tests always see the current schema. No session is
 open while a migration runs.
 """
@@ -64,15 +65,19 @@ def _training_run(db: Session, project_id: uuid.UUID) -> uuid.UUID:
     return run_id
 
 
-def _texturing(project_id: uuid.UUID, run_id: uuid.UUID) -> Job:
+def _job(project_id: uuid.UUID, run_id: uuid.UUID, stage: str) -> Job:
     return Job(
         project_id=project_id,
         run_id=run_id,
         capability="cpu",
-        stage="texturing",
+        stage=stage,
         state="queued",
         fencing_token=0,
     )
+
+
+def _texturing(project_id: uuid.UUID, run_id: uuid.UUID) -> Job:
+    return _job(project_id, run_id, "texturing")
 
 
 def _stages(engine) -> list[str]:
@@ -121,3 +126,41 @@ def test_downgrade_removes_texturing_jobs_and_keeps_training(database_url, engin
             command.upgrade(config, "head")
 
     assert _stages(engine) == ["training", "validating"]
+
+
+def test_scene_analysis_is_refused_before_0007_and_accepted_after(database_url, engine):
+    with Session(engine) as db:
+        project_id = _project(db)
+        run_id = _training_run(db, project_id)
+
+    with _alembic(database_url) as config:
+        command.downgrade(config, "0006")
+        try:
+            with Session(engine) as db:
+                db.add(_job(project_id, run_id, "scene_analysis"))
+                with pytest.raises(IntegrityError):
+                    db.commit()
+                db.rollback()
+        finally:
+            command.upgrade(config, "head")
+
+    with Session(engine) as db:
+        db.add(_job(project_id, run_id, "scene_analysis"))
+        db.commit()
+    assert _stages(engine) == ["scene_analysis", "training", "validating"]
+
+
+def test_downgrade_to_0006_removes_scene_analysis_jobs_only(database_url, engine):
+    with Session(engine) as db:
+        project_id = _project(db)
+        run_id = _training_run(db, project_id)
+        db.add(_job(project_id, run_id, "scene_analysis"))
+        db.add(_texturing(project_id, run_id))
+        db.commit()
+
+    with _alembic(database_url) as config:
+        command.downgrade(config, "0006")
+        try:
+            assert _stages(engine) == ["texturing", "training", "validating"]
+        finally:
+            command.upgrade(config, "head")
