@@ -11,8 +11,9 @@ An upload never aborted here, or one holding a part, is aborted and checked agai
 reconciliation horizon later; a check that finds nothing moves the next one further
 out, doubling from an hour up to a week. An expired upload keeps its ID, and with it
 its quota, until such a check: that check clears it. The horizon covers every part
-upload the app supports (``cleanup_reconcile_horizon_seconds``); a part that lands later
-anyway charges its upload's quota again, through its ID, until a check finds it gone.
+upload the app supports (:func:`andarilho_worker.settings.reconcile_horizon`); a part that
+lands later anyway charges its upload's quota again, through its ID, until a check finds
+it gone.
 Entries are never deleted: one costs a row and a ``ListParts`` call a week.
 """
 

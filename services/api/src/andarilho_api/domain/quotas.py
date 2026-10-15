@@ -5,12 +5,12 @@ from __future__ import annotations
 import math
 import uuid
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from andarilho_api.domain.recipes import INTAKE
 from andarilho_api.errors import ApiError, validation_failed
-from andarilho_api.models import Upload
+from andarilho_api.models import Job, Upload
 from andarilho_api.settings import Settings
 
 ALLOWED_CONTENT_TYPES: dict[str, frozenset[str]] = {
@@ -89,11 +89,22 @@ def check_upload(
             # part left: then it clears the ID.
             and_(Upload.status == "expired", Upload.multipart_upload_id.is_not(None)),
             # Rejected or removed uploads hold quota until the worker has deleted their
-            # frozen bytes, and one stopped mid-upload until upload_cleanup has aborted its
-            # multipart upload and found no part left a horizon later: it clears the ID.
+            # frozen bytes, one stopped mid-upload until upload_cleanup has aborted its
+            # multipart upload and found no part left a horizon later (it clears the ID),
+            # and one whose staging copy the API could not delete until upload_cleanup
+            # has deleted it.
             and_(
                 Upload.status.in_(("rejected", "aborted")),
-                or_(Upload.immutable_key.is_not(None), Upload.multipart_upload_id.is_not(None)),
+                or_(
+                    Upload.immutable_key.is_not(None),
+                    Upload.multipart_upload_id.is_not(None),
+                    exists().where(
+                        Job.project_id == Upload.project_id,
+                        Job.upload_id == Upload.id,
+                        Job.stage == "upload_cleanup",
+                        Job.state.in_(("queued", "retry_wait", "running")),
+                    ),
+                ),
             ),
         ),
     )

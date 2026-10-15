@@ -333,7 +333,8 @@ def test_abort_upload_releases_quota_once_no_part_is_left(client, auth, db, sett
     [job] = _cleanup_jobs(db, upload_id)
     assert job.state == "queued" and job.input_manifest["stagingKey"] == row.staging_key
     assert _init(client, auth, pid, size=10).status_code == 413
-    row.multipart_upload_id = None
+    row.multipart_upload_id = None  # as the cleanup leaves it, once it succeeded
+    job.state = "succeeded"
     db.commit()
     assert _init(client, auth, pid, size=10).status_code == 201
 
@@ -367,6 +368,36 @@ def test_rejected_upload_holds_quota_until_its_object_is_deleted(client, auth, d
     db.commit()
     assert _init(client, auth, pid, size=10).status_code == 413
     row.immutable_key = None  # the worker deleted the stored object
+    db.commit()
+    assert _init(client, auth, pid, size=10).status_code == 201
+
+
+def test_a_rejected_upload_holds_quota_until_its_staging_copy_is_deleted(
+    client, auth, db, settings
+):
+    # Completed with the wrong size, and the API could not delete the staging object: the
+    # full copy stays stored until upload_cleanup deletes it.
+    pid = create_project(client, auth)["id"]
+    upload_id = _init(client, auth, pid, size=settings.upload_max_total_bytes).json()["upload"][
+        "id"
+    ]
+    row = db.get(Upload, uuid.UUID(upload_id))
+    row.status, row.rejection_code, row.multipart_upload_id = "rejected", "SIZE_MISMATCH", None
+    db.add(
+        Job(
+            id=uuid.uuid4(),
+            project_id=row.project_id,
+            upload_id=row.id,
+            capability="cpu",
+            stage="upload_cleanup",
+            state="retry_wait",
+            input_manifest={"uploadId": upload_id, "stagingKey": row.staging_key},
+        )
+    )
+    db.commit()
+    assert _init(client, auth, pid, size=10).status_code == 413
+    [job] = _cleanup_jobs(db, upload_id)
+    job.state = "succeeded"  # the worker deleted the staging copy
     db.commit()
     assert _init(client, auth, pid, size=10).status_code == 201
 
@@ -515,7 +546,8 @@ def test_remove_unused_verified_upload(client, auth, db, settings):
     assert job.stage == "upload_cleanup" and job.input_manifest["key"] == row.immutable_key
     # Quota is released once the worker has deleted the bytes, not before.
     assert _init(client, auth, pid, size=10).status_code == 413
-    row.immutable_key = None
+    row.immutable_key = None  # as the cleanup leaves it, once it succeeded
+    job.state = "succeeded"
     db.commit()
     assert _init(client, auth, pid, size=10).status_code == 201
     # A capture set made before the removal can no longer start a run.

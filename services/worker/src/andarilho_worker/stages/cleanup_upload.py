@@ -2,7 +2,8 @@
 
 The staging copy is never read once an upload is frozen or rejected. The API
 deletes it right away and queues this job when that delete fails, so this job
-deletes it first.
+deletes it first. Until this job has finished, the API counts a removed or rejected
+upload against the project's quota.
 
 The API marks a verified, unused upload ``aborted`` and queues this job; the
 queue does the same for an upload rejected after its inspection failed for good. The

@@ -227,12 +227,24 @@ def test_a_late_part_charges_a_removed_or_rejected_upload_again(db, seed, store,
     assert _multipart_id(seed, uid) is None
 
 
-def test_the_reconcile_horizon_covers_the_part_url_lifetime_and_a_supported_part():
+def test_the_reconcile_horizon_comes_from_the_apis_own_upload_variables():
     from andarilho_worker.settings import Settings
 
     env = {"DATABASE_URL": "postgresql+psycopg://u:p@localhost:5432/db"}
-    assert Settings.from_env(env).cleanup_reconcile_horizon_seconds == 900 + 900
-    horizon = {**env, "CLEANUP_RECONCILE_HORIZON_SECONDS": "3600"}
-    assert Settings.from_env(horizon).cleanup_reconcile_horizon_seconds == 3600
-    with pytest.raises(ValueError, match="CLEANUP_RECONCILE_HORIZON_SECONDS"):
-        Settings.from_env({**env, "CLEANUP_RECONCILE_HORIZON_SECONDS": "10"})
+    # The part URL lifetime plus a 16 MiB part at 16,000 bytes/s.
+    assert Settings.from_env(env).cleanup_reconcile_horizon_seconds == 900 + 1049
+    # A longer URL lifetime, a larger part or a slower supported rate lengthens it.
+    bigger = {
+        **env,
+        "UPLOAD_PART_URL_TTL_SECONDS": "3600",
+        "UPLOAD_PART_SIZE": str(64 * 1024**2),
+        "UPLOAD_MIN_BYTES_PER_SECOND": "8000",
+    }
+    assert Settings.from_env(bigger).cleanup_reconcile_horizon_seconds == 3600 + 8389
+    for name, value in (
+        ("UPLOAD_PART_URL_TTL_SECONDS", "7200"),
+        ("UPLOAD_PART_SIZE", str(1024**2)),
+        ("UPLOAD_MIN_BYTES_PER_SECOND", "10"),
+    ):
+        with pytest.raises(ValueError, match=name):
+            Settings.from_env({**env, name: value})
