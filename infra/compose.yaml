@@ -126,6 +126,16 @@ services:
       WORKER_CAPABILITY: cpu
       WORKER_MAX_CONCURRENCY: ${WORKER_MAX_CONCURRENCY:-1}
       WORKER_SCRATCH_DIR: /scratch
+      # Scene analysis (scene_analysis stage): off unless AI_SCENE_ANALYSIS is true. When on,
+      # the worker sends downscaled keyframes, registered photos and the floor plan to the
+      # model above; the key comes from the same read-only secret as the API's AI advice.
+      AI_SCENE_ANALYSIS: ${AI_SCENE_ANALYSIS:-false}
+      AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/openai/v1}
+      AI_MODEL: ${AI_MODEL:-deepseek-v4.1-flash}
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-120}
+      OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
+    secrets:
+      - opencode_api_key
     volumes:
       - worker-scratch:/scratch
     depends_on:
