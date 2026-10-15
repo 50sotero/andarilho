@@ -38,6 +38,147 @@
       "title": "Calibration",
       "type": "object"
     },
+    "Furniture": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "provenance": {
+          "default": "user",
+          "enum": [
+            "user",
+            "floor_plan",
+            "proposal",
+            "synthetic"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "floorId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Floorid",
+          "type": "string"
+        },
+        "category": {
+          "maxLength": 40,
+          "minLength": 1,
+          "title": "Category",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "maxLength": 120,
+          "title": "Label",
+          "type": "string"
+        },
+        "position": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Position",
+          "type": "array"
+        },
+        "yawRadians": {
+          "title": "Yawradians",
+          "type": "number"
+        },
+        "size": {
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Size",
+          "type": "array"
+        },
+        "solid": {
+          "default": true,
+          "title": "Solid",
+          "type": "boolean"
+        },
+        "parts": {
+          "items": {
+            "$ref": "#/$defs/FurniturePart"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Parts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "floorId",
+        "category",
+        "position",
+        "yawRadians",
+        "size",
+        "parts"
+      ],
+      "title": "Furniture",
+      "type": "object"
+    },
+    "FurniturePart": {
+      "additionalProperties": false,
+      "properties": {
+        "shape": {
+          "enum": [
+            "box",
+            "cylinder"
+          ],
+          "title": "Shape",
+          "type": "string"
+        },
+        "min": {
+          "items": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Min",
+          "type": "array"
+        },
+        "max": {
+          "items": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Max",
+          "type": "array"
+        },
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Color",
+          "type": "string"
+        }
+      },
+      "required": [
+        "shape",
+        "min",
+        "max",
+        "color"
+      ],
+      "title": "FurniturePart",
+      "type": "object"
+    },
     "Landmark": {
       "additionalProperties": false,
       "properties": {
@@ -416,6 +557,14 @@
       },
       "maxItems": 1024,
       "title": "Obstacles",
+      "type": "array"
+    },
+    "furniture": {
+      "items": {
+        "$ref": "#/$defs/Furniture"
+      },
+      "maxItems": 256,
+      "title": "Furniture",
       "type": "array"
     },
     "landmarks": {

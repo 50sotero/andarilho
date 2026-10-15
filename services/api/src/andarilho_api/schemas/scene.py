@@ -32,6 +32,9 @@ NonNegative = Annotated[float, Field(ge=0, allow_inf_nan=False)]
 Positive = Annotated[float, Field(gt=0, allow_inf_nan=False)]
 Vec3 = Annotated[list[Finite], Field(min_length=3, max_length=3)]
 Vec2 = Annotated[list[Finite], Field(min_length=2, max_length=2)]
+Unit = Annotated[float, Field(ge=0, le=1, allow_inf_nan=False)]
+UnitVec3 = Annotated[list[Unit], Field(min_length=3, max_length=3)]
+Color = Annotated[str, Field(pattern=r"^#[0-9a-fA-F]{6}$")]
 Matrix4 = Annotated[list[Finite], Field(min_length=16, max_length=16)]
 
 
@@ -227,6 +230,48 @@ class Obstacle(Provenanced):
     height: Positive
 
 
+# Furniture is drawn as a few primitive parts inside its own box. The object frame has
+# its origin at the centre of the footprint on the floor, x across the width, y up and
+# z from back to front (the front faces +z). Parts are given in that box as fractions:
+# a part coordinate (u, v, w) in [0, 1] is the point ((u - 0.5) * width, v * height,
+# (w - 0.5) * depth). The object is turned by ``yawRadians`` about +Y as three.js
+# ``rotation.y`` turns it, then moved to ``position`` on its floor.
+MAX_FURNITURE_WIDTH = 6.0  # metres, for width and depth
+MAX_FURNITURE_HEIGHT = 4.0
+
+
+class FurniturePart(Contract):
+    shape: Literal["box", "cylinder"]  # a cylinder stands upright, inscribed in its box
+    min: UnitVec3
+    max: UnitVec3
+    color: Color  # sRGB, shown where the video never saw the part
+
+    @model_validator(mode="after")
+    def _ordered(self) -> FurniturePart:
+        if any(lo >= hi for lo, hi in zip(self.min, self.max, strict=True)):
+            raise ValueError("part min must be below max on every axis")
+        return self
+
+
+class Furniture(Provenanced):
+    id: Id
+    floor_id: Id
+    category: Annotated[str, Field(min_length=1, max_length=40)]
+    label: Annotated[str, Field(max_length=120)] = ""
+    position: Vec2  # centre of the footprint, (x, z)
+    yaw_radians: Finite
+    size: Annotated[list[Positive], Field(min_length=3, max_length=3)]  # width, height, depth
+    solid: bool = True  # whether it blocks walking
+    parts: Annotated[list[FurniturePart], Field(min_length=1, max_length=32)]
+
+    @model_validator(mode="after")
+    def _size(self) -> Furniture:
+        width, height, depth = self.size
+        if max(width, depth) > MAX_FURNITURE_WIDTH or height > MAX_FURNITURE_HEIGHT:
+            raise ValueError(f"furniture {self.id} is implausibly large")
+        return self
+
+
 class Landmark(Contract):
     id: Id
     plan_point: Vec2 | None = None
@@ -260,6 +305,7 @@ class Layout(Contract):
     walls: Annotated[list[Wall], Field(max_length=2048)] = Field(default_factory=list)
     openings: Annotated[list[Opening], Field(max_length=1024)] = Field(default_factory=list)
     obstacles: Annotated[list[Obstacle], Field(max_length=1024)] = Field(default_factory=list)
+    furniture: Annotated[list[Furniture], Field(max_length=256)] = Field(default_factory=list)
     landmarks: Annotated[list[Landmark], Field(max_length=256)] = Field(default_factory=list)
     spawn: LayoutSpawn
     calibration: Calibration | None = None
@@ -268,11 +314,16 @@ class Layout(Contract):
     def _references(self) -> Layout:
         floor_ids = {f.id for f in self.floors}
         wall_ids = {w.id for w in self.walls}
-        if len(floor_ids) != len(self.floors) or len(wall_ids) != len(self.walls):
+        furniture_ids = {f.id for f in self.furniture}
+        if (
+            len(floor_ids) != len(self.floors)
+            or len(wall_ids) != len(self.walls)
+            or len(furniture_ids) != len(self.furniture)
+        ):
             raise ValueError("layout ids must be unique")
         if self.spawn.floor_id not in floor_ids:
             raise ValueError("spawn.floorId must reference a floor")
-        for item in [*self.walls, *self.obstacles]:
+        for item in [*self.walls, *self.obstacles, *self.furniture]:
             if item.floor_id not in floor_ids:
                 raise ValueError(f"{item.id} references unknown floor {item.floor_id}")
         walls = {w.id: w for w in self.walls}

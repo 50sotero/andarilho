@@ -43,6 +43,27 @@ export interface FloorRef {
   elevation: number;
 }
 
+export interface Furniture {
+  confidence?: number;
+  provenance?: "user" | "floor_plan" | "proposal" | "synthetic";
+  id: string;
+  floorId: string;
+  category: string;
+  label?: string;
+  position: [number, number];
+  yawRadians: number;
+  size: [number, number, number];
+  solid?: boolean;
+  parts: FurniturePart[];
+}
+
+export interface FurniturePart {
+  shape: "box" | "cylinder";
+  min: [number, number, number];
+  max: [number, number, number];
+  color: string;
+}
+
 export interface Landmark {
   id: string;
   planPoint?: [number, number] | null;
@@ -56,6 +77,7 @@ export interface Layout {
   walls?: Wall[];
   openings?: Opening[];
   obstacles?: Obstacle[];
+  furniture?: Furniture[];
   landmarks?: Landmark[];
   spawn: LayoutSpawn;
   calibration?: Calibration | null;
