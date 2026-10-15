@@ -23,6 +23,7 @@ x-app-env: &app-env
   S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-local-development-only}
   UPLOAD_MAX_TOTAL_BYTES: ${UPLOAD_MAX_TOTAL_BYTES:-2147483648}
   RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-3600}
+  CLEANUP_RECONCILE_HORIZON_SECONDS: ${CLEANUP_RECONCILE_HORIZON_SECONDS:-1800}
   DELIVERY_URL_TTL_SECONDS: ${DELIVERY_URL_TTL_SECONDS:-300}
   # The web proxy forwards each visitor's address for public share throttling.
   # Only trust it where browsers reach the web app solely through an edge that

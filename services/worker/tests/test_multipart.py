@@ -5,6 +5,8 @@ from __future__ import annotations
 import time
 import uuid
 
+import pytest
+
 from andarilho_worker import queue
 from andarilho_worker.artifacts import LocalObjectStore
 from andarilho_worker.multipart import (
@@ -187,3 +189,50 @@ def test_an_upload_already_marked_expired_is_handed_over_too(db, seed, store):
     assert entry == {"object_key": key, "upload_id": "mp-old"}
     assert queue.expire_uploads(db) == (0, 0)  # recorded once
     assert seed.one("SELECT count(*) AS n FROM multipart_reconciliations")["n"] == 1
+
+
+def test_a_part_landing_after_an_expired_upload_was_released_charges_it_again(db, seed, store):
+    pid = seed.project()
+    uid, key = _expired_upload(seed, pid)
+    store.multipart_uploads["mp-old"] = key
+    assert queue.expire_uploads(db) == (1, 0)
+    reconcile(db, store, horizon_seconds=900)  # the abort
+    _due(seed)
+    reconcile(db, store, horizon_seconds=900)  # a horizon later, nothing: released
+    assert _multipart_id(seed, uid) is None
+
+    store.stored_parts["mp-old"] = 1  # a part upload slower than supported lands anyway
+    _due(seed)
+    assert reconcile(db, store, horizon_seconds=900)["multipartAborted"] == 1
+    assert _multipart_id(seed, uid) == "mp-old"  # its upload holds quota again
+    _due(seed)
+    reconcile(db, store, horizon_seconds=900)
+    assert _multipart_id(seed, uid) is None
+
+
+@pytest.mark.parametrize("status", ["aborted", "rejected"])
+def test_a_late_part_charges_a_removed_or_rejected_upload_again(db, seed, store, status):
+    pid = seed.project()
+    uid, key = _expired_upload(seed, pid, status=status)
+    # As upload_cleanup leaves it: the ID cleared and the upload handed over.
+    seed.exec("UPDATE uploads SET multipart_upload_id = NULL WHERE id = %s", uid)
+    with db.transaction() as conn:
+        record(conn, [(key, "mp-old")], aborted_at=time.time() - 900)
+    store.stored_parts["mp-old"] = 1
+    _due(seed)
+    assert reconcile(db, store, horizon_seconds=900)["multipartAborted"] == 1
+    assert _multipart_id(seed, uid) == "mp-old"
+    _due(seed)
+    reconcile(db, store, horizon_seconds=900)
+    assert _multipart_id(seed, uid) is None
+
+
+def test_the_reconcile_horizon_covers_the_part_url_lifetime_and_a_supported_part():
+    from andarilho_worker.settings import Settings
+
+    env = {"DATABASE_URL": "postgresql+psycopg://u:p@localhost:5432/db"}
+    assert Settings.from_env(env).cleanup_reconcile_horizon_seconds == 900 + 900
+    horizon = {**env, "CLEANUP_RECONCILE_HORIZON_SECONDS": "3600"}
+    assert Settings.from_env(horizon).cleanup_reconcile_horizon_seconds == 3600
+    with pytest.raises(ValueError, match="CLEANUP_RECONCILE_HORIZON_SECONDS"):
+        Settings.from_env({**env, "CLEANUP_RECONCILE_HORIZON_SECONDS": "10"})

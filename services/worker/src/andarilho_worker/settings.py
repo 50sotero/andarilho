@@ -81,7 +81,14 @@ class Settings:
     max_scratch_bytes: int = 50 * 1024**3
     retry_base_seconds: float = 30.0
     retry_max_seconds: float = 900.0
-    cleanup_reconcile_horizon_seconds: int = 900
+    # The write-grant horizon: how long after an abort a write already under way can
+    # still land. Storage cannot limit how long a part upload takes, so this is the bound
+    # the app supports: the API's part URL lifetime (UPLOAD_PART_URL_TTL_SECONDS, 900 by
+    # default), within which a part upload must start, plus the longest part upload
+    # supported (900 s: a 16 MiB part at about 150 kbit/s). Raise it with either. A part
+    # that lands later is still found and aborted by the multipart checks, which then
+    # charge its upload's quota again until it is gone.
+    cleanup_reconcile_horizon_seconds: int = 1800
     # Scene analysis (scene_analysis stage), off unless AI_SCENE_ANALYSIS is set. The key is
     # read from the file OPENCODE_API_KEY_FILE names at each call; it is never logged. The
     # timeout and the reply budget have their own variables (AI_SCENE_TIMEOUT_SECONDS and
@@ -123,6 +130,7 @@ class Settings:
             local_store_dir=Path(local_dir) if local_dir else None,
             app_env=env.get("APP_ENV", "development"),
             max_scratch_bytes=_int(env, "WORKER_MAX_SCRATCH_BYTES", 50 * 1024**3),
+            cleanup_reconcile_horizon_seconds=_int(env, "CLEANUP_RECONCILE_HORIZON_SECONDS", 1800),
             ai_scene_analysis=_flag(env, "AI_SCENE_ANALYSIS"),
             ai_base_url=_text(env, "AI_BASE_URL") or DEFAULT_AI_BASE_URL,
             ai_model=_text(env, "AI_MODEL") or DEFAULT_AI_MODEL,
@@ -134,6 +142,8 @@ class Settings:
                 env, "AI_SCENE_MAX_OUTPUT_TOKENS", DEFAULT_AI_SCENE_MAX_OUTPUT_TOKENS
             ),
         )
+        if settings.cleanup_reconcile_horizon_seconds < 60:
+            raise ValueError("CLEANUP_RECONCILE_HORIZON_SECONDS must be at least 60")
         if settings.ai_max_output_tokens < 1:
             raise ValueError("AI_SCENE_MAX_OUTPUT_TOKENS must be at least 1")
         if settings.app_env == "production":

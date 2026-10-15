@@ -10,8 +10,10 @@ therefore recorded in ``multipart_reconciliations``: one removed or rejected mid
 An upload never aborted here, or one holding a part, is aborted and checked again a
 reconciliation horizon later; a check that finds nothing moves the next one further
 out, doubling from an hour up to a week. An expired upload keeps its ID, and with it
-its quota, until such a check: that check clears it. Entries are never deleted: one
-costs a row and a ``ListParts`` call a week.
+its quota, until such a check: that check clears it. The horizon covers every part
+upload the app supports (``cleanup_reconcile_horizon_seconds``); a part that lands later
+anyway charges its upload's quota again, through its ID, until a check finds it gone.
+Entries are never deleted: one costs a row and a ``ListParts`` call a week.
 """
 
 from __future__ import annotations
@@ -102,6 +104,15 @@ def reconcile(
                 # The next check must come a whole horizon after this abort: a part in
                 # flight during it can still land.
                 stats["multipartAborted"] += 1
+                if row["last_aborted_at"] is not None:
+                    # A part landed after the upload's quota was released: charge it
+                    # again until a check finds the upload empty.
+                    conn.execute(
+                        "UPDATE uploads SET multipart_upload_id = %s, updated_at = now() "
+                        "WHERE staging_key = %s AND multipart_upload_id IS NULL "
+                        "AND status IN ('expired', 'aborted', 'rejected')",
+                        (upload_id, key),
+                    )
                 conn.execute(
                     """
                     UPDATE multipart_reconciliations
@@ -113,10 +124,11 @@ def reconcile(
                     (max(1.0, float(horizon_seconds)), row["id"]),
                 )
             else:
-                # Its storage is free: an expired upload no longer holds quota.
+                # Its storage is free: the upload no longer holds quota.
                 conn.execute(
                     "UPDATE uploads SET multipart_upload_id = NULL, updated_at = now() "
-                    "WHERE staging_key = %s AND multipart_upload_id = %s AND status = 'expired'",
+                    "WHERE staging_key = %s AND multipart_upload_id = %s "
+                    "AND status IN ('expired', 'aborted', 'rejected')",
                     (key, upload_id),
                 )
                 conn.execute(
