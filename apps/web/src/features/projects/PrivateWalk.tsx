@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
-import { Card, ErrorNotice } from "@/components/ui";
+import { Button, Card, ErrorNotice } from "@/components/ui";
 import { ViewerClient } from "@/components/viewer/ViewerClient";
 import { LayoutPlan } from "@/features/review/LayoutPlan";
 import { api } from "@/lib/api/client";
@@ -68,6 +68,7 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
   const [envelope, setEnvelope] = useState<DeliveryEnvelope | null>(null);
   const [error, setError] = useState<FriendlyError | null>(null);
   const [noRevision, setNoRevision] = useState(false);
+  const [checking, setChecking] = useState(false);
   const sceneId = detail?.scene?.id ?? null;
   // Viewers cannot read draft review data; they walk the published (approved) revision.
   const viewerRevisionId =
@@ -148,12 +149,28 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
   const title = detail?.project.title ?? "this place";
 
   if (detail && !detail.scene) {
+    // Only a running run is polled; a viewer may wait days for an owner to publish,
+    // so checking again after that is left to them.
+    const checkAgain = () => {
+      setChecking(true);
+      void reload().finally(() => setChecking(false));
+    };
     return (
       <Card>
-        <p>There is no scene yet. It appears after processing succeeds.</p>
-        <Link href={`${base}/processing`} className="text-sm underline">
-          Check processing
-        </Link>
+        <p aria-live="polite">
+          {detail.project.role === "viewer"
+            ? "Nothing has been published here yet. The scene appears once an owner publishes it."
+            : "There is no scene yet. It appears after processing succeeds."}
+        </p>
+        <ErrorNotice error={projectError} />
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <Button variant="secondary" onClick={checkAgain} disabled={checking}>
+            {checking ? "Checking..." : "Check again"}
+          </Button>
+          <Link href={`${base}/processing`} className="text-sm underline">
+            Check processing
+          </Link>
+        </div>
       </Card>
     );
   }
