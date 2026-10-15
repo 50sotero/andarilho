@@ -172,8 +172,10 @@ export class MultipartUpload {
   private running: Promise<Upload> | null = null;
   private listeners = new Set<(p: UploadProgress) => void>();
   private progress: UploadProgress;
+  // Signed part URLs belong to one multipart upload: urlCacheUploadId names it.
   private urlCache = new Map<number, { url: string; expiresAt: number }>();
   private pendingUrls = new Map<number, Promise<void>>();
+  private urlCacheUploadId: string | null = null;
 
   constructor(
     projectId: string,
@@ -254,6 +256,7 @@ export class MultipartUpload {
       }
       const record = initialized;
       this.record = record;
+      if (this.urlCacheUploadId !== record.uploadId) this.resetUrlCache(record.uploadId);
       // A pause while the upload was being created must stop it before any part.
       if (signal.aborted) throw new UploadAbortedError();
       this.emitPartProgress("uploading");
@@ -351,7 +354,15 @@ export class MultipartUpload {
 
   private discardRecord() {
     this.record = null;
+    this.resetUrlCache(null);
     removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+  }
+
+  /** Forget part URLs signed for another upload: they would upload into it. */
+  private resetUrlCache(uploadId: string | null) {
+    this.urlCache.clear();
+    this.pendingUrls.clear();
+    this.urlCacheUploadId = uploadId;
   }
 
   private emitPartProgress(phase?: UploadPhase) {
@@ -452,15 +463,18 @@ export class MultipartUpload {
         const fresh = c && c.expiresAt - URL_EXPIRY_MARGIN_MS > this.now();
         if (!fresh && !this.pendingUrls.has(n) && !batch.includes(n)) batch.push(n);
       }
+      const uploadId = this.record!.uploadId;
       const request = this.api
-        .requestPartUrls(this.record!.uploadId, batch, signal)
+        .requestPartUrls(uploadId, batch, signal)
         .then(({ data }) => {
+          if (this.urlCacheUploadId !== uploadId) return; // the upload was replaced
           const expiresAt = Date.parse(data.expiresAt);
           for (const { partNumber: n, url } of data.urls) {
             this.urlCache.set(n, { url, expiresAt: Number.isNaN(expiresAt) ? 0 : expiresAt });
           }
         })
         .finally(() => {
+          if (this.urlCacheUploadId !== uploadId) return;
           for (const n of batch) this.pendingUrls.delete(n);
         });
       for (const n of batch) this.pendingUrls.set(n, request);

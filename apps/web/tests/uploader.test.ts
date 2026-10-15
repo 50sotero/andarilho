@@ -447,6 +447,62 @@ describe("MultipartUpload", () => {
     expect(upload.state.phase).toBe("completed");
   });
 
+  it("never reuses part URLs signed for an upload it replaced", async () => {
+    const size = 3 * PART;
+    const start = Date.now();
+    let clock = start;
+    let created = 0;
+    const urlsExpire = new Date(start + 3600 * 1000).toISOString(); // still fresh later
+    const { api } = fakeApi(size, {
+      // Each upload expires in 10 minutes and gets its own ID.
+      createUpload: vi.fn(async () => {
+        created += 1;
+        const record = uploadRecord(`u-${created}`);
+        record.expiresAt = new Date(clock + 10 * 60 * 1000).toISOString();
+        return { data: { upload: record, partSize: PART, partCount: 3 }, etag: null };
+      }),
+      requestPartUrls: vi.fn(async (uploadId: string, partNumbers: number[]) => ({
+        data: {
+          urls: partNumbers.map((n) => ({
+            partNumber: n,
+            url: `https://storage.test/${uploadId}/${n}`,
+          })),
+          expiresAt: urlsExpire,
+        },
+        etag: null,
+      })),
+    });
+    let block = true;
+    let upload: MultipartUpload | null = null;
+    const putUrls: string[] = [];
+    const putPart: PutPart = async (url, _b, signal) => {
+      if (block && partOf(url) === 2) {
+        upload!.pause();
+        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      }
+      putUrls.push(url);
+      return `"e${partOf(url)}"`;
+    };
+    upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+      api,
+      putPart,
+      storage: null,
+      concurrency: 1,
+      urlBatchSize: 3,
+      now: () => clock,
+    });
+    await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+    // Within five minutes of the upload's expiry, though its part URLs are fresh.
+    clock += 6 * 60 * 1000;
+    block = false;
+    putUrls.length = 0;
+    await upload.start();
+    expect(api.createUpload).toHaveBeenCalledTimes(2);
+    expect(putUrls.sort()).toEqual([1, 2, 3].map((n) => `https://storage.test/u-2/${n}`));
+    expect(api.completeUpload).toHaveBeenCalledWith("u-2");
+    expect(upload.state.phase).toBe("completed");
+  });
+
   it("drops an upload the server reports expired so Resume starts over", async () => {
     const size = 2 * PART;
     let expired = true;
