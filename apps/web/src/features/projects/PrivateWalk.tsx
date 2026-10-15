@@ -69,6 +69,8 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
   const [error, setError] = useState<FriendlyError | null>(null);
   const [noRevision, setNoRevision] = useState(false);
   const [checking, setChecking] = useState(false);
+  // Bumped to fetch a fresh envelope through the effect below.
+  const [envelopeAttempt, setEnvelopeAttempt] = useState(0);
   const sceneId = detail?.scene?.id ?? null;
   // Viewers cannot read draft review data; they walk the published (approved) revision.
   const viewerRevisionId =
@@ -111,7 +113,7 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
     return () => {
       signal.cancelled = true;
     };
-  }, [fetchEnvelope]);
+  }, [fetchEnvelope, envelopeAttempt]);
 
   // The page may open before the run has created the scene: refresh the project until
   // it has one (or the run ends), then the scene's own checks take over.
@@ -141,8 +143,14 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
     { enabled: waiting, key: sceneId ?? "" },
   );
 
-  // Delivery URLs are short-lived: fetch a fresh envelope for the same revision when needed.
-  const onRecoverableError = useCallback(() => void fetchEnvelope(), [fetchEnvelope]);
+  // Delivery URLs are short-lived: fetch a fresh envelope when needed. Members re-read
+  // the scene for its walkable revision; viewers may walk only the published one, which
+  // an owner may have changed since the page loaded, so their refresh re-reads the
+  // project first (a new scene or revision re-runs the fetch on its own).
+  const refreshEnvelope = useCallback(() => {
+    if (viewerRevisionId === null) void fetchEnvelope();
+    else void reload().then(() => setEnvelopeAttempt((n) => n + 1));
+  }, [fetchEnvelope, reload, viewerRevisionId]);
 
   const base = `/projects/${encodeURIComponent(projectId)}`;
   const layout = fallbackLayout(scene, envelope);
@@ -177,7 +185,7 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
 
   return (
     <div className="space-y-4">
-      <ErrorNotice error={projectError ?? error} onRetry={() => void fetchEnvelope()} />
+      <ErrorNotice error={projectError ?? error} onRetry={refreshEnvelope} />
       {noRevision ? (
         <Card>
           <p>No packaged, validated revision is available to walk yet.</p>
@@ -189,7 +197,7 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
           envelope={envelope}
           title={title}
           allowCollisionOverlay
-          onRecoverableError={onRecoverableError}
+          onRecoverableError={refreshEnvelope}
           fallback={layout ? <LayoutPlan layout={layout} title={title} /> : null}
         />
       ) : !noRevision && !error ? (
