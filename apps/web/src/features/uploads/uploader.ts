@@ -254,6 +254,8 @@ export class MultipartUpload {
       }
       const record = initialized;
       this.record = record;
+      // A pause while the upload was being created must stop it before any part.
+      if (signal.aborted) throw new UploadAbortedError();
       this.emitPartProgress("uploading");
 
       const queue = remainingParts(record.partCount, record.completedParts);
@@ -372,7 +374,9 @@ export class MultipartUpload {
     let failure: unknown = null;
     const inner = new AbortController();
     const onAbort = () => inner.abort();
-    signal.addEventListener("abort", onAbort, { once: true });
+    // An abort that already happened fires no event: honour it before any worker starts.
+    if (signal.aborted) inner.abort();
+    else signal.addEventListener("abort", onAbort, { once: true });
 
     const worker = async () => {
       while (pending.length > 0 && !failure && !inner.signal.aborted) {

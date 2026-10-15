@@ -393,6 +393,32 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).toHaveBeenCalledTimes(1);
     expect(upload.state.phase).toBe("completed");
   });
+  it("honours a pause made while the upload is still being created", async () => {
+    const size = 3 * PART;
+    const server = fakeApi(size).api;
+    let upload: MultipartUpload | null = null;
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (...args: Parameters<UploaderApi["createUpload"]>) => {
+        upload!.pause(); // the user pauses before the server answers
+        return server.createUpload(...args);
+      }),
+    });
+    const putPart = vi.fn<PutPart>(async (url) => `"e${partOf(url)}"`);
+    upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+      api,
+      putPart,
+      storage: null,
+      concurrency: 2,
+    });
+    await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+    expect(upload.state.phase).toBe("paused");
+    expect(putPart).not.toHaveBeenCalled();
+    await upload.start(); // resuming uses the upload that was created
+    expect(api.createUpload).toHaveBeenCalledTimes(1);
+    expect(putPart).toHaveBeenCalledTimes(3);
+    expect(upload.state.phase).toBe("completed");
+  });
+
   it("starts a new upload when a paused upload expired in the same session", async () => {
     const size = 3 * PART;
     const { api } = fakeApi(size);
