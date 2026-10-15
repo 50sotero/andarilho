@@ -391,7 +391,12 @@ def frame_from_sparse(
 
 
 def _reliable_points(points: SparsePoints) -> np.ndarray:
-    """The sparse points worth trusting: a real track and a small reprojection error."""
+    """The sparse points worth trusting: a real track and a small reprojection error.
+
+    When fewer than SPARSE_MIN_POINTS pass, the fallback keeps every point under
+    SPARSE_FALLBACK_ERROR_PX (4 px) and drops the track requirement. When fewer than
+    SPARSE_MIN_FALLBACK_POINTS of those remain, every point is used.
+    """
     keep = (points.track_length >= SPARSE_MIN_TRACK) & (points.error < SPARSE_MAX_ERROR_PX)
     if keep.sum() < SPARSE_MIN_POINTS:
         keep = points.error < SPARSE_FALLBACK_ERROR_PX

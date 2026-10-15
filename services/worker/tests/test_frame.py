@@ -11,6 +11,7 @@ import pytest
 from andarilho_worker.geometry.colmap import ColmapImage, SparsePoints
 from andarilho_worker.geometry.frame import (
     CAMERA_HEIGHT_METERS,
+    PATH_MARGIN_METERS,
     CameraPath,
     _nearest_neighbours,
     _reliable_points,
@@ -225,7 +226,10 @@ def _l_walk(rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
 def _room(
     rng: np.random.Generator, length: float = 5.0, width: float = 3.5, height: float = 2.6
 ) -> tuple[np.ndarray, np.ndarray]:
-    """A length x width x height m room (X, Z, Y) with 1 cm noise, and the kind of each point."""
+    """A length x width x height m room with 1 cm noise, and the kind of each point.
+
+    Points are (X, Y, Z) with Y up: the floor is at Y = 0 and the ceiling at Y = height.
+    """
     floor = np.column_stack(
         [rng.uniform(0, length, 700), np.zeros(700), rng.uniform(0, width, 700)]
     )
@@ -316,10 +320,27 @@ def test_an_l_walk_over_sparse_points_levels_scales_and_aligns_the_room():
     assert np.median(cameras[:, 1]) == pytest.approx(CAMERA_HEIGHT_METERS, abs=0.03)
     for wall in range(2, 6):
         assert _axis_residual_degrees(world[kind == wall][:, [0, 2]]) < 1.5
-    assert (np.array(est.min_xz) + np.array(est.max_xz)) / 2 == pytest.approx([0.0, 0.0], abs=1e-9)
+    # The matrix itself is recentred: the camera path's XZ bounds, with the margin, centre on
+    # the origin, and the reported bounds centre on the same point.
+    lo = cameras[:, [0, 2]].min(axis=0) - PATH_MARGIN_METERS
+    hi = cameras[:, [0, 2]].max(axis=0) + PATH_MARGIN_METERS
+    assert (lo + hi) / 2 == pytest.approx([0.0, 0.0], abs=0.01)
+    reported = (np.array(est.min_xz) + np.array(est.max_xz)) / 2
+    assert reported == pytest.approx((lo + hi) / 2, abs=0.01)
+    assert reported == pytest.approx([0.0, 0.0], abs=1e-9)
+    # The spawn is where the walk started (the first camera by name), on the floor, facing
+    # along that camera's heading.
+    first = min(images, key=lambda image: image.name)
+    start = _apply(est.matrix, np.array([first.center()]))[0]
+    assert est.spawn_feet[0] == pytest.approx(start[0], abs=0.01)
     assert est.spawn_feet[1] == 0.0
+    assert est.spawn_feet[2] == pytest.approx(start[2], abs=0.01)
+    linear = np.array(est.matrix).reshape(4, 4).T[:3, :3]
+    heading = linear @ first.forward()
+    expected_yaw = math.atan2(-heading[0], -heading[2])
+    yaw_error = (est.spawn_yaw - expected_yaw + math.pi) % (2 * math.pi) - math.pi
+    assert yaw_error == pytest.approx(0.0, abs=1e-6)
     # The spawn faces where the first camera looked.
-    first = images[0]
     ends = _apply(est.matrix, np.array([first.center(), first.center() + first.forward()]))
     look = ends[1] - ends[0]
     look = np.array([look[0], 0.0, look[2]]) / np.linalg.norm([look[0], look[2]])
@@ -515,6 +536,34 @@ def test_a_cloud_with_fewer_than_twenty_trusted_points_uses_every_point():
     )
 
 
+def test_a_point_at_exactly_two_pixels_is_not_trusted():
+    rng = np.random.default_rng(19)
+    transform = _colmap_transform()
+    # Sixty clean points, thirty at 1.99 px (trusted) and one hundred at exactly 2.0 px (not).
+    error = np.concatenate([np.full(60, 0.5), np.full(30, 1.99), np.full(100, 2.0)])
+    cloud = _with_trust(
+        _sparse(rng.uniform(0, 5, (190, 3)), transform, rng), error, np.full(190, 5)
+    )
+    np.testing.assert_array_equal(_reliable_points(cloud), cloud.xyz[:90])
+
+
+def test_frame_from_sparse_needs_a_camera():
+    rng = np.random.default_rng(16)
+    transform = _colmap_transform()
+    room, _ = _room(rng)
+    with pytest.raises(ValueError, match="no cameras"):
+        frame_from_sparse(_sparse(room, transform, rng), [], seed=0)
+
+
+def test_frame_from_sparse_needs_a_point():
+    rng = np.random.default_rng(16)
+    transform = _colmap_transform()
+    centres, forwards = _l_walk(rng)
+    no_points = _sparse(np.empty((0, 3)), transform, rng)
+    with pytest.raises(ValueError, match="no sparse points"):
+        frame_from_sparse(no_points, _cameras_for(centres, forwards, transform), seed=0)
+
+
 def test_the_frame_does_not_depend_on_the_order_the_images_are_given_in():
     rng = np.random.default_rng(15)
     transform = _colmap_transform()
@@ -539,6 +588,20 @@ def test_a_sparse_floor_is_found_with_the_fractional_inlier_minimum():
     fractional = estimate_frame(floor, path, seed=0, min_inliers_fraction=0.05)
     assert fractional.method == "floor_plane"
     assert "wallYawSource" not in fractional.summary()
+
+
+@pytest.mark.parametrize(("count", "method"), [(19, "trainer_up"), (20, "floor_plane")])
+def test_a_fractional_inlier_minimum_never_drops_below_twenty(count, method):
+    rng = np.random.default_rng(17)
+    # Every point lies on the floor near the path, so 5 % of the cloud is at most one point
+    # and the floor of twenty inliers is what decides.
+    floor = np.column_stack([
+        rng.uniform(0, 3, count), rng.uniform(0, 2, count), rng.normal(0, 0.005, count)
+    ])  # fmt: skip
+    centres = np.column_stack([np.linspace(0.5, 2.5, 20), np.full(20, 1.0), np.full(20, 1.5)])
+    path = CameraPath(centres, np.tile([1.0, 0.0, 0.0], (20, 1)))
+    est = estimate_frame(floor, path, seed=0, min_inliers_fraction=0.05)
+    assert est.method == method
 
 
 def _u_walk(rng: np.random.Generator, length: float, width: float) -> tuple[np.ndarray, np.ndarray]:
@@ -606,13 +669,19 @@ def test_a_camera_that_barely_moves_takes_the_mean_image_up(jitter):
 
 
 def test_a_straight_walk_takes_up_as_right_crossed_with_the_walk():
-    # Right is +Z and the walk is +X, so right x walk = +Y: the moving branch.
+    # Right is +Z and the walk is +X, so right x walk = +Y: the moving branch. The phone is
+    # pitched 25 degrees down, so each image-up tilts 25 degrees forward: their mean is 25
+    # degrees off the true up, and only the cross product (right stays level) is within 1.
+    pitch = math.radians(25.0)
     centres = np.column_stack([np.linspace(0, 5, 10), np.full(10, 1.5), np.zeros(10)])
     rights = np.tile([0.0, 0.0, 1.0], (10, 1))
-    ups = np.tile([0.0, 1.0, 0.0], (10, 1))
-    forwards = np.tile([1.0, 0.0, 0.0], (10, 1))
+    ups = np.tile([math.sin(pitch), math.cos(pitch), 0.0], (10, 1))
+    forwards = np.tile([math.cos(pitch), -math.sin(pitch), 0.0], (10, 1))
+    true_up = np.array([0.0, 1.0, 0.0])
+    mean = ups.mean(axis=0) / np.linalg.norm(ups.mean(axis=0))
+    assert np.degrees(np.arccos(mean @ true_up)) == pytest.approx(25.0, abs=1e-6)
     up = _up_from_cameras(centres, rights, ups, forwards, 5.0)
-    np.testing.assert_allclose(up, [0.0, 1.0, 0.0], atol=1e-9)
+    assert np.degrees(np.arccos(np.clip(up @ true_up, -1.0, 1.0))) < 1.0
 
 
 @pytest.mark.parametrize("n", [3, 40, 700, 1500])
