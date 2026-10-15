@@ -3,6 +3,12 @@ import { decomposeRenderTransform } from "./render/transform";
 import type { RenderFormat } from "./render/spark-scene";
 
 /**
+ * Render formats the viewer can draw: splat files (drawn by Spark) or a textured
+ * GLB (drawn by three.js). The generated contract only lists the splat formats.
+ */
+export type ViewerRenderFormat = RenderFormat | "glb";
+
+/**
  * Viewer-side checks of the persistent manifest and the short-lived delivery
  * envelope (README section 10). The API validates against the JSON Schema;
  * these checks protect the engine against values that would break rendering or
@@ -28,7 +34,7 @@ export type ViewerSource =
 export interface ResolvedSource {
   manifest: SceneManifest;
   renderUrl: string;
-  renderFormat: RenderFormat;
+  renderFormat: ViewerRenderFormat;
   collisionUrl: string | null;
   /** Expected SHA-256 (hex) of the collision asset, verified when present. */
   collisionSha256: string | null;

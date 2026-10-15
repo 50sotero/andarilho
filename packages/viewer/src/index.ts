@@ -10,6 +10,7 @@ export {
   createViewer,
   type CreateViewerOptions,
   type CreateSparkSceneArgs,
+  type CreateMeshSceneArgs,
   type CreateCollisionWorldArgs,
   type CollisionWorldLike,
   type QualitySetting,
@@ -41,6 +42,7 @@ export {
   sha256Hex,
   ViewerInputError,
   type ResolvedSource,
+  type ViewerRenderFormat,
   type ViewerSource,
 } from "./manifest";
 
@@ -133,6 +135,7 @@ export {
   type RenderTransform,
 } from "./render/transform";
 export type { RenderFormat, SparkSceneHandle } from "./render/spark-scene";
+export type { MeshSceneHandle, MeshSceneOptions } from "./render/mesh-scene";
 
 export {
   LayoutValidationError,

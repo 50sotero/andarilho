@@ -32,6 +32,7 @@ import {
   selectQualityProfile,
   type QualityProfileName,
 } from "./render/quality";
+import type { MeshSceneHandle } from "./render/mesh-scene";
 import type { RenderFormat, SparkSceneHandle } from "./render/spark-scene";
 import { layoutToCollisionMesh } from "./review/floorplan";
 import type { Aabb, CollisionMesh, Vec2, Vec3 } from "./types";
@@ -79,6 +80,14 @@ export interface CreateSparkSceneArgs {
   onProgress: (fraction: number | null) => void;
 }
 
+export interface CreateMeshSceneArgs {
+  renderer: RendererLike;
+  scene: Scene;
+  url: string;
+  maxAnisotropy: number;
+  onProgress: (fraction: number | null) => void;
+}
+
 export interface CreateCollisionWorldArgs {
   rapier: RapierModule;
   mesh: CollisionMesh;
@@ -92,6 +101,7 @@ export interface ViewerDependencies {
   isWebGL2Available(): boolean;
   createRenderer(): RendererLike;
   createSparkScene(args: CreateSparkSceneArgs): Promise<SparkSceneHandle> | SparkSceneHandle;
+  createMeshScene(args: CreateMeshSceneArgs): Promise<MeshSceneHandle> | MeshSceneHandle;
   initRapier(): Promise<RapierModule>;
   createCollisionWorld(args: CreateCollisionWorldArgs): CollisionWorldLike;
   fetchBytes(url: string, signal: AbortSignal): Promise<ArrayBuffer>;
@@ -127,8 +137,9 @@ async function defaultFetchBytes(url: string, signal: AbortSignal): Promise<Arra
 }
 
 /**
- * Resolves engine dependencies. Spark and Rapier (large, browser/WASM-heavy)
- * are imported lazily; nothing touches WebGL until createViewer runs.
+ * Resolves engine dependencies. Spark, the GLTF loader and Rapier (large,
+ * browser/WASM-heavy) are imported lazily; nothing touches WebGL until
+ * createViewer runs.
  */
 function resolveDependencies(partial: Partial<ViewerDependencies> | undefined): ViewerDependencies {
   return {
@@ -143,6 +154,16 @@ function resolveDependencies(partial: Partial<ViewerDependencies> | undefined): 
         format: args.format,
         worldFromDecodedRender: args.worldFromDecodedRender,
         splatBudget: args.splatBudget,
+        onProgress: args.onProgress,
+      });
+    },
+    async createMeshScene(args) {
+      const { createMeshScene } = await import("./render/mesh-scene");
+      return createMeshScene({
+        renderer: args.renderer as WebGLRenderer,
+        scene: args.scene,
+        url: args.url,
+        maxAnisotropy: args.maxAnisotropy,
         onProgress: args.onProgress,
       });
     },
@@ -219,7 +240,10 @@ export interface ViewerHandle {
   setLookSensitivity(radiansPerPixel: number): void;
   setReducedMotion(enabled: boolean): void;
   getDiagnostics(): ViewerDiagnostics;
-  /** Stops the loop, removes listeners/observers, frees Rapier/Spark/WebGL and removes the canvas. */
+  /**
+   * Stops the loop, removes listeners/observers, frees Rapier, the render scene
+   * (Spark or mesh) and WebGL, and removes the canvas.
+   */
   dispose(): void;
 }
 
@@ -286,6 +310,13 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
   let player: PlayerConfig | null = null;
   let renderer: RendererLike | null = null;
   let sparkScene: SparkSceneHandle | null = null;
+  let meshScene: MeshSceneHandle | null = null;
+  /**
+   * Bumped by each context-loss recovery. A render load that started under an older
+   * epoch is superseded (see isSuperseded): a scene it creates late is released
+   * rather than attached, and its outcome is not reported.
+   */
+  let renderEpoch = 0;
   let world: CollisionWorldLike | null = null;
   let collisionMesh: CollisionMesh | null = null;
   let collisionStats: CollisionMeshStats | null = null;
@@ -302,11 +333,12 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
   let governor: QualityGovernor | null = null;
   const scene = new Scene();
   const camera = new PerspectiveCamera(65, 1, 0.05, 250);
-  /** Removes the canvas and frees the render loop, splat scene, physics and input. */
+  /** Removes the canvas and frees the render loop, render scene, physics and input. */
   const release = (): void => {
     resources.disposeAll();
     world = null;
     sparkScene = null;
+    meshScene = null;
     overlay = null;
     input = null;
     renderer = null;
@@ -333,6 +365,7 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
     const dpr = typeof window !== "undefined" ? window.devicePixelRatio : 1;
     renderer?.setPixelRatio(effectivePixelRatio(dpr, profile));
     sparkScene?.setSplatBudget(profile.splatBudget);
+    meshScene?.setMaxAnisotropy(profile.maxAnisotropy);
     resize();
     dispatch({ type: "quality", quality: name });
   };
@@ -406,20 +439,61 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
 
   // --- loading -------------------------------------------------------------
 
-  const loadRender = async (): Promise<void> => {
+  /**
+   * True once the viewer is disposed, or a context-loss recovery has started after
+   * the load that began under `epoch`: that load no longer owns the render.
+   */
+  const isSuperseded = (epoch: number): boolean => disposed || epoch !== renderEpoch;
+
+  /**
+   * Creates and attaches the render scene for the source. A scene that is created
+   * after its load was superseded is disposed here, so it is never attached over
+   * the scene that replaced it.
+   */
+  const loadRender = async (epoch: number): Promise<void> => {
     if (!deps || !source || !renderer) return;
+    const format = source.renderFormat;
+    const onProgress = (fraction: number | null): void => {
+      if (!isSuperseded(epoch)) {
+        dispatch({ type: "progress", progress: { renderFraction: fraction } });
+      }
+    };
+    if (format === "glb") {
+      // The textured GLB is world-space with identity nodes (the worker's textured
+      // model), so manifest.worldFromDecodedRender is not applied to it again.
+      const mesh = await deps.createMeshScene({
+        renderer,
+        scene,
+        url: source.renderUrl,
+        maxAnisotropy: QUALITY_PROFILES[qualityName].maxAnisotropy,
+        onProgress,
+      });
+      if (isSuperseded(epoch)) {
+        mesh.dispose();
+        return;
+      }
+      meshScene = mesh;
+      resources.push(() => {
+        if (meshScene === mesh) meshScene = null;
+        mesh.dispose();
+      });
+      // A quality change made while the scene was being created did not reach it.
+      mesh.setMaxAnisotropy(QUALITY_PROFILES[qualityName].maxAnisotropy);
+      await mesh.initialized;
+      return;
+    }
     const handle = await deps.createSparkScene({
       renderer,
       scene,
       url: source.renderUrl,
-      format: source.renderFormat,
+      format,
       worldFromDecodedRender: source.manifest.worldFromDecodedRender,
       splatBudget: QUALITY_PROFILES[qualityName].splatBudget,
-      onProgress: (fraction) => {
-        if (!disposed) dispatch({ type: "progress", progress: { renderFraction: fraction } });
-      },
+      onProgress,
     });
-    if (disposed) {
+    if (isSuperseded(epoch)) {
+      // Nothing awaits this scene, so its failed load is not reported as unhandled.
+      void handle.initialized.catch(() => undefined);
       handle.dispose();
       return;
     }
@@ -561,8 +635,15 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
       setupEngine(deps);
       if (disposed) return;
 
-      const [renderResult, physicsResult] = await Promise.allSettled([loadRender(), loadPhysics()]);
+      const epoch = renderEpoch;
+      const [renderResult, physicsResult] = await Promise.allSettled([
+        loadRender(epoch),
+        loadPhysics(),
+      ]);
       if (disposed) return;
+      // A context-loss recovery started while loading and owns the render now; its
+      // outcome (including any cancellation seen above) is reported there instead.
+      if (epoch !== renderEpoch) return;
       if (renderResult.status === "rejected") {
         dispatch({ type: "progress", progress: { render: "failed" } });
         fail({
@@ -709,12 +790,16 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
     if (state.status !== "context-lost") return;
     const resume = state.resumeMode;
     const reason = state.inspectionReason;
+    // Starting a new epoch supersedes any render load still in flight.
+    const epoch = ++renderEpoch;
     dispatch({ type: "load-start" });
     try {
       sparkScene?.dispose();
       sparkScene = null;
-      await loadRender();
-      if (disposed) return;
+      meshScene?.dispose();
+      meshScene = null;
+      await loadRender(epoch);
+      if (isSuperseded(epoch)) return;
       const mode: ViewerMode = resume === "walkable" && world ? "walkable" : "inspection";
       dispatch({
         type: "loaded",
@@ -723,7 +808,7 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
         quality: qualityName,
       });
     } catch {
-      if (disposed) return;
+      if (isSuperseded(epoch)) return;
       fail({
         code: "context-lost",
         message: "The graphics context was lost and the scene could not be restored.",

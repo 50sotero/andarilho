@@ -28,6 +28,12 @@ describe("quality profiles", () => {
     expect(effectivePixelRatio(Number.NaN, QUALITY_PROFILES.desktop)).toBe(1);
   });
 
+  it("sets the texture anisotropy per profile", () => {
+    expect(QUALITY_PROFILES.low.maxAnisotropy).toBe(1);
+    expect(QUALITY_PROFILES.mobile.maxAnisotropy).toBe(4);
+    expect(QUALITY_PROFILES.desktop.maxAnisotropy).toBe(8);
+  });
+
   it("classifies devices", () => {
     expect(classifyDevice({ userAgent: IPHONE })).toBe("mobile");
     expect(classifyDevice({ userAgent: WINDOWS })).toBe("desktop");

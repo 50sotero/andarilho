@@ -12,6 +12,8 @@ export interface QualityProfile {
   maxDpr: number;
   /** Target visible splat budget (used as Spark's LoD splat count). */
   splatBudget: number;
+  /** Anisotropic filtering level for textured meshes; the GPU limit caps it. */
+  maxAnisotropy: number;
   /** Frame-time budget in milliseconds (30 FPS mobile, 60 FPS desktop). */
   frameBudgetMs: number;
 }
@@ -22,18 +24,21 @@ export const QUALITY_PROFILES: Readonly<Record<QualityProfileName, Readonly<Qual
       name: "low",
       maxDpr: 0.75,
       splatBudget: 400_000,
+      maxAnisotropy: 1,
       frameBudgetMs: 1000 / 30,
     }),
     mobile: Object.freeze({
       name: "mobile",
       maxDpr: 1.0,
       splatBudget: 750_000,
+      maxAnisotropy: 4,
       frameBudgetMs: 1000 / 30,
     }),
     desktop: Object.freeze({
       name: "desktop",
       maxDpr: 1.5,
       splatBudget: 1_500_000,
+      maxAnisotropy: 8,
       frameBudgetMs: 1000 / 60,
     }),
   });

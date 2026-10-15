@@ -1,5 +1,14 @@
 // @vitest-environment jsdom
 import type { DeliveryEnvelope } from "@andarilho/scene-contract";
+import {
+  BoxGeometry,
+  Group,
+  Mesh,
+  MeshStandardMaterial,
+  Quaternion,
+  Scene,
+  type WebGLRenderer,
+} from "three";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createViewer,
@@ -10,6 +19,7 @@ import {
 } from "../src/create-viewer";
 import type { RapierModule, SpawnValidation } from "../src/movement/collision";
 import { writeCollisionGlb } from "../src/movement/glb";
+import { createMeshScene, type MeshSceneHandle } from "../src/render/mesh-scene";
 import type { SparkSceneHandle } from "../src/render/spark-scene";
 import { layoutToCollisionMesh } from "../src/review/floorplan";
 import type { Vec3 } from "../src/types";
@@ -28,6 +38,14 @@ function deferred<T>() {
 
 const glbBytes = writeCollisionGlb(layoutToCollisionMesh(loadLayout()));
 
+/** A fake mesh scene: its load stays pending until the test settles it. */
+interface MeshFake {
+  handle: MeshSceneHandle;
+  dispose: ReturnType<typeof vi.fn>;
+  setMaxAnisotropy: ReturnType<typeof vi.fn>;
+  initialized: ReturnType<typeof deferred<void>>;
+}
+
 interface Harness {
   deps: Partial<ViewerDependencies>;
   renderer: RendererLike & {
@@ -43,7 +61,54 @@ interface Harness {
   world: CollisionWorldLike & { dispose: ReturnType<typeof vi.fn> };
   observers: { observe: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }[];
   createSparkScene: ReturnType<typeof vi.fn>;
+  /** The first mesh scene the engine creates. */
+  mesh: MeshFake;
+  /** Every mesh scene, in creation order. */
+  meshes: MeshFake[];
+  createMeshScene: ReturnType<typeof vi.fn>;
   loop: { current: ((t: number) => void) | null };
+}
+
+/**
+ * A mesh scene whose load stays pending until the test settles it. Disposing it
+ * cancels the load and rejects `initialized`, as the real scene does.
+ */
+function fakeMeshScene(): MeshFake {
+  const initialized = deferred<void>();
+  // Nothing awaits a load cancelled after disposal, so its rejection is marked handled.
+  initialized.promise.catch(() => undefined);
+  const dispose = vi.fn(() =>
+    initialized.reject(new DOMException("The scene load was cancelled", "AbortError")),
+  );
+  const setMaxAnisotropy = vi.fn();
+  const handle: MeshSceneHandle = {
+    root: null,
+    initialized: initialized.promise,
+    setMaxAnisotropy,
+    dispose,
+  };
+  return { handle, dispose, setMaxAnisotropy, initialized };
+}
+
+/** A Spark scene whose load stays pending until the test settles it. */
+interface SparkFake {
+  handle: SparkSceneHandle;
+  dispose: ReturnType<typeof vi.fn>;
+  initialized: ReturnType<typeof deferred<void>>;
+}
+
+function fakeSparkScene(): SparkFake {
+  const initialized = deferred<void>();
+  initialized.promise.catch(() => undefined);
+  const dispose = vi.fn();
+  const handle = {
+    splats: {},
+    spark: {},
+    initialized: initialized.promise,
+    setSplatBudget: vi.fn(),
+    dispose,
+  } as unknown as SparkSceneHandle;
+  return { handle, dispose, initialized };
 }
 
 function harness(spawn: SpawnValidation = { ok: true, feet: [2, 0, 0], supportY: 0 }): Harness {
@@ -51,6 +116,7 @@ function harness(spawn: SpawnValidation = { ok: true, feet: [2, 0, 0], supportY:
   const loop: Harness["loop"] = { current: null };
   const renderer = {
     domElement: canvas,
+    capabilities: { getMaxAnisotropy: () => 16 },
     setAnimationLoop: vi.fn((cb: ((t: number) => void) | null) => {
       loop.current = cb;
     }),
@@ -94,10 +160,19 @@ function harness(spawn: SpawnValidation = { ok: true, feet: [2, 0, 0], supportY:
     }
   }
   const createSparkScene = vi.fn(() => handle);
+  const meshes: MeshFake[] = [fakeMeshScene()];
+  let meshCalls = 0;
+  const createMeshScene = vi.fn(() => {
+    // The Nth call gets the Nth scene, as the real factory creates a new one per load.
+    meshCalls += 1;
+    if (meshCalls > meshes.length) meshes.push(fakeMeshScene());
+    return meshes[meshCalls - 1]!.handle;
+  });
   const deps: Partial<ViewerDependencies> = {
     isWebGL2Available: () => true,
     createRenderer: () => renderer,
     createSparkScene,
+    createMeshScene,
     initRapier: async () => ({}) as RapierModule,
     createCollisionWorld: () => world,
     fetchBytes: async () => glbBytes.slice().buffer,
@@ -108,11 +183,24 @@ function harness(spawn: SpawnValidation = { ok: true, feet: [2, 0, 0], supportY:
     deps,
     renderer,
     spark: { handle, dispose: sparkDispose, initialized },
+    mesh: meshes[0]!,
+    meshes,
     world,
     observers,
     createSparkScene,
+    createMeshScene,
     loop,
   };
+}
+
+const GLB_URL = "https://cdn.example.test/scene.glb?sig=1";
+
+/** An envelope whose render asset is a textured GLB (the contract's format union omits "glb"). */
+function glbEnvelope(): DeliveryEnvelope {
+  const env = envelope();
+  env.manifest.assets.render.format = "glb" as unknown as "ply";
+  env.assetUrls.render = { url: GLB_URL, sha256: "0".repeat(64), bytes: 1, format: "glb" };
+  return env;
 }
 
 function envelope(): DeliveryEnvelope {
@@ -420,6 +508,260 @@ describe("viewer lifecycle", () => {
     expect(viewer.getState()).toMatchObject({ quality: "low" });
     expect(h.spark.handle.setSplatBudget).toHaveBeenCalledWith(400_000);
     expect(viewer.getDiagnostics().qualitySetting).toBe("low");
+    viewer.dispose();
+  });
+
+  it("draws a GLB through the mesh scene rather than Spark", async () => {
+    const h = harness();
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    await vi.waitFor(() => expect(h.createMeshScene).toHaveBeenCalled());
+    expect(h.createSparkScene).not.toHaveBeenCalled();
+    expect(h.createMeshScene).toHaveBeenCalledWith(
+      expect.objectContaining({ url: GLB_URL, maxAnisotropy: 8 }),
+    );
+
+    const args = h.createMeshScene.mock.calls[0]![0] as { onProgress: (f: number | null) => void };
+    args.onProgress(0.5);
+    expect(viewer.getState()).toMatchObject({ progress: { renderFraction: 0.5 } });
+
+    h.mesh.initialized.resolve();
+    await vi.waitFor(() =>
+      expect(viewer.getState()).toMatchObject({ status: "ready", mode: "walkable" }),
+    );
+    viewer.dispose();
+  });
+
+  it("applies quality changes to the mesh scene's anisotropy", async () => {
+    const h = harness();
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    h.mesh.initialized.resolve();
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+    viewer.setQuality("mobile");
+    expect(h.mesh.setMaxAnisotropy).toHaveBeenLastCalledWith(4);
+    viewer.setQuality("low");
+    expect(h.mesh.setMaxAnisotropy).toHaveBeenLastCalledWith(1);
+    expect(h.createSparkScene).not.toHaveBeenCalled();
+    viewer.dispose();
+  });
+
+  it("applies a quality change made while the mesh scene is still being created", async () => {
+    const h = harness();
+    const created = deferred<MeshSceneHandle>();
+    h.deps.createMeshScene = vi.fn(() => created.promise);
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    await vi.waitFor(() => expect(h.deps.createMeshScene).toHaveBeenCalledTimes(1));
+    // No scene exists yet, so this change cannot reach it directly.
+    viewer.setQuality("low");
+    created.resolve(h.mesh.handle);
+    await vi.waitFor(() => expect(h.mesh.setMaxAnisotropy).toHaveBeenLastCalledWith(1));
+    viewer.dispose();
+  });
+
+  it("disposes the mesh scene with the viewer", async () => {
+    const h = harness();
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    h.mesh.initialized.resolve();
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+    viewer.dispose();
+    expect(h.mesh.dispose).toHaveBeenCalledTimes(1);
+    expect(h.spark.dispose).not.toHaveBeenCalled();
+  });
+
+  it("reloads the mesh scene after WebGL context loss", async () => {
+    const h = harness();
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    h.mesh.initialized.resolve();
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+    viewer.enterWalk();
+    h.renderer.domElement.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    h.renderer.domElement.dispatchEvent(new Event("webglcontextrestored"));
+    await vi.waitFor(() => expect(h.createMeshScene).toHaveBeenCalledTimes(2));
+    // The first scene is released; the reloaded one is the attached render.
+    expect(h.meshes[0]!.dispose).toHaveBeenCalledTimes(1);
+    expect(h.meshes[1]!.dispose).not.toHaveBeenCalled();
+    h.meshes[1]!.initialized.resolve();
+    await vi.waitFor(() =>
+      expect(viewer.getState()).toMatchObject({ status: "ready", mode: "walkable" }),
+    );
+    expect(h.createSparkScene).not.toHaveBeenCalled();
+    viewer.dispose();
+    expect(h.meshes[1]!.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers when the context is lost while the first GLB is still downloading", async () => {
+    const h = harness();
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    await vi.waitFor(() => expect(h.createMeshScene).toHaveBeenCalledTimes(1));
+    h.renderer.domElement.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    expect(viewer.getState().status).toBe("context-lost");
+    h.renderer.domElement.dispatchEvent(new Event("webglcontextrestored"));
+    // The recovery cancels the first download (its load rejects) and starts another.
+    await vi.waitFor(() => expect(h.createMeshScene).toHaveBeenCalledTimes(2));
+    expect(h.meshes[0]!.dispose).toHaveBeenCalledTimes(1);
+    h.meshes[1]!.initialized.resolve();
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+    expect(h.renderer.dispose).not.toHaveBeenCalled();
+    viewer.dispose();
+    expect(h.meshes[1]!.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("recovers through the real mesh scene when the first download is cancelled", async () => {
+    // Only the scene's own loader is real: its downloads wait for the test and reject
+    // when aborted, as fetch does, so the cancellation takes the production path.
+    const h = harness();
+    const answers: ((response: Response) => void)[] = [];
+    const download = ((_url: string, init?: RequestInit) =>
+      new Promise<Response>((resolve, reject) => {
+        answers.push(resolve);
+        init?.signal?.addEventListener("abort", () =>
+          reject(new DOMException("The download was aborted", "AbortError")),
+        );
+      })) as unknown as typeof fetch;
+    h.deps.createMeshScene = (args) =>
+      createMeshScene({
+        renderer: args.renderer as WebGLRenderer,
+        scene: args.scene,
+        url: args.url,
+        maxAnisotropy: args.maxAnisotropy,
+        onProgress: args.onProgress,
+        fetch: download,
+        parse: async () => new Group(),
+      });
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    await vi.waitFor(() => expect(answers).toHaveLength(1));
+
+    h.renderer.domElement.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    h.renderer.domElement.dispatchEvent(new Event("webglcontextrestored"));
+    await vi.waitFor(() => expect(answers).toHaveLength(2));
+    answers[1]!(new Response(new Uint8Array(8)));
+
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+    viewer.dispose();
+  });
+
+  it("releases a mesh scene that arrives after a recovery, and keeps the recovered one", async () => {
+    const h = harness();
+    const late = fakeMeshScene();
+    const recovered = fakeMeshScene();
+    const third = fakeMeshScene();
+    const pending = deferred<MeshSceneHandle>();
+    // The first load is still creating its scene when the context is lost and restored.
+    h.deps.createMeshScene = vi
+      .fn()
+      .mockReturnValueOnce(pending.promise)
+      .mockReturnValueOnce(recovered.handle)
+      .mockReturnValueOnce(third.handle);
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    await vi.waitFor(() => expect(h.deps.createMeshScene).toHaveBeenCalledTimes(1));
+    const lose = () =>
+      h.renderer.domElement.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    const restore = () => h.renderer.domElement.dispatchEvent(new Event("webglcontextrestored"));
+
+    lose();
+    restore();
+    await vi.waitFor(() => expect(h.deps.createMeshScene).toHaveBeenCalledTimes(2));
+    recovered.initialized.resolve();
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+
+    // The superseded load's scene finishes last: it must be released, not attached.
+    pending.resolve(late.handle);
+    await vi.waitFor(() => expect(late.dispose).toHaveBeenCalledTimes(1));
+    expect(recovered.dispose).not.toHaveBeenCalled();
+    expect(viewer.getState().status).toBe("ready");
+
+    viewer.setQuality("low");
+    expect(recovered.setMaxAnisotropy).toHaveBeenLastCalledWith(1);
+    expect(late.setMaxAnisotropy).not.toHaveBeenCalled();
+
+    // A second loss releases the recovered scene, not an orphan.
+    lose();
+    restore();
+    await vi.waitFor(() => expect(h.deps.createMeshScene).toHaveBeenCalledTimes(3));
+    expect(recovered.dispose).toHaveBeenCalledTimes(1);
+    expect(late.dispose).toHaveBeenCalledTimes(1);
+    viewer.dispose();
+    expect(third.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a Spark scene that arrives after a recovery, and keeps the recovered one", async () => {
+    const h = harness();
+    const late = fakeSparkScene();
+    const recovered = fakeSparkScene();
+    const pending = deferred<SparkSceneHandle>();
+    h.deps.createSparkScene = vi
+      .fn()
+      .mockReturnValueOnce(pending.promise)
+      .mockReturnValueOnce(recovered.handle);
+    const { viewer } = start(h);
+    await vi.waitFor(() => expect(h.deps.createSparkScene).toHaveBeenCalledTimes(1));
+    h.renderer.domElement.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    h.renderer.domElement.dispatchEvent(new Event("webglcontextrestored"));
+    await vi.waitFor(() => expect(h.deps.createSparkScene).toHaveBeenCalledTimes(2));
+    recovered.initialized.resolve();
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+
+    pending.resolve(late.handle);
+    await vi.waitFor(() => expect(late.dispose).toHaveBeenCalledTimes(1));
+    expect(recovered.dispose).not.toHaveBeenCalled();
+    viewer.setQuality("low");
+    expect(recovered.handle.setSplatBudget).toHaveBeenLastCalledWith(400_000);
+    expect(late.handle.setSplatBudget).not.toHaveBeenCalled();
+    viewer.dispose();
+    expect(recovered.dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not attach a GLB's transform from the manifest", async () => {
+    // The textured GLB is already world space with identity nodes, so the manifest's
+    // render transform (for the splat formats) must not move it. The writer contract is
+    // not in this repo yet; this pins the viewer side.
+    const h = harness();
+    const scene = new Scene();
+    const cube = new Group();
+    cube.add(new Mesh(new BoxGeometry(), new MeshStandardMaterial()));
+    h.deps.createMeshScene = (args) =>
+      createMeshScene({
+        renderer: args.renderer as WebGLRenderer,
+        scene,
+        url: args.url,
+        maxAnisotropy: args.maxAnisotropy,
+        onProgress: args.onProgress,
+        fetch: (async () => new Response(new Uint8Array(8))) as unknown as typeof fetch,
+        parse: async () => cube,
+      });
+    const env = glbEnvelope();
+    // A 90 degree turn about +Y, plus a 2x scale: valid for splats, wrong for the GLB.
+    env.manifest.worldFromDecodedRender = [0, 0, -2, 0, 0, 2, 0, 0, 2, 0, 0, 0, 0, 0, 0, 1];
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: env } });
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+
+    expect(scene.children).toContain(cube);
+    expect(cube.position.toArray()).toEqual([0, 0, 0]);
+    expect(cube.quaternion.equals(new Quaternion())).toBe(true);
+    expect(cube.scale.toArray()).toEqual([1, 1, 1]);
+    viewer.dispose();
+  });
+
+  it("recovers from a second context loss during the first reload", async () => {
+    const h = harness();
+    const { viewer } = start(h, { source: { kind: "delivery", envelope: glbEnvelope() } });
+    h.mesh.initialized.resolve();
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+    const lose = () =>
+      h.renderer.domElement.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+    const restore = () => h.renderer.domElement.dispatchEvent(new Event("webglcontextrestored"));
+
+    lose();
+    restore();
+    await vi.waitFor(() => expect(h.createMeshScene).toHaveBeenCalledTimes(2));
+    // The reload is still downloading when the context is lost again.
+    lose();
+    restore();
+    await vi.waitFor(() => expect(h.createMeshScene).toHaveBeenCalledTimes(3));
+    expect(h.meshes[1]!.dispose).toHaveBeenCalledTimes(1);
+    h.meshes[2]!.initialized.resolve();
+    await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
+    expect(h.createMeshScene).toHaveBeenCalledTimes(3);
+    expect(h.meshes[2]!.dispose).not.toHaveBeenCalled();
     viewer.dispose();
   });
 });
