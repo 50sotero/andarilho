@@ -17,7 +17,7 @@ import { expiryFromDays } from "@/features/sharing/SharePanel";
 import { awaitingRevision, fallbackLayout } from "@/features/projects/PrivateWalk";
 import { removalMode, startReadiness } from "@/features/capture/CaptureFlow";
 import { rejectionMessage } from "@/features/uploads/UploadList";
-import { envelopeExpired } from "@/components/viewer/envelope";
+import { RefreshBudget, envelopeExpired } from "@/components/viewer/envelope";
 import type { DeliveryEnvelope, Layout, Run, SceneDetail } from "@/lib/api/types";
 import fixture from "@andarilho/scene-contract/fixtures/synthetic-two-room.layout.json";
 
@@ -232,6 +232,20 @@ describe("delivery envelope expiry", () => {
   });
   it("treats an unparseable expiry as expired", () => {
     expect(envelopeExpired({ expiresAt: "soon" }, now)).toBe(true);
+  });
+});
+
+describe("envelope refresh budget", () => {
+  it("stops a failure that keeps recurring", () => {
+    const budget = new RefreshBudget(2);
+    expect([budget.take(), budget.take(), budget.take()]).toEqual([true, true, false]);
+  });
+  it("starts over after a successful load, so a later failure can refresh again", () => {
+    const budget = new RefreshBudget(2);
+    budget.take();
+    budget.take();
+    budget.reset();
+    expect([budget.take(), budget.take(), budget.take()]).toEqual([true, true, false]);
   });
 });
 

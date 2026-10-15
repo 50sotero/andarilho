@@ -4,7 +4,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { DeliveryEnvelope } from "@andarilho/scene-contract";
 import { canWalk, createViewer } from "@andarilho/viewer";
 import { Button } from "@/components/ui";
-import { envelopeExpired } from "./envelope";
+import { RefreshBudget, envelopeExpired } from "./envelope";
 
 /* -------------------------------------------------------------------------- */
 /* Viewer adapter: the only place that knows @andarilho/viewer's API.          */
@@ -106,9 +106,15 @@ export interface ViewerCanvasProps {
   allowCollisionOverlay?: boolean;
   /** Non-3D alternative (e.g. a layout plan) shown on WebGL failure or on request. */
   fallback?: ReactNode;
-  /** Called when the engine reports a recoverable failure (e.g. expired asset URLs). */
+  /**
+   * Asks for a fresh envelope after a recoverable failure (e.g. expired asset URLs).
+   * The viewer bounds how often it asks for one failure, so callers need no limit.
+   */
   onRecoverableError?: () => void;
 }
+
+/** Automatic envelope refreshes per failure, before the page stops asking. */
+const MAX_ENVELOPE_REFRESHES = 2;
 
 const QUALITY_OPTIONS: { value: QualityChoice; label: string }[] = [
   { value: "auto", label: "Automatic" },
@@ -135,6 +141,10 @@ export default function ViewerCanvas({
   const [prefer2d, setPrefer2d] = useState(false);
   // The signed poster link this page saw fail to load (expired, most likely).
   const [brokenPoster, setBrokenPoster] = useState<string | null>(null);
+  // The engine's budget starts over once a scene loads, the poster's once a poster
+  // loads; kept apart so a poster that loads cannot keep a failing engine refreshing.
+  const [engineRefreshes] = useState(() => new RefreshBudget(MAX_ENVELOPE_REFRESHES));
+  const [posterRefreshes] = useState(() => new RefreshBudget(MAX_ENVELOPE_REFRESHES));
   const qualityId = useId();
   const overlayId = useId();
   const helpId = useId();
@@ -171,8 +181,11 @@ export default function ViewerCanvas({
   }, [envelope, title, prefer2d]);
 
   useEffect(() => {
-    if (view.kind === "error" && view.recoverable) onRecoverableError?.();
-  }, [view, onRecoverableError]);
+    if (view.kind === "ready" || view.kind === "walking") engineRefreshes.reset();
+    else if (view.kind === "error" && view.recoverable && engineRefreshes.take()) {
+      onRecoverableError?.();
+    }
+  }, [view, onRecoverableError, engineRefreshes]);
 
   const walkable = view.kind === "ready" && view.walkable;
   const walking = view.kind === "walking";
@@ -296,10 +309,11 @@ export default function ViewerCanvas({
               alt={`Preview image of ${title}`}
               referrerPolicy="no-referrer"
               className="w-full rounded-md"
+              onLoad={() => posterRefreshes.reset()}
               onError={() => {
                 // Hide the broken image and fetch a fresh envelope; its new link shows.
                 setBrokenPoster(posterUrl);
-                onRecoverableError?.();
+                if (posterRefreshes.take()) onRecoverableError?.();
               }}
             />
           ) : null}

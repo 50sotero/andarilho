@@ -1,13 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Card } from "@/components/ui";
 import { ViewerClient } from "@/components/viewer/ViewerClient";
 import { api } from "@/lib/api/client";
 import { ApiError } from "@/lib/api/errors";
 import type { DeliveryEnvelope } from "@/lib/api/types";
-
-const MAX_ENVELOPE_REFRESHES = 2;
 
 /**
  * Read-only published scene. The token is exchanged through the same-origin
@@ -16,7 +14,6 @@ const MAX_ENVELOPE_REFRESHES = 2;
 export function PublicScene({ token }: { token: string }) {
   const [envelope, setEnvelope] = useState<DeliveryEnvelope | null>(null);
   const [problem, setProblem] = useState<"unavailable" | "error" | null>(null);
-  const refreshes = useRef(0);
 
   const exchange = useCallback(
     (signal?: { cancelled: boolean }): Promise<void> =>
@@ -47,11 +44,7 @@ export function PublicScene({ token }: { token: string }) {
     };
   }, [exchange]);
 
-  const onRecoverableError = useCallback(() => {
-    if (refreshes.current >= MAX_ENVELOPE_REFRESHES) return;
-    refreshes.current += 1;
-    void exchange();
-  }, [exchange]);
+  const onRecoverableError = useCallback(() => void exchange(), [exchange]);
 
   if (problem === "unavailable") {
     return (

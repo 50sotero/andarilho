@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Card, ErrorNotice } from "@/components/ui";
 import { ViewerClient } from "@/components/viewer/ViewerClient";
 import { LayoutPlan } from "@/features/review/LayoutPlan";
@@ -10,8 +10,6 @@ import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
 import type { DeliveryEnvelope, Layout, SceneDetail } from "@/lib/api/types";
 import { usePolling } from "@/lib/use-polling";
 import { useProject } from "./use-project";
-
-const MAX_ENVELOPE_REFRESHES = 2;
 
 /** Picks the revision to walk privately: the current draft if packaged, else the newest valid one. */
 export function walkableRevisionId(scene: SceneDetail): string | null {
@@ -56,7 +54,6 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
   const [envelope, setEnvelope] = useState<DeliveryEnvelope | null>(null);
   const [error, setError] = useState<FriendlyError | null>(null);
   const [noRevision, setNoRevision] = useState(false);
-  const refreshes = useRef(0);
   const sceneId = detail?.scene?.id ?? null;
   // Viewers cannot read draft review data; they walk the published (approved) revision.
   const viewerRevisionId =
@@ -120,11 +117,7 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
   );
 
   // Delivery URLs are short-lived: fetch a fresh envelope for the same revision when needed.
-  const onRecoverableError = useCallback(() => {
-    if (refreshes.current >= MAX_ENVELOPE_REFRESHES) return;
-    refreshes.current += 1;
-    void fetchEnvelope();
-  }, [fetchEnvelope]);
+  const onRecoverableError = useCallback(() => void fetchEnvelope(), [fetchEnvelope]);
 
   const base = `/projects/${encodeURIComponent(projectId)}`;
   const layout = fallbackLayout(scene, envelope);
