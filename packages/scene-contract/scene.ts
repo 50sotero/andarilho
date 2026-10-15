@@ -3,6 +3,8 @@
 
 export const SCHEMA_VERSION = "2.0";
 export const LAYOUT_SCHEMA_VERSION = "1.0";
+/** The most bytes a layout save's JSON body may hold; the API and web proxy agree. */
+export const MAX_LAYOUT_SAVE_BYTES = 4194304;
 
 export interface AssetUrl {
   url: string;

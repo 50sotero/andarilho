@@ -186,6 +186,13 @@ The JSON Schemas cannot express the size limits or the rule that `min` is below 
 The API models, the worker's `validate_layout` and the browser's `validateLayout` check
 them, and a layout that breaks one is refused.
 
+A layout save is also limited in bytes. The layout's counts alone would allow bodies of
+tens of megabytes, so the whole JSON body of `PUT /v1/scenes/{id}/layout` is limited to
+`MAX_LAYOUT_SAVE_BYTES` (4 MiB, exported by `packages/scene-contract/scene.ts`). The API
+answers a larger save with `413 PAYLOAD_TOO_LARGE` before parsing it. The web proxy
+forwards layout saves up to the same size, so every layout the API accepts can be saved
+from the browser. Other requests through the proxy are limited to 1 MiB.
+
 ## Routes
 
 | Route                                    | Request                                                                                                            | Response                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |

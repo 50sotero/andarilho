@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from andarilho_api.ai.client import AIClient
 from andarilho_api.auth import JwksCache, JwksFetcher, TokenVerifier
+from andarilho_api.bodylimit import LayoutSizeLimitMiddleware
 from andarilho_api.db import make_engine, make_session_factory
 from andarilho_api.domain.imports import fetch_listing
 from andarilho_api.errors import RequestContextMiddleware, install_error_handlers
@@ -57,6 +58,8 @@ def create_app(
     app.state.listing_fetcher = listing_fetcher or fetch_listing
 
     install_error_handlers(app)
+    # Inside the request context (its 413 carries the request ID) and inside CORS.
+    app.add_middleware(LayoutSizeLimitMiddleware)
     if settings.cors_allowed_origins:
         app.add_middleware(
             CORSMiddleware,

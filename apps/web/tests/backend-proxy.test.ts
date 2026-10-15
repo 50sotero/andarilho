@@ -1,9 +1,12 @@
+import { MAX_LAYOUT_SAVE_BYTES } from "@andarilho/scene-contract";
 import { describe, expect, it, vi } from "vitest";
 import {
   adviceTimeoutMs,
+  bodyLimitBytes,
   clientAddress,
   createBackendProxyHandler,
   isAllowedOrigin,
+  MAX_PROXY_BODY_BYTES,
   UPSTREAM_TIMEOUT_MS,
   upstreamTimeoutMs,
   validateProxyPath,
@@ -240,6 +243,38 @@ describe("backend proxy handler", () => {
     );
     expect(res.status).toBe(413);
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("forwards a layout save up to the contract's byte limit, which the API also enforces", async () => {
+    expect(bodyLimitBytes("PUT", "v1/scenes/s1/layout", { maxBodyBytes: 10 })).toBe(
+      MAX_LAYOUT_SAVE_BYTES,
+    );
+    expect(bodyLimitBytes("GET", "v1/scenes/s1/layout", {})).toBe(MAX_PROXY_BODY_BYTES);
+    expect(bodyLimitBytes("PUT", "v1/scenes/s1", {})).toBe(MAX_PROXY_BODY_BYTES);
+
+    const { handle, fetchMock } = setup();
+    const segments = ["v1", "scenes", "s1", "layout"];
+    const save = (bytes: number) =>
+      handle(
+        req("v1/scenes/s1/layout", {
+          method: "PUT",
+          headers: { Origin: APP, "Content-Type": "application/json" },
+          body: '{"layout": {}}'.padEnd(bytes),
+        }),
+        segments,
+      );
+    // Larger than any other request may be, but within the layout limit.
+    expect((await save(MAX_PROXY_BODY_BYTES + 1)).status).toBe(200);
+    expect((await save(MAX_LAYOUT_SAVE_BYTES)).status).toBe(200);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+
+    const over = await save(MAX_LAYOUT_SAVE_BYTES + 1);
+    expect(over.status).toBe(413);
+    const { error } = await over.json();
+    expect(error.code).toBe("PAYLOAD_TOO_LARGE");
+    expect(error.message).toContain("layout");
+    expect(error.suggestedAction).toBeTruthy();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
   it("maps upstream connection failures to the error envelope", async () => {

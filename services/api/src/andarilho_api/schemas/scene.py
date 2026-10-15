@@ -17,6 +17,10 @@ from pydantic.alias_generators import to_camel
 # Gaussian-splat render (1.0) with a textured mesh; the layout format is unchanged.
 SCHEMA_VERSION = "2.0"
 LAYOUT_SCHEMA_VERSION = "1.0"
+# The whole JSON body of a layout save, in bytes. The layout's counts alone would allow
+# bodies of tens of megabytes; the API and the web proxy both enforce this one limit, so
+# a layout the API accepts is one the browser can save.
+MAX_LAYOUT_SAVE_BYTES = 4 * 1024 * 1024
 
 Id = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]

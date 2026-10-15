@@ -10,6 +10,8 @@
  * Kept free of Next.js imports so it can be unit-tested with fake dependencies.
  */
 
+import { MAX_LAYOUT_SAVE_BYTES } from "@andarilho/scene-contract";
+
 export const MAX_PROXY_BODY_BYTES = 1024 * 1024; // JSON only; media goes straight to storage.
 export const UPSTREAM_TIMEOUT_MS = 30_000;
 /** The API's default AI_TIMEOUT_SECONDS (services/api settings). */
@@ -27,6 +29,8 @@ const ALLOWED_RESOURCES = new Set([
 ]);
 /** Optional AI advice for a failed run waits on the provider (README section 16). */
 const ADVICE_PATH = /^v1\/runs\/[^/]+\/advice$/;
+/** A layout save is bounded by the contract's own byte limit, which the API enforces too. */
+const LAYOUT_SAVE_PATH = /^v1\/scenes\/[^/]+\/layout$/;
 const PUBLIC_PATHS = new Set(["v1/public/scenes/delivery"]);
 const SAFE_METHODS = new Set(["GET", "HEAD"]);
 
@@ -86,6 +90,20 @@ export function upstreamTimeoutMs(
     return deps.adviceTimeoutMs ?? adviceTimeoutMs(DEFAULT_AI_TIMEOUT_SECONDS);
   }
   return deps.timeoutMs ?? UPSTREAM_TIMEOUT_MS;
+}
+
+function isLayoutSave(method: string, path: string): boolean {
+  return method === "PUT" && LAYOUT_SAVE_PATH.test(path);
+}
+
+/** The request-body limit for a validated path. */
+export function bodyLimitBytes(
+  method: string,
+  path: string,
+  deps: Pick<BackendProxyDeps, "maxBodyBytes">,
+): number {
+  if (isLayoutSave(method, path)) return MAX_LAYOUT_SAVE_BYTES;
+  return deps.maxBodyBytes ?? MAX_PROXY_BODY_BYTES;
 }
 
 /** Mutations must come from our own origin (CSRF defence for cookie authentication). */
@@ -216,7 +234,19 @@ export function createBackendProxyHandler(deps: BackendProxyDeps) {
 
     let body: ArrayBuffer | undefined;
     if (!SAFE_METHODS.has(method)) {
-      const read = await readBoundedBody(request, deps.maxBodyBytes ?? MAX_PROXY_BODY_BYTES);
+      const read = await readBoundedBody(request, bodyLimitBytes(method, validated.path, deps));
+      if (read === "too_large" && isLayoutSave(method, validated.path)) {
+        const mib = MAX_LAYOUT_SAVE_BYTES / (1024 * 1024);
+        return errorResponse(
+          413,
+          "PAYLOAD_TOO_LARGE",
+          `The layout is too large to save (at most ${mib} MiB).`,
+          {
+            suggestedAction: "Remove some walls, obstacles or furniture, then save again.",
+            requestId,
+          },
+        );
+      }
       if (read === "too_large") {
         return errorResponse(413, "PAYLOAD_TOO_LARGE", "The request body is too large.", {
           requestId,

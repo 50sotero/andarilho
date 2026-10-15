@@ -29,6 +29,7 @@ from pydantic.json_schema import models_json_schema  # noqa: E402
 
 from andarilho_api.schemas.scene import (  # noqa: E402
     LAYOUT_SCHEMA_VERSION,
+    MAX_LAYOUT_SAVE_BYTES,
     SCHEMA_VERSION,
     DeliveryEnvelope,
     Layout,
@@ -130,7 +131,9 @@ def typescript(defs: dict[str, Any]) -> str:
     out = [
         HEADER,
         f'export const SCHEMA_VERSION = "{SCHEMA_VERSION}";',
-        f'export const LAYOUT_SCHEMA_VERSION = "{LAYOUT_SCHEMA_VERSION}";\n',
+        f'export const LAYOUT_SCHEMA_VERSION = "{LAYOUT_SCHEMA_VERSION}";',
+        "/** The most bytes a layout save's JSON body may hold; the API and web proxy agree. */",
+        f"export const MAX_LAYOUT_SAVE_BYTES = {MAX_LAYOUT_SAVE_BYTES};\n",
     ]
     for name in sorted(defs):
         schema = defs[name]

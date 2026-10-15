@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlparse
@@ -10,6 +12,7 @@ import pytest
 from factories import create_project, layout, legacy_manifest, scene, verified_upload
 from sqlalchemy import select
 
+from andarilho_api.bodylimit import LayoutSizeLimitMiddleware
 from andarilho_api.domain.canonical import sha256_hex
 from andarilho_api.models import (
     AuditEvent,
@@ -23,6 +26,7 @@ from andarilho_api.models import (
     ShareLink,
     Upload,
 )
+from andarilho_api.schemas.scene import MAX_LAYOUT_SAVE_BYTES
 
 
 @pytest.fixture
@@ -122,6 +126,47 @@ def test_layout_save(client, auth, db, setup):
         ).status_code
         == 403
     )
+
+
+def test_a_layout_save_is_bounded_in_bytes_as_the_web_proxy_bounds_it(client, auth, setup):
+    url = f"/v1/scenes/{setup['sceneId']}/layout"
+    body = json.dumps({"baseRevisionId": setup["revisionId"], "layout": layout()})
+    headers = auth(
+        **{"If-Match": '"1"', "Content-Type": "application/json", "X-Request-ID": "too-large-1"}
+    )
+    # Valid JSON padded with whitespace: only its size can refuse it.
+    over = client.put(url, content=body.ljust(MAX_LAYOUT_SAVE_BYTES + 1), headers=headers)
+    assert over.status_code == 413
+    error = over.json()["error"]
+    assert error["code"] == "PAYLOAD_TOO_LARGE" and error["requestId"] == "too-large-1"
+    assert error["suggestedAction"]
+    assert over.headers["Cache-Control"] == "private, no-store"
+    # Nothing was saved, so the scene is still at version 1, and a body at the limit saves.
+    at_limit = client.put(url, content=body.ljust(MAX_LAYOUT_SAVE_BYTES), headers=headers)
+    assert at_limit.status_code == 202, at_limit.text
+
+
+def test_the_layout_limit_hands_a_chunked_body_on_whole():
+    received = []
+
+    async def app(scope, receive, send):
+        while True:
+            message = await receive()
+            received.append(message["body"])
+            if not message.get("more_body"):
+                return
+
+    chunks = iter([
+        {"type": "http.request", "body": b'{"a": ', "more_body": True},
+        {"type": "http.request", "body": b"1}", "more_body": False},
+    ])  # fmt: skip
+
+    async def receive():
+        return next(chunks)
+
+    scope = {"type": "http", "method": "PUT", "path": "/v1/scenes/s1/layout", "headers": []}
+    asyncio.run(LayoutSizeLimitMiddleware(app, limit=8)(scope, receive, None))
+    assert received == [b'{"a": 1}']
 
 
 def test_approve_rules(client, auth, db):
