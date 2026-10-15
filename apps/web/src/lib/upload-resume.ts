@@ -271,7 +271,10 @@ export function partRange(
  */
 
 export const CREATION_STORAGE_PREFIX = "andarilho:upload-create:";
-/** The API keeps idempotency records for a day by default (IDEMPOTENCY_TTL_SECONDS). */
+/**
+ * The API keeps idempotency records at least this long: it refuses an
+ * IDEMPOTENCY_TTL_SECONDS below a day, and its settings test checks this value.
+ */
 export const CREATION_KEY_TTL_MS = 24 * 60 * 60 * 1000;
 const CREATION_KEY = /^[A-Za-z0-9._:-]{8,255}$/;
 

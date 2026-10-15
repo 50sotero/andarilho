@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -14,10 +16,13 @@ from andarilho_api.domain.recipes import RECIPES
 from andarilho_api.settings import (
     CAPTURE_SET_MAX_INPUTS,
     GIB,
+    IDEMPOTENCY_MIN_TTL_SECONDS,
     RUN_MAX_VIDEOS,
     S3_SINGLE_COPY_MAX_BYTES,
     Settings,
 )
+
+ROOT = Path(__file__).resolve().parents[3]
 
 PROD = {
     "app_env": "production",
@@ -59,6 +64,20 @@ def test_no_single_file_may_exceed_one_storage_copy():
     ):
         with pytest.raises(ValidationError):
             Settings(app_env="development", **{field: S3_SINGLE_COPY_MAX_BYTES + 1})
+
+
+def test_idempotency_records_outlive_the_creation_keys_the_web_keeps():
+    # The browser replays an upload's creation key for CREATION_KEY_TTL_MS after a lost
+    # response; a shorter record would let that retry create a second upload.
+    source = (ROOT / "apps" / "web" / "src" / "lib" / "upload-resume.ts").read_text("utf-8")
+    match = re.search(r"CREATION_KEY_TTL_MS = ([\d\s*]+);", source)
+    assert match is not None
+    web_seconds = math.prod(int(n) for n in match.group(1).split("*")) // 1000
+    assert web_seconds <= IDEMPOTENCY_MIN_TTL_SECONDS
+    default = Settings(app_env="development").idempotency_ttl_seconds
+    assert default == IDEMPOTENCY_MIN_TTL_SECONDS
+    with pytest.raises(ValidationError):
+        Settings(app_env="development", idempotency_ttl_seconds=IDEMPOTENCY_MIN_TTL_SECONDS - 1)
 
 
 def test_production_accepts_real_values_and_forces_synthetic_off():

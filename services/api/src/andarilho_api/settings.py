@@ -25,6 +25,8 @@ RUN_MAX_VIDEOS = 8
 # The API freezes each completed upload with one server-side copy, which S3 (and
 # MinIO) perform only up to 5 GiB, so no single file may be larger.
 S3_SINGLE_COPY_MAX_BYTES = 5 * GIB
+# Idempotency records last at least as long as the web keeps a key to replay them.
+IDEMPOTENCY_MIN_TTL_SECONDS = 24 * 60 * 60
 
 # Values that only ever appear in examples or local development.
 _EXAMPLE_MARKERS = (
@@ -75,7 +77,12 @@ class Settings(BaseSettings):
 
     run_max_seconds: int = Field(default=3600, gt=0)
     delivery_url_ttl_seconds: int = Field(default=300, ge=30, le=3600)
-    idempotency_ttl_seconds: int = Field(default=86400, ge=60)
+    # The web keeps an upload's creation key this long and sends it again after a lost
+    # response (CREATION_KEY_TTL_MS in apps/web/src/lib/upload-resume.ts). A record that
+    # expired sooner would let that retry create, and charge, a second upload.
+    idempotency_ttl_seconds: int = Field(
+        default=IDEMPOTENCY_MIN_TTL_SECONDS, ge=IDEMPOTENCY_MIN_TTL_SECONDS
+    )
 
     # None means "default for the environment": true outside production.
     allow_synthetic_recipe: bool | None = None
