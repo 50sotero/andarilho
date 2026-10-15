@@ -319,14 +319,17 @@ def create_share(
         created_by=subject,
         expires_at=expires_at,
     )
+    # What viewers see is derived from live links: once the stored pointer's links
+    # expire, an older live link's revision is the publication. Both stop being shown.
+    effective = published_revision_id(db, project)
+    stored = project.published_revision_id
     db.add(share)
-    previous = project.published_revision_id
     project.published_revision_id = revision.id
     project.updated_at = utcnow()
     # Publishing changes what the scene's viewers see: a tab still holding the old
     # ETag must get a conflict instead of silently publishing over this.
     scene.version += 1
-    _publication_changed(db, [previous], skip=scene.id)
+    _publication_changed(db, [effective, stored], skip=scene.id)
     if revision.manifest_sha256 is None:
         revision.manifest_sha256 = manifest_sha256(revision)
     audit.record(
@@ -351,10 +354,12 @@ def revoke_share(share_id: uuid.UUID, subject: Subject, db: Db):
     share = lock_row(db, ShareLink, scoped.id)
     if share.revoked_at is None:
         now = utcnow()
+        # Viewers see the publication derived from live links, which differs from the
+        # stored pointer once its links expire; compare that before and after.
+        before = published_revision_id(db, project)
         share.revoked_at = now
         db.flush()
-        previous = project.published_revision_id
-        if previous == share.scene_revision_id:
+        if project.published_revision_id == share.scene_revision_id:
             # Point at the newest revision that still has a live link (this one if it
             # has others); only clear the pointer when no public link remains at all.
             live = (
@@ -375,7 +380,9 @@ def revoke_share(share_id: uuid.UUID, subject: Subject, db: Db):
                     .limit(1)
                 ).scalar_one_or_none()
                 project.updated_at = now
-                _publication_changed(db, [previous, project.published_revision_id])
+        after = published_revision_id(db, project)
+        if after != before:
+            _publication_changed(db, [before, after])
         audit.record(
             db,
             project_id=project.id,
