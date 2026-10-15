@@ -332,6 +332,20 @@ class S3ObjectStore:
             raise self._wrap(exc) from exc
         return sorted(keys)
 
+    def _delete_batch(self, objects: list[dict[str, str]]) -> int:
+        """One multi-object delete; any per-object error fails the whole cleanup.
+
+        S3 answers 200 even when some objects were not deleted and lists them under
+        ``Errors``; counting the batch as deleted would let cleanup drop the database
+        pointer to bytes that are still stored.
+        """
+        response = self.client.delete_objects(
+            Bucket=self.bucket, Delete={"Objects": objects, "Quiet": True}
+        )
+        if response.get("Errors"):
+            raise TransientError("TRANSIENT_FAILURE", "Storage is temporarily unavailable.")
+        return len(objects)
+
     def delete_prefix(self, prefix: str) -> int:
         """Delete every object version and delete marker under ``prefix``."""
         check_key(prefix.rstrip("/") + "/x")
@@ -341,19 +355,16 @@ class S3ObjectStore:
             for item in self._iter_versions(prefix):
                 batch.append(item)
                 if len(batch) == 1000:
-                    self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch})
-                    deleted += len(batch)
+                    deleted += self._delete_batch(batch)
                     batch = []
             if batch:
-                self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": batch})
-                deleted += len(batch)
+                deleted += self._delete_batch(batch)
             # Unversioned buckets: also remove current objects directly.
             paginator = self.client.get_paginator("list_objects_v2")
             for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
                 objs = [{"Key": i["Key"]} for i in page.get("Contents", [])]
                 if objs:
-                    self.client.delete_objects(Bucket=self.bucket, Delete={"Objects": objs})
-                    deleted += len(objs)
+                    deleted += self._delete_batch(objs)
         except Exception as exc:
             raise self._wrap(exc) from exc
         return deleted

@@ -301,7 +301,7 @@ def _size_mismatch() -> ApiError:
 
 def _delete_quietly(storage: Storage, key: str) -> None:
     try:
-        storage.delete_object(key)
+        storage.delete_all_versions(key)  # staging bytes must not outlive the upload
     except StorageError:
         logger.warning("staging delete failed; cleanup will reconcile")
 

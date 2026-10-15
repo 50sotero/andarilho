@@ -197,9 +197,27 @@ class Storage:
         )
         return _version(response.get("VersionId"))
 
-    def delete_object(self, key: str) -> None:
+    def delete_all_versions(self, key: str) -> None:
+        """Remove every stored version and delete marker of exactly ``key``.
+
+        The bucket is versioned (``bootstrap-storage.py``): a plain delete would only
+        add a delete marker and keep the bytes. On an unversioned bucket the single
+        version is listed as ``null`` and removed the same way.
+        """
         try:
-            self.internal.delete_object(Bucket=self.bucket, Key=key)
+            targets = []
+            paginator = self.internal.get_paginator("list_object_versions")
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=key):
+                for item in [*page.get("Versions", []), *page.get("DeleteMarkers", [])]:
+                    if item["Key"] == key:
+                        targets.append({"Key": key, "VersionId": item["VersionId"]})
+            for start in range(0, len(targets), 1000):
+                response = self.internal.delete_objects(
+                    Bucket=self.bucket,
+                    Delete={"Objects": targets[start : start + 1000], "Quiet": True},
+                )
+                if response.get("Errors"):
+                    raise StorageError("delete failed")
         except (ClientError, BotoCoreError) as exc:
             raise StorageError("delete failed") from exc
 

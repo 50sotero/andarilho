@@ -374,6 +374,49 @@ def test_reconstruct_records_the_camera_path_in_walk_order(db, seed, store, sett
     assert cameras[0]["forward"] == pytest.approx([0, 0, 1])
 
 
+class _StubS3:
+    """Just enough of a versioned S3 client for delete_prefix."""
+
+    def __init__(self, keys: list[str], failing: set[str]) -> None:
+        self.versions = {k: f"v-{k}" for k in keys}
+        self.failing = failing
+
+    def get_paginator(self, name):
+        stub = self
+
+        class Paginator:
+            def paginate(self, Bucket, Prefix):  # noqa: N803 - boto3 names
+                keys = [k for k in stub.versions if k.startswith(Prefix)]
+                if name == "list_object_versions":
+                    yield {"Versions": [{"Key": k, "VersionId": stub.versions[k]} for k in keys]}
+                else:
+                    yield {"Contents": []}
+
+        return Paginator()
+
+    def delete_objects(self, Bucket, Delete):  # noqa: N803 - boto3 names
+        errors = []
+        for item in Delete["Objects"]:
+            if item["Key"] in self.failing:
+                errors.append({"Key": item["Key"], "Code": "AccessDenied"})
+            else:
+                self.versions.pop(item["Key"], None)
+        return {"Errors": errors} if errors else {}
+
+
+def test_delete_prefix_fails_when_s3_reports_objects_it_did_not_delete():
+    from andarilho_worker.artifacts import S3ObjectStore
+    from andarilho_worker.errors import TransientError
+
+    keys = [f"tenants/p1/uploads/u1/part-{i}" for i in range(3)]
+    flaky = S3ObjectStore("b", _StubS3(keys, failing={keys[1]}))
+    with pytest.raises(TransientError):
+        flaky.delete_prefix("tenants/p1/uploads/u1")
+    healthy = S3ObjectStore("b", _StubS3(keys, failing=set()))
+    assert healthy.delete_prefix("tenants/p1/uploads/u1") == 3
+    assert healthy.client.versions == {}
+
+
 def test_put_immutable_never_replaces_committed_bytes(tmp_path):
     from andarilho_worker.artifacts import LocalObjectStore, put_immutable
     from andarilho_worker.errors import StageError

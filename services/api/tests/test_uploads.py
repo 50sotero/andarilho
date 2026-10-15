@@ -64,6 +64,22 @@ def test_init_validates_type_and_size(client, auth, settings):
     assert quota.json()["error"]["code"] == "QUOTA_EXCEEDED"
 
 
+def test_completing_on_a_versioned_bucket_leaves_no_staging_bytes(client, auth, db, s3):
+    # Production buckets are versioned (bootstrap-storage.py): a plain delete of the
+    # staging key would only add a delete marker and keep a full copy of the input.
+    s3.put_bucket_versioning(Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"})
+    pid = create_project(client, auth)["id"]
+    upload_id = _init(client, auth, pid, size=1000).json()["upload"]["id"]
+    _put_part(s3, db, upload_id, 1, b"v" * 1000)
+    done = client.post(f"/v1/uploads/{upload_id}/complete", json={}, headers=auth())
+    assert done.status_code == 202, done.text
+    row = db.get(Upload, uuid.UUID(upload_id))
+    db.refresh(row)
+    listed = s3.list_object_versions(Bucket=BUCKET, Prefix=row.staging_key)
+    assert listed.get("Versions", []) == [] and listed.get("DeleteMarkers", []) == []
+    assert s3.get_object(Bucket=BUCKET, Key=row.immutable_key)["Body"].read() == b"v" * 1000
+
+
 def test_photo_count_limit(client, auth, db, app):
     app.state.settings.upload_max_photos = 2
     pid = create_project(client, auth)["id"]
