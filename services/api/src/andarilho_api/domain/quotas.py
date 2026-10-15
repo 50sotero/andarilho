@@ -88,8 +88,13 @@ def check_upload(
             # its multipart upload and a check a reconciliation horizon later found no
             # part left: then it clears the ID.
             and_(Upload.status == "expired", Upload.multipart_upload_id.is_not(None)),
-            # Rejected or removed uploads hold quota until the worker deletes their bytes.
-            and_(Upload.status.in_(("rejected", "aborted")), Upload.immutable_key.is_not(None)),
+            # Rejected or removed uploads hold quota until the worker has deleted their
+            # frozen bytes, and one stopped mid-upload until upload_cleanup has aborted its
+            # multipart upload and found no part left a horizon later: it clears the ID.
+            and_(
+                Upload.status.in_(("rejected", "aborted")),
+                or_(Upload.immutable_key.is_not(None), Upload.multipart_upload_id.is_not(None)),
+            ),
         ),
     )
     used = db.execute(

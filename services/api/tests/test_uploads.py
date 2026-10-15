@@ -316,7 +316,7 @@ def test_parts_validation(client, auth):
     assert client.post(url, json={"partNumbers": [1, 1]}, headers=auth()).status_code == 422
 
 
-def test_abort_upload_and_release_quota(client, auth, db, settings):
+def test_abort_upload_releases_quota_once_no_part_is_left(client, auth, db, settings):
     pid = create_project(client, auth)["id"]
     upload_id = _init(client, auth, pid, size=settings.upload_max_total_bytes).json()["upload"][
         "id"
@@ -328,9 +328,30 @@ def test_abort_upload_and_release_quota(client, auth, db, settings):
     db.refresh(row)
     assert row.status == "aborted"
     assert row.multipart_upload_id is not None
-    # A part in flight can land after the abort, so a cleanup checks none is left.
+    # A part in flight can land after the abort, so a cleanup checks none is left, and the
+    # upload holds its quota until then: the cleanup clears the ID once it is verified.
     [job] = _cleanup_jobs(db, upload_id)
     assert job.state == "queued" and job.input_manifest["stagingKey"] == row.staging_key
+    assert _init(client, auth, pid, size=10).status_code == 413
+    row.multipart_upload_id = None
+    db.commit()
+    assert _init(client, auth, pid, size=10).status_code == 201
+
+
+def test_an_upload_rejected_mid_upload_holds_quota_while_it_keeps_its_id(
+    client, auth, db, settings
+):
+    pid = create_project(client, auth)["id"]
+    upload_id = _init(client, auth, pid, size=settings.upload_max_total_bytes).json()["upload"][
+        "id"
+    ]
+    row = db.get(Upload, uuid.UUID(upload_id))
+    row.status, row.rejection_code = "rejected", "SIZE_MISMATCH"  # as _reject leaves it
+    db.commit()
+    assert row.immutable_key is None and row.multipart_upload_id is not None
+    assert _init(client, auth, pid, size=10).status_code == 413
+    row.multipart_upload_id = None
+    db.commit()
     assert _init(client, auth, pid, size=10).status_code == 201
 
 
@@ -340,7 +361,9 @@ def test_rejected_upload_holds_quota_until_its_object_is_deleted(client, auth, d
         "id"
     ]
     row = db.get(Upload, uuid.UUID(upload_id))
+    # Frozen (which completes the multipart upload and clears its ID), then rejected.
     row.status, row.immutable_key = "rejected", f"tenants/{pid}/originals/{upload_id}"
+    row.multipart_upload_id = None
     db.commit()
     assert _init(client, auth, pid, size=10).status_code == 413
     row.immutable_key = None  # the worker deleted the stored object

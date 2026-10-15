@@ -16,8 +16,8 @@ after an abort, so this job aborts it again and forgets the ID only once a check
 whole reconciliation horizon after the last abort, before any new one, finds no part
 left. A part upload has no time limit of its own, so even then one could land later:
 the same transaction hands the upload to ``multipart_reconciliations``
-(:mod:`andarilho_worker.multipart`), which keeps checking it for good. The quota does
-not wait for any of this: it is released with the bytes.
+(:mod:`andarilho_worker.multipart`), which keeps checking it for good. The upload
+holds its quota until the ID is cleared, since its parts may be stored until then.
 """
 
 from __future__ import annotations
