@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { furnitureFootprint } from "@andarilho/viewer";
 import type { Layout } from "@/lib/api/types";
 import { evidenceOnPlan, evidenceScale, type CaptureEvidence } from "./capture-evidence";
 import { pointAlong, round, type Point, type ViewBox } from "./geometry";
@@ -258,6 +259,44 @@ export function LayoutCanvas({
           style={{ cursor: "pointer" }}
         />
       ))}
+
+      {(layout.furniture ?? []).map((item, fi) => {
+        const selected = sameSelection(selection, { kind: "furniture", index: fi });
+        const solid = item.solid !== false;
+        const label = item.label || item.category;
+        // Muted so that furniture reads apart from obstacles; a dashed outline marks a
+        // piece the user can walk through.
+        return (
+          <polygon
+            key={item.id}
+            data-furniture={item.id}
+            role="button"
+            tabIndex={0}
+            aria-label={`Furniture ${label}${solid ? "" : ", does not block walking"}`}
+            aria-pressed={selected}
+            points={furnitureFootprint(item)
+              .map((p) => p.join(","))
+              .join(" ")}
+            fill={selected ? "#e7e5e4" : "#d6d3d1"}
+            fillOpacity={solid ? 1 : 0.4}
+            stroke={selected ? "#ca8a04" : "#57534e"}
+            strokeWidth={selected ? stroke * 3 : stroke * 2}
+            strokeDasharray={solid ? undefined : `${stroke * 6} ${stroke * 4}`}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              onSelect({ kind: "furniture", index: fi });
+            }}
+            onKeyDown={(e) => {
+              if (e.key !== "Enter" && e.key !== " ") return;
+              e.preventDefault();
+              onSelect({ kind: "furniture", index: fi });
+            }}
+            style={{ cursor: "pointer" }}
+          >
+            <title>{solid ? label : `${label} (does not block walking)`}</title>
+          </polygon>
+        );
+      })}
 
       {walls.map((w, wi) => (
         <line

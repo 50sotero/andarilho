@@ -5,11 +5,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useProject } from "@/features/projects/use-project";
 import { ReviewEditor } from "@/features/review/ReviewEditor";
 import { api } from "@/lib/api/client";
-import type { CaptureEvidenceLink, Layout, ProjectDetail, SceneDetail } from "@/lib/api/types";
+import type {
+  CaptureEvidenceLink,
+  Furniture,
+  Layout,
+  ProjectDetail,
+  SceneDetail,
+} from "@/lib/api/types";
 import fixture from "@andarilho/scene-contract/fixtures/synthetic-two-room.layout.json";
 
 vi.mock("@/features/projects/use-project", () => ({ useProject: vi.fn() }));
-vi.mock("@/lib/api/client", () => ({ api: { getScene: vi.fn(), getDelivery: vi.fn() } }));
+vi.mock("@/lib/api/client", () => ({
+  api: { getScene: vi.fn(), getDelivery: vi.fn(), saveLayout: vi.fn() },
+}));
 vi.mock("@/components/viewer/ViewerClient", () => ({ ViewerClient: () => null }));
 
 const layout = fixture as unknown as Layout;
@@ -37,12 +45,13 @@ const evidenceBody = {
 
 function sceneDetail(
   captureEvidence: CaptureEvidenceLink | null,
-  { renderScale }: { renderScale?: number } = {},
+  { renderScale, furniture }: { renderScale?: number; furniture?: Furniture[] } = {},
 ): SceneDetail {
-  const shown =
-    renderScale === undefined
-      ? layout
-      : { ...layout, calibration: { method: "known_distance", renderScale } };
+  let shown: Layout = layout;
+  if (renderScale !== undefined) {
+    shown = { ...shown, calibration: { method: "known_distance", renderScale } };
+  }
+  if (furniture !== undefined) shown = { ...shown, furniture };
   const createdAt = "2026-10-15T12:00:00Z";
   return {
     scene: {
@@ -216,5 +225,65 @@ describe("capture evidence in the review editor", () => {
     expect(api.getScene).toHaveBeenCalledTimes(2);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(evidenceLayer()).not.toBeNull();
+  });
+});
+
+describe("furniture in the review editor", () => {
+  const chair: Furniture = {
+    id: "chair-0",
+    floorId: "floor-0",
+    category: "chair",
+    label: "Wooden chair",
+    position: [-1, 1.5],
+    yawRadians: 0,
+    size: [0.5, 0.9, 0.5],
+    solid: true,
+    parts: [{ shape: "box", min: [0, 0, 0], max: [1, 1, 1], color: "#aa3333" }],
+  };
+  const rug: Furniture = { ...chair, id: "rug-0", label: "Rug", solid: false, position: [2, -1.5] };
+
+  it("draws every piece and lets the user select one and remove it", async () => {
+    await renderEditor(sceneDetail(null, { furniture: [chair, rug] }));
+
+    expect(container.querySelector('[data-furniture="chair-0"]')).not.toBeNull();
+    expect(container.querySelector('[data-furniture="rug-0"]')).not.toBeNull();
+
+    const chairPolygon = container.querySelector('[data-furniture="chair-0"]')!;
+    await act(async () => {
+      chairPolygon.dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("Furniture Wooden chair");
+
+    await click(button("Remove")!);
+    expect(container.querySelector('[data-furniture="chair-0"]')).toBeNull();
+    expect(container.querySelector('[data-furniture="rug-0"]')).not.toBeNull();
+  });
+
+  it("saves the layout without the removed piece", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    vi.mocked(api.saveLayout).mockResolvedValue({
+      data: { sceneRevisionId: "rev-2", jobId: "job-2", version: 2 },
+      etag: '"2"',
+    });
+    await renderEditor(sceneDetail(null, { furniture: [chair, rug] }));
+
+    await act(async () => {
+      container
+        .querySelector('[data-furniture="chair-0"]')!
+        .dispatchEvent(new Event("pointerdown", { bubbles: true }));
+    });
+    await click(button("Remove")!);
+    await click(button("Save as new revision")!);
+
+    expect(api.saveLayout).toHaveBeenCalledTimes(1);
+    const saved = vi.mocked(api.saveLayout).mock.calls[0]![2];
+    expect(saved.furniture?.map((f) => f.id)).toEqual(["rug-0"]);
+  });
+
+  it("explains that the scene is walkable and that approval comes before publishing", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    await renderEditor(sceneDetail(null));
+    expect(container.textContent).toContain("approval is needed before publishing");
+    expect(container.textContent).not.toContain("walking with collision");
   });
 });

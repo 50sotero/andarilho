@@ -2,6 +2,7 @@
  * Small pure 2D helpers for the layout editor. Coordinates are canonical world
  * meters on the horizontal plane: a layout point [x, z] maps to world (x, y, z).
  */
+import { furnitureFootprint } from "@andarilho/viewer";
 import type { Layout } from "@/lib/api/types";
 
 export type Point = [number, number];
@@ -139,6 +140,16 @@ export function layoutProblems(layout: Layout): LayoutProblem[] {
     if (!floor.polygons.some((ring) => pointInPolygon(p, ring as Point[]))) {
       problems.push({ message: "The spawn point must be inside the floor outline." });
     }
+    // Furniture that is not solid can be walked through, so only solid pieces count.
+    const inFurniture = (layout.furniture ?? []).some(
+      (item) =>
+        item.solid !== false &&
+        item.floorId === floor.id &&
+        pointInPolygon(p, furnitureFootprint(item)),
+    );
+    if (inFurniture) {
+      problems.push({ message: "The spawn point must not be inside a piece of furniture." });
+    }
   }
   return problems;
 }
@@ -178,6 +189,12 @@ export function scaleLayout(layout: Layout, factor: number): Layout {
       footprint: o.footprint.map(s),
       height: o.height * factor,
     })),
+    // Part boxes are fractions of the object, so only its place and size scale.
+    furniture: layout.furniture?.map((item) => ({
+      ...item,
+      position: s(item.position),
+      size: [item.size[0] * factor, item.size[1] * factor, item.size[2] * factor],
+    })),
     landmarks: layout.landmarks?.map((l) => ({
       ...l,
       worldPoint: [l.worldPoint[0] * factor, l.worldPoint[1] * factor, l.worldPoint[2] * factor],
@@ -216,6 +233,7 @@ export function layoutViewBox(layout: Layout, padding = 0.5): ViewBox {
   for (const f of layout.floors) for (const r of f.polygons) pts.push(...(r as Point[]));
   for (const w of layout.walls ?? []) pts.push(w.start, w.end);
   for (const o of layout.obstacles ?? []) pts.push(...(o.footprint as Point[]));
+  for (const item of layout.furniture ?? []) pts.push(...furnitureFootprint(item));
   pts.push([layout.spawn.feet[0], layout.spawn.feet[2]]);
   if (pts.length === 0) return { minX: -5, minY: -5, width: 10, height: 10 };
   const xs = pts.map((p) => p[0]);

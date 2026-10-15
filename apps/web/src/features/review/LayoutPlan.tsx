@@ -1,3 +1,4 @@
+import { furnitureFootprint } from "@andarilho/viewer";
 import type { Layout } from "@/lib/api/types";
 import { layoutViewBox, pointAlong, type Point } from "./geometry";
 
@@ -34,6 +35,26 @@ export function LayoutPlan({ layout, title }: { layout: Layout; title: string })
             strokeWidth={stroke}
           />
         ))}
+        {(layout.furniture ?? []).map((item) => {
+          const solid = item.solid !== false;
+          const label = item.label || item.category;
+          return (
+            <polygon
+              key={item.id}
+              data-furniture={item.id}
+              points={furnitureFootprint(item)
+                .map((p) => p.join(","))
+                .join(" ")}
+              fill="#d6d3d1"
+              fillOpacity={solid ? 1 : 0.4}
+              stroke="#57534e"
+              strokeWidth={stroke}
+              strokeDasharray={solid ? undefined : `${stroke * 3} ${stroke * 2}`}
+            >
+              <title>{solid ? label : `${label} (does not block walking)`}</title>
+            </polygon>
+          );
+        })}
         {(layout.walls ?? []).map((w) => (
           <line
             key={w.id}
@@ -66,7 +87,7 @@ export function LayoutPlan({ layout, title }: { layout: Layout; title: string })
       </svg>
       <figcaption className="text-xs text-stone-600 dark:text-stone-400">
         Top-down plan: walkable floor (teal), walls (black), openings (gaps), obstacles (yellow),
-        starting point (red dot).
+        furniture (grey), starting point (red dot).
       </figcaption>
     </figure>
   );

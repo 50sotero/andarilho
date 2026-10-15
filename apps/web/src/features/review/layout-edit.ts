@@ -9,6 +9,7 @@ export type Selection =
   | { kind: "opening"; index: number }
   | { kind: "obstacle"; index: number }
   | { kind: "obstacleCorner"; index: number; corner: number }
+  | { kind: "furniture"; index: number }
   | { kind: "spawn" }
   | { kind: "landmark"; index: number };
 
@@ -85,6 +86,7 @@ function allIds(layout: Layout): string[] {
     ...(layout.walls ?? []).map((w) => w.id),
     ...(layout.openings ?? []).map((o) => o.id),
     ...(layout.obstacles ?? []).map((o) => o.id),
+    ...(layout.furniture ?? []).map((f) => f.id),
     ...(layout.landmarks ?? []).map((l) => l.id),
   ];
 }
@@ -210,6 +212,10 @@ export function removeSelected(layout: Layout, sel: Selection): Layout {
     case "obstacleCorner":
       next.obstacles = (next.obstacles ?? []).filter((_, i) => i !== sel.index);
       return next;
+    case "furniture":
+      if (!next.furniture?.[sel.index]) return layout;
+      next.furniture = next.furniture.filter((_, i) => i !== sel.index);
+      return next;
     case "landmark":
       next.landmarks = (next.landmarks ?? []).filter((_, i) => i !== sel.index);
       return next;
@@ -288,6 +294,10 @@ export function describeSelection(layout: Layout, sel: Selection): string {
       return `Obstacle ${layout.obstacles?.[sel.index]?.id ?? ""}`;
     case "obstacleCorner":
       return `Obstacle ${layout.obstacles?.[sel.index]?.id ?? ""} corner ${sel.corner + 1}`;
+    case "furniture": {
+      const item = layout.furniture?.[sel.index];
+      return `Furniture ${item?.label || item?.category || ""}`.trimEnd();
+    }
     case "spawn":
       return "Starting point";
     case "landmark":

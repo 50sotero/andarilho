@@ -93,8 +93,8 @@ function SelectionPanel({
   if (!selection) {
     return (
       <p className="text-sm text-stone-600 dark:text-stone-400">
-        Select a corner, wall, opening, obstacle, landmark or the starting point to edit its
-        dimensions.
+        Select a corner, wall, opening, obstacle, furniture piece, landmark or the starting point to
+        edit it.
       </p>
     );
   }
@@ -112,10 +112,18 @@ function SelectionPanel({
       ? layout.obstacles?.[selection.index]
       : undefined;
   const landmark = selection.kind === "landmark" ? layout.landmarks?.[selection.index] : undefined;
+  const furniture =
+    selection.kind === "furniture" ? layout.furniture?.[selection.index] : undefined;
 
   return (
     <div className="space-y-3">
       <h3 className="text-sm font-semibold">{describeSelection(layout, selection)}</h3>
+      {furniture ? (
+        <p className="text-sm text-stone-700 dark:text-stone-300">
+          Placed automatically. Remove it if it is wrong; moving or resizing it is not available
+          yet. {furniture.solid === false ? "You can walk through it." : "It blocks walking."}
+        </p>
+      ) : null}
       {point ? (
         <div className="grid grid-cols-2 gap-2">
           <NumberField label="X" value={point[0]} onChange={(v) => setPoint([v, point[1]])} />
@@ -659,7 +667,7 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     setError(null);
     try {
       await api.approveRevision(sceneId, revision.id, etag);
-      setStatus(`Revision ${revision.revision} approved. You can now walk it and publish it.`);
+      setStatus(`Revision ${revision.revision} approved. You can now publish it.`);
       await loadScene(false);
     } catch (err) {
       setError(toFriendlyError(err));
@@ -787,7 +795,7 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
         ) : null}
         <p className="mt-2 text-xs text-stone-600 dark:text-stone-400">
           Saving creates a new draft revision and does not change a revision that is already
-          published. Approval is needed before walking with collision or publishing.
+          published. The scene is walkable without approval; approval is needed before publishing.
         </p>
       </Card>
 
@@ -842,8 +850,8 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
           />
           <p className="mt-2 text-xs text-stone-600 dark:text-stone-400">
             Grid squares are 1 m in the layout&apos;s units. Teal: walkable floor; black: walls;
-            white gaps: openings; yellow: obstacles; purple: landmarks; red: starting point and
-            facing direction.
+            white gaps: openings; yellow: obstacles; grey: furniture (dashed where you can walk
+            through it); purple: landmarks; red: starting point and facing direction.
             {evidence && showEvidence
               ? " Blue dots and the dashed purple line are the capture's points and camera path."
               : ""}

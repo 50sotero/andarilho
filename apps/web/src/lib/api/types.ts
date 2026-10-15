@@ -2,9 +2,9 @@
  * JSON shapes of the Andarilho /v1 API (docs/api-contract.md).
  * Scene/layout/delivery types come from the generated scene contract.
  */
-import type { DeliveryEnvelope, Layout, SceneManifest } from "@andarilho/scene-contract";
+import type { DeliveryEnvelope, Furniture, Layout, SceneManifest } from "@andarilho/scene-contract";
 
-export type { DeliveryEnvelope, Layout, SceneManifest };
+export type { DeliveryEnvelope, Furniture, Layout, SceneManifest };
 
 export type Role = "owner" | "editor" | "viewer";
 
