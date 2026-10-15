@@ -10,10 +10,10 @@ import { usePolling } from "@/lib/use-polling";
 import { RunAdvice } from "./RunAdvice";
 import {
   STAGES,
-  canRetryRun,
   formatElapsed,
   formatStageProgress,
   isTerminalRun,
+  runActions,
   stageLabel,
   stageStates,
   type StageView,
@@ -167,13 +167,16 @@ export function ProcessingView({
     return (
       <Card>
         <p>No reconstruction has been started for this project.</p>
-        <Link href={`${base}/capture`} className={`${primaryLinkClass} mt-3`}>
-          Upload a capture
-        </Link>
+        {canEdit ? (
+          <Link href={`${base}/capture`} className={`${primaryLinkClass} mt-3`}>
+            Upload a capture
+          </Link>
+        ) : null}
       </Card>
     );
   }
 
+  const actions = runActions(run, detail.project.role);
   return (
     <div className="space-y-6">
       <Card>
@@ -244,7 +247,7 @@ export function ProcessingView({
         </div>
 
         <div className="mt-4 flex flex-wrap gap-2">
-          {!terminal && !run.cancelRequested ? (
+          {actions.cancel ? (
             confirmCancel ? (
               <>
                 <span className="self-center text-sm">
@@ -263,17 +266,17 @@ export function ProcessingView({
               </Button>
             )
           ) : null}
-          {canRetryRun(run) ? (
+          {actions.retry ? (
             <Button onClick={() => void retry()} disabled={busy}>
               {busy ? "Starting..." : "Retry with the same inputs"}
             </Button>
           ) : null}
-          {run.status === "failed" ? (
+          {actions.newCapture ? (
             <Link href={`${base}/capture`} className="self-center text-sm underline">
               Upload a new capture
             </Link>
           ) : null}
-          {run.status === "succeeded" ? (
+          {actions.review ? (
             <Link href={`${base}/review`} className={primaryLinkClass}>
               Review the scene
             </Link>

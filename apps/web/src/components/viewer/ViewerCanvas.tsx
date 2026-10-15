@@ -4,6 +4,7 @@ import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { DeliveryEnvelope } from "@andarilho/scene-contract";
 import { canWalk, createViewer } from "@andarilho/viewer";
 import { Button } from "@/components/ui";
+import { envelopeExpired } from "./envelope";
 
 /* -------------------------------------------------------------------------- */
 /* Viewer adapter: the only place that knows @andarilho/viewer's API.          */
@@ -132,6 +133,8 @@ export default function ViewerCanvas({
   const [quality, setQuality] = useState<QualityChoice>("auto");
   const [overlay, setOverlay] = useState(false);
   const [prefer2d, setPrefer2d] = useState(false);
+  // The signed poster link this page saw fail to load (expired, most likely).
+  const [brokenPoster, setBrokenPoster] = useState<string | null>(null);
   const qualityId = useId();
   const overlayId = useId();
   const helpId = useId();
@@ -257,7 +260,16 @@ export default function ViewerCanvas({
             <label htmlFor={overlayId}>Show collision overlay</label>
           </span>
         ) : null}
-        <Button variant="ghost" onClick={() => setPrefer2d((v) => !v)} disabled={failed}>
+        <Button
+          variant="ghost"
+          onClick={() => {
+            // Asset links last a few minutes: ask for fresh ones before showing the
+            // poster from an envelope that has already expired.
+            if (!prefer2d && envelopeExpired(envelope)) onRecoverableError?.();
+            setPrefer2d((v) => !v);
+          }}
+          disabled={failed}
+        >
           {prefer2d ? "Use 3D viewer" : "Show 2D view"}
         </Button>
       </div>
@@ -276,7 +288,7 @@ export default function ViewerCanvas({
               You can still see the scene&apos;s preview image and plan below.
             </p>
           ) : null}
-          {posterUrl ? (
+          {posterUrl && posterUrl !== brokenPoster ? (
             // Signed, short-lived storage URL: next/image optimization is not appropriate here.
             // eslint-disable-next-line @next/next/no-img-element
             <img
@@ -284,6 +296,11 @@ export default function ViewerCanvas({
               alt={`Preview image of ${title}`}
               referrerPolicy="no-referrer"
               className="w-full rounded-md"
+              onError={() => {
+                // Hide the broken image and fetch a fresh envelope; its new link shows.
+                setBrokenPoster(posterUrl);
+                onRecoverableError?.();
+              }}
             />
           ) : null}
           {fallback}

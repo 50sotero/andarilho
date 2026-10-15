@@ -1,4 +1,4 @@
-import type { JobState, Run, RunStatus } from "@/lib/api/types";
+import type { JobState, Role, Run, RunStatus } from "@/lib/api/types";
 
 /** Canonical user-visible stages (README section 6). */
 export const STAGES = [
@@ -88,6 +88,31 @@ const CAPTURE_FAILURE_CODES = new Set([
 ]);
 
 /** Whether to offer "retry with the same inputs" for a finished run. */
+export interface RunActions {
+  cancel: boolean;
+  retry: boolean;
+  newCapture: boolean;
+  review: boolean;
+}
+
+/**
+ * The run controls to show a member. Cancelling, retrying, uploading a new capture
+ * and reviewing all need owner or editor rights (the API answers 403 otherwise), so
+ * read-only members follow progress without actions that would be refused.
+ */
+export function runActions(
+  run: Pick<Run, "status" | "error" | "cancelRequested">,
+  role: Role | undefined,
+): RunActions {
+  const canEdit = role === "owner" || role === "editor";
+  return {
+    cancel: canEdit && !isTerminalRun(run.status) && !run.cancelRequested,
+    retry: canEdit && canRetryRun(run),
+    newCapture: canEdit && run.status === "failed",
+    review: canEdit && run.status === "succeeded",
+  };
+}
+
 export function canRetryRun(run: Pick<Run, "status" | "error">): boolean {
   if (run.status === "cancelled") return true;
   if (run.status !== "failed") return false;

@@ -7,11 +7,17 @@ import {
   scaleLayout,
 } from "@/features/review/geometry";
 import { addOpening, movePoint, removeSelected } from "@/features/review/layout-edit";
-import { canRetryRun, formatStageProgress, stageStates } from "@/features/processing/stages";
+import {
+  canRetryRun,
+  formatStageProgress,
+  runActions,
+  stageStates,
+} from "@/features/processing/stages";
 import { expiryFromDays } from "@/features/sharing/SharePanel";
-import { fallbackLayout } from "@/features/projects/PrivateWalk";
+import { awaitingRevision, fallbackLayout } from "@/features/projects/PrivateWalk";
 import { removalMode } from "@/features/capture/CaptureFlow";
 import { rejectionMessage } from "@/features/uploads/UploadList";
+import { envelopeExpired } from "@/components/viewer/envelope";
 import type { DeliveryEnvelope, Layout, Run, SceneDetail } from "@/lib/api/types";
 import fixture from "@andarilho/scene-contract/fixtures/synthetic-two-room.layout.json";
 
@@ -104,6 +110,36 @@ describe("run retry offer", () => {
   });
 });
 
+describe("run actions", () => {
+  const error = {
+    code: "TRAINING_FAILED",
+    message: "",
+    retryable: false,
+    suggestedAction: null,
+    requestId: "r",
+  };
+  const running = { status: "running" as const, error: null, cancelRequested: false };
+  const failed = { status: "failed" as const, error, cancelRequested: false };
+  const succeeded = { status: "succeeded" as const, error: null, cancelRequested: false };
+
+  it("gives owners and editors the run controls", () => {
+    for (const role of ["owner", "editor"] as const) {
+      expect(runActions(running, role)).toMatchObject({ cancel: true, retry: false });
+      expect(runActions(failed, role)).toMatchObject({ retry: true, newCapture: true });
+      expect(runActions(succeeded, role)).toMatchObject({ review: true, cancel: false });
+    }
+    expect(runActions({ ...running, cancelRequested: true }, "owner").cancel).toBe(false);
+  });
+
+  it("shows read-only members no action the API would refuse", () => {
+    const none = { cancel: false, retry: false, newCapture: false, review: false };
+    for (const run of [running, failed, succeeded]) {
+      expect(runActions(run, "viewer")).toEqual(none);
+      expect(runActions(run, undefined)).toEqual(none);
+    }
+  });
+});
+
 describe("processing helpers", () => {
   it("never invents progress", () => {
     expect(formatStageProgress(null)).toBeNull();
@@ -145,6 +181,30 @@ describe("private walk fallback plan", () => {
   });
 });
 
+describe("private walk while the first revision validates", () => {
+  const rev = (id: string, validationState: string, extra: object = {}) => ({
+    id,
+    revision: Number(id.slice(4)),
+    validationState,
+    ...extra,
+  });
+  const sceneWith = (current: object | null, revisions: object[]) =>
+    ({ revision: current, revisions }) as unknown as SceneDetail;
+
+  it("keeps checking while a revision is pending or none exists yet", () => {
+    const pending = rev("rev-1", "pending");
+    expect(awaitingRevision(sceneWith(pending, [pending]))).toBe(true);
+    expect(awaitingRevision(sceneWith(null, []))).toBe(true);
+  });
+
+  it("stops when a revision is walkable or nothing is pending", () => {
+    const valid = rev("rev-1", "valid", { manifest: {} });
+    expect(awaitingRevision(sceneWith(valid, [valid]))).toBe(false);
+    const invalid = rev("rev-1", "invalid");
+    expect(awaitingRevision(sceneWith(invalid, [invalid]))).toBe(false);
+  });
+});
+
 describe("upload rejection message", () => {
   it("tells the user to re-upload when our check failed, not that the file is bad", () => {
     expect(rejectionMessage("INSPECTION_FAILED")).toMatch(/upload it again/);
@@ -160,5 +220,17 @@ describe("upload row removal", () => {
     expect(removalMode("initiated")).toBe("best-effort");
     expect(removalMode("rejected")).toBe("best-effort");
     expect(removalMode(null)).toBe("best-effort");
+  });
+});
+
+describe("delivery envelope expiry", () => {
+  const now = Date.parse("2026-10-15T12:00:00Z");
+  it("treats links at or past their expiry as expired", () => {
+    expect(envelopeExpired({ expiresAt: "2026-10-15T12:05:00Z" }, now)).toBe(false);
+    expect(envelopeExpired({ expiresAt: "2026-10-15T12:00:00Z" }, now)).toBe(true);
+    expect(envelopeExpired({ expiresAt: "2026-10-15T11:59:00Z" }, now)).toBe(true);
+  });
+  it("treats an unparseable expiry as expired", () => {
+    expect(envelopeExpired({ expiresAt: "soon" }, now)).toBe(true);
   });
 });

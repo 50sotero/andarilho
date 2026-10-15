@@ -8,6 +8,7 @@ import { LayoutPlan } from "@/features/review/LayoutPlan";
 import { api } from "@/lib/api/client";
 import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
 import type { DeliveryEnvelope, Layout, SceneDetail } from "@/lib/api/types";
+import { usePolling } from "@/lib/use-polling";
 import { useProject } from "./use-project";
 
 const MAX_ENVELOPE_REFRESHES = 2;
@@ -20,6 +21,19 @@ export function walkableRevisionId(scene: SceneDetail): string | null {
     .filter((r) => r.validationState === "valid")
     .sort((a, b) => b.revision - a.revision);
   return valid[0]?.id ?? null;
+}
+
+/**
+ * True while nothing is walkable yet but a revision is still being packaged or
+ * validated (or the first one is about to be created): worth checking again.
+ */
+export function awaitingRevision(scene: SceneDetail): boolean {
+  if (walkableRevisionId(scene) !== null) return false;
+  if (scene.revisions.length === 0) return true;
+  return (
+    scene.revision?.validationState === "pending" ||
+    scene.revisions.some((r) => r.validationState === "pending")
+  );
 }
 
 /**
@@ -68,6 +82,7 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
           return api.getDelivery(sceneId, revisionId).then(({ data }) => {
             if (signal?.cancelled) return;
             setEnvelope(data);
+            setNoRevision(false);
             setError(null);
           });
         })
@@ -85,6 +100,24 @@ export function PrivateWalk({ projectId }: { projectId: string }) {
       signal.cancelled = true;
     };
   }, [fetchEnvelope]);
+
+  // The first revision may still be validating when the page opens: keep checking
+  // until it becomes walkable (or stops being pending) instead of waiting for a reload.
+  const waiting =
+    noRevision && viewerRevisionId === null && scene !== null && awaitingRevision(scene);
+  usePolling(
+    async (abort) => {
+      if (!sceneId) return { terminal: true };
+      const { data } = await api.getScene(sceneId, abort);
+      setScene(data);
+      if (walkableRevisionId(data) !== null) {
+        await fetchEnvelope();
+        return { terminal: true };
+      }
+      return { terminal: !awaitingRevision(data) };
+    },
+    { enabled: waiting, key: sceneId ?? "" },
+  );
 
   // Delivery URLs are short-lived: fetch a fresh envelope for the same revision when needed.
   const onRecoverableError = useCallback(() => {
