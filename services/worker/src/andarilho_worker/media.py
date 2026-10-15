@@ -1,9 +1,12 @@
-"""File-signature sniffing and lightweight image/PDF inspection (no decoding of content)."""
+"""File-signature sniffing, image dimension headers and FFprobe output parsing.
+
+Content is checked by bounded subprocesses: FFmpeg decodes images and
+:mod:`andarilho_worker.pdf_inspect` walks PDF page trees.
+"""
 
 from __future__ import annotations
 
 import json
-import re
 import struct
 from dataclasses import dataclass
 from typing import Any
@@ -14,7 +17,6 @@ VIDEO_BRANDS = {
 }  # fmt: skip
 VIDEO_CODECS = {"h264", "hevc"}
 MAX_IMAGE_PIXELS = 100_000_000
-MAX_PDF_PAGES = 20
 MAX_VIDEO_SECONDS = 30 * 60
 
 
@@ -86,25 +88,6 @@ def jpeg_dimensions(data: bytes) -> tuple[int, int] | None:
             return None
         i += 2 + length
     return None
-
-
-_PAGE = re.compile(rb"/Type\s*/Page(?![a-zA-Z])")
-
-
-def inspect_pdf(data: bytes) -> dict[str, Any]:
-    """Structural checks only: never render or execute anything here."""
-    if b"/Encrypt" in data:
-        raise ValueError("encrypted PDF")
-    pages = len(_PAGE.findall(data))
-    if pages == 0:
-        raise ValueError("PDF has no pages")
-    if pages > MAX_PDF_PAGES:
-        raise ValueError("PDF has too many pages")
-    return {
-        "format": "pdf",
-        "pages": pages,
-        "hasJavaScript": bool(re.search(rb"/(JavaScript|JS)\b", data)),
-    }
 
 
 def parse_ffprobe(stdout: str) -> dict[str, Any]:

@@ -1,9 +1,11 @@
 """``upload_inspection``: verify one frozen upload (README section 7, steps 5-7).
 
 Reads the exact immutable key/version, checks the file signature against the
-declared media kind (MP4/MOV ``ftyp``, JPEG, PNG, PDF), rejects encrypted or
-oversized PDFs and any SVG/HTML/archive/executable content, probes videos with
-FFprobe when available, computes the SHA-256 of the complete object and marks
+declared media kind (MP4/MOV ``ftyp``, JPEG, PNG, PDF), rejects any
+SVG/HTML/archive/executable content, decodes images and probes videos with
+FFmpeg/FFprobe when available, walks PDF page trees in a bounded subprocess
+(rejecting encrypted, empty or oversized PDFs), computes the SHA-256 of the
+complete object and marks
 the upload ``verified`` or ``rejected``. The final update is conditional on
 ``status = 'uploaded_unverified'`` and an active project, inside the fenced
 completion transaction.
@@ -11,6 +13,8 @@ completion transaction.
 
 from __future__ import annotations
 
+import json
+import sys
 from typing import Any
 
 from psycopg.types.json import Jsonb
@@ -19,7 +23,6 @@ from andarilho_worker.errors import StageError, TransientError
 from andarilho_worker.media import (
     ALLOWED,
     MAX_IMAGE_PIXELS,
-    inspect_pdf,
     jpeg_dimensions,
     parse_ffprobe,
     png_dimensions,
@@ -31,6 +34,8 @@ from andarilho_worker.stages.base import StageContext, StageResult, finish
 
 MAX_INSPECT_BYTES = 8 * 1024**3
 PDF_MAX_BYTES = 64 * 1024**2
+# Wall-clock bound for one image decode or PDF walk (normally well under a second).
+CONTENT_CHECK_SECONDS = 120
 
 
 class Rejected(Exception):  # noqa: N818
@@ -46,6 +51,18 @@ def _load(conn: Any, ctx: StageContext) -> dict[str, Any] | None:
         "expected_bytes FROM uploads WHERE id = %s AND project_id = %s",
         (ctx.job.upload_id, ctx.project_id),
     ).fetchone()
+
+
+def _inspect_pdf(ctx: StageContext, local: Any) -> dict[str, Any]:
+    argv = render_argv("pdf_inspect", python=sys.executable, input=local)
+    try:
+        result = ctx.run(argv, timeout=CONTENT_CHECK_SECONDS)
+        report = json.loads(result.stdout)
+    except (ProcessFailed, ProcessTimeout, ValueError) as exc:
+        raise Rejected("UNSUPPORTED_MEDIA", "PDF could not be inspected") from exc
+    if not report.get("ok"):
+        raise Rejected("UNSUPPORTED_MEDIA", str(report.get("reason") or "PDF is not supported"))
+    return {"pages": int(report["pages"]), "hasJavaScript": bool(report["hasJavaScript"])}
 
 
 def _inspect(ctx: StageContext, upload: dict[str, Any]) -> dict[str, Any]:
@@ -83,13 +100,21 @@ def _inspect(ctx: StageContext, upload: dict[str, Any]) -> dict[str, Any]:
         if dims[0] * dims[1] > MAX_IMAGE_PIXELS:
             raise Rejected("INVALID_MEDIA", "image has too many pixels")
         meta.update(width=dims[0], height=dims[1])
+        if tool_available("ffmpeg"):
+            # A valid header says nothing about the pixels: decode them now, so a
+            # truncated file is rejected before it can be picked for a run.
+            try:
+                ctx.run(render_argv("ffmpeg_decode_image", input=local),
+                        timeout=CONTENT_CHECK_SECONDS)  # fmt: skip
+            except (ProcessFailed, ProcessTimeout) as exc:
+                raise Rejected("INVALID_MEDIA", "image could not be decoded") from exc
+            meta["decoded"] = True
+        else:
+            meta["decoded"] = False  # preparation decodes it with FFmpeg before use
     elif found.kind == "pdf":
         if actual > PDF_MAX_BYTES:
             raise Rejected("INVALID_MEDIA", "PDF too large")
-        try:
-            meta.update(inspect_pdf(local.read_bytes()))
-        except ValueError as exc:
-            raise Rejected("UNSUPPORTED_MEDIA", str(exc)) from exc
+        meta.update(_inspect_pdf(ctx, local))
     else:  # mp4 / mov
         if tool_available("ffprobe"):
             try:

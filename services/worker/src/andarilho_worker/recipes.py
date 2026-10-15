@@ -50,6 +50,16 @@ ARGV: dict[str, tuple[str, ...]] = {
         "ffprobe", "-v", "error", "-hide_banner", "-print_format", "json",
         "-show_format", "-show_streams", "{input}",
     ),
+    # Upload inspection: decode an image's pixels once. A truncated or corrupt
+    # file makes the decoder fail, and -xerror turns that into a non-zero exit.
+    "ffmpeg_decode_image": (
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-xerror",
+        "-err_detect", "explode", "-i", "{input}", "-map", "0:v:0", "-frames:v", "1",
+        "-f", "null", "-",
+    ),
+    # Upload inspection: walk a floor-plan PDF's page tree (see pdf_inspect.py).
+    # {python} is the worker's own interpreter.
+    "pdf_inspect": ("{python}", "-I", "-m", "andarilho_worker.pdf_inspect", "{input}"),
     "ffmpeg_frames": (
         "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
         "-i", "{input}", "-map", "0:v:0", "-an", "-sn", "-dn", "-map_metadata", "-1",

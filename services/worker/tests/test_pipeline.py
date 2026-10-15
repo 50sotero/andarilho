@@ -10,11 +10,14 @@ import threading
 import time
 import uuid
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+from pdf_fixtures import classic_pdf, encrypted_pdf, object_stream_pdf, page_tree
 from psycopg.types.json import Jsonb
 
 from andarilho_worker import queue
+from andarilho_worker.runner import ProcessFailed, RunResult
 from andarilho_worker.stages import STAGES
 from andarilho_worker.stages import inspect_upload as inspect_mod
 from andarilho_worker.supervisor import Supervisor
@@ -365,21 +368,12 @@ def test_run_budget_is_shared_across_stages(db, seed, store, sup):
 # Upload inspection
 # ---------------------------------------------------------------------------
 
-JPEG = (
-    b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
-    b"\xff\xc0\x00\x11\x08\x00\x10\x00\x20\x03\x01\x22\x00\x02\x11\x01\x03\x11\x01"
-    b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00" + b"\x00" * 64 + b"\xff\xd9"
-)
-PNG = (
-    b"\x89PNG\r\n\x1a\n"
-    + b"\x00\x00\x00\rIHDR"
-    + (64).to_bytes(4, "big")
-    + (48).to_bytes(4, "big")
-    + b"\x08\x02\x00\x00\x00"
-    + b"\x00" * 32
-)
-PDF = b"%PDF-1.7\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n3 0 obj << /Type /Page >> endobj\n%%EOF\n"
-ENCRYPTED_PDF = PDF.replace(b"%%EOF", b"trailer << /Encrypt 9 0 R >>\n%%EOF")
+# Real, decodable images (FFmpeg decodes them during inspection where it is installed).
+FIXTURES = Path(__file__).parent / "fixtures"
+JPEG = (FIXTURES / "photo-32x16.jpg").read_bytes()
+PNG = (FIXTURES / "photo-64x48.png").read_bytes()
+PDF = classic_pdf(page_tree(1))
+ENCRYPTED_PDF = encrypted_pdf()
 SVG = (
     b'<?xml version="1.0"?><svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'
 )
@@ -444,10 +438,57 @@ def test_upload_inspection(db, seed, store, sup, monkeypatch, data, kind, status
 
 def test_inspection_rejects_pdf_with_too_many_pages(db, seed, store, sup):
     pid = seed.project()
-    many = b"%PDF-1.7\n" + b"<< /Type /Page >>\n" * 50 + b"%%EOF"
-    uid = make_upload(seed, store, pid, many, "floor_plan")
+    uid = make_upload(seed, store, pid, classic_pdf(page_tree(50)), "floor_plan")
     drain(db, sup)
-    assert seed.one("SELECT status FROM uploads WHERE id = %s", uid)["status"] == "rejected"
+    row = seed.one("SELECT status, media_metadata FROM uploads WHERE id = %s", uid)
+    assert row["status"] == "rejected"
+    assert row["media_metadata"]["rejectionReason"] == "PDF has too many pages"
+
+
+def test_inspection_reads_pages_from_compressed_object_streams(db, seed, store, sup):
+    # Optimized PDFs keep their page objects in compressed object streams.
+    pid = seed.project()
+    uid = make_upload(seed, store, pid, object_stream_pdf(page_tree(2)), "floor_plan")
+    assert drain(db, sup) == [("upload_inspection", "succeeded")]
+    row = seed.one("SELECT status, media_metadata FROM uploads WHERE id = %s", uid)
+    assert row["status"] == "verified" and row["media_metadata"]["pages"] == 2
+
+
+class DecodeRunner:
+    """Stands in for FFmpeg's image decode: succeeds, or fails as for a corrupt file."""
+
+    def __init__(self, ok: bool) -> None:
+        self.ok = ok
+        self.calls: list[list[str]] = []
+
+    def run(self, argv, *, timeout, check_cancelled=None, **kw):
+        argv = [str(a) for a in argv]
+        self.calls.append(argv)
+        result = RunResult(tuple(argv), 0 if self.ok else 1, "", "", 0.01)
+        if not self.ok:
+            raise ProcessFailed("ffmpeg exited with status 1", result)
+        return result
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_inspection_decodes_images_before_verifying_them(
+    db, seed, store, settings, monkeypatch, ok
+):
+    monkeypatch.setattr(inspect_mod, "tool_available", lambda name: True)
+    runner = DecodeRunner(ok)
+    sup = Supervisor(db, store, settings, runner=runner)
+    pid = seed.project()
+    uid = make_upload(seed, store, pid, JPEG, "photo")
+    assert drain(db, sup) == [("upload_inspection", "succeeded")]
+    (call,) = runner.calls
+    assert call[0] == "ffmpeg" and call[-3:] == ["-f", "null", "-"] and "-xerror" in call
+    row = seed.one("SELECT status, rejection_code, media_metadata FROM uploads WHERE id = %s", uid)
+    if ok:
+        assert row["status"] == "verified" and row["media_metadata"]["decoded"] is True
+    else:
+        # A valid header over truncated pixels is rejected before any run can pick it.
+        assert row["status"] == "rejected" and row["rejection_code"] == "INVALID_MEDIA"
+        assert row["media_metadata"]["rejectionReason"] == "image could not be decoded"
 
 
 def test_inspection_finalizes_when_rejected_object_is_already_gone(db, seed, store, sup):
