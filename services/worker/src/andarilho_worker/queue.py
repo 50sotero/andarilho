@@ -522,6 +522,34 @@ def queue_run_outputs(conn: psycopg.Connection, run_id: str) -> None:
         queue_artifact_cleanup(conn, project_id, prefixes, reason="run_ended")
 
 
+def queue_revision_outputs(conn: psycopg.Connection, scene_revision_id: str) -> None:
+    """Queue what a layout save's succeeded stages wrote, once its revision is settled.
+
+    Packaging copies what the scene needs into the revision's own prefix, and a later
+    layout save re-textures from the run's reconstruction, never from these attempts, so
+    nothing reads them once the revision is valid or invalid. Without this every layout
+    save would keep another textured model until the project is deleted.
+    """
+    rows = conn.execute(
+        "SELECT id, project_id, run_id, stage, fencing_token FROM jobs "
+        "WHERE scene_revision_id = %s AND run_id IS NOT NULL AND state = 'succeeded' "
+        "AND fencing_token > 0",
+        (scene_revision_id,),
+    ).fetchall()
+    by_project: dict[str, list[str]] = {}
+    for row in rows:
+        project_id = str(row["project_id"])
+        by_project.setdefault(project_id, []).append(
+            attempt_prefix(
+                project_id, str(row["run_id"]), row["stage"], str(row["id"]), row["fencing_token"]
+            )
+        )
+    for project_id, prefixes in by_project.items():
+        queue_artifact_cleanup(
+            conn, project_id, prefixes, reason="layout_settled", scene_revision_id=scene_revision_id
+        )
+
+
 def finalize_run_if_cancelled(conn: psycopg.Connection, run_id: str) -> bool:
     """When a cancelled run has no active jobs left, mark it cancelled and release budget."""
     row = conn.execute(
@@ -594,13 +622,15 @@ def fail_revision(conn: psycopg.Connection, scene_revision_id: str | None) -> No
         (Jsonb([finding]), scene_revision_id),
     )
     # Read back as well: a stage's failure hook may have invalidated it first, and an
-    # invalid revision never becomes valid, so its packaged files are unreferenced.
+    # invalid revision never becomes valid, so its packaged files are unreferenced, and so
+    # is what its pipeline's earlier stages wrote.
     row = conn.execute(
         "SELECT project_id FROM scene_revisions WHERE id = %s AND validation_state = 'invalid'",
         (scene_revision_id,),
     ).fetchone()
     if row is not None:
         _queue_scene_cleanup(conn, str(row["project_id"]), scene_revision_id)
+        queue_revision_outputs(conn, scene_revision_id)
 
 
 def fail_upload(conn: psycopg.Connection, project_id: str, upload_id: str | None) -> None:
@@ -808,6 +838,9 @@ def complete_job(
                 (job.run_id,),
             )
             settle_ledger(conn, job.run_id)  # type: ignore[arg-type]
+        elif finish_run and job.scene_revision_id is not None:
+            # The layout save is done and its revision valid: nothing reads its attempts.
+            queue_revision_outputs(conn, job.scene_revision_id)
 
 
 def cancel_job(

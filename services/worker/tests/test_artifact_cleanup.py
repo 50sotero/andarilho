@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import uuid
 
 import pytest
@@ -9,7 +10,7 @@ from helpers import drain
 from psycopg.types.json import Jsonb
 
 from andarilho_worker import queue
-from andarilho_worker.artifacts import LocalObjectStore
+from andarilho_worker.artifacts import LocalObjectStore, attempt_prefix
 from andarilho_worker.errors import StageError, TransientError
 from andarilho_worker.stages import STAGES
 from andarilho_worker.stages.base import finish
@@ -452,6 +453,94 @@ def test_a_rejected_scene_leaves_nothing_behind_once_its_cleanup_runs(db, seed, 
     assert run_all_due_cleanups(db, sup) == ["succeeded", "succeeded"]
     assert store.list_keys(prefix) == []
     assert store.list_keys(f"tenants/{pid}/runs/{run_id}/") == []
+
+
+def save_layout(seed, project_id: str, run_id: str, layout: dict) -> str:
+    """A user layout save on the run's scene, as the API makes it: revision 2 and its job."""
+    base = seed.one("SELECT id, scene_id FROM scene_revisions WHERE run_id = %s", run_id)
+    revision_id = str(uuid.uuid4())
+    seed.exec(
+        "INSERT INTO scene_revisions (id, scene_id, project_id, run_id, base_revision_id, revision, "
+        "layout_revision, layout, validation_state, approval_state, created_by) "
+        "VALUES (%s, %s, %s, %s, %s, 2, 2, %s, 'pending', 'draft', 'user-1')",
+        revision_id, base["scene_id"], project_id, run_id, base["id"], Jsonb(layout),
+    )  # fmt: skip
+    seed.job(project_id, "geometry_proposal", {"sceneRevisionId": revision_id,
+             "layoutSource": "user"}, run_id=run_id, scene_revision_id=revision_id)  # fmt: skip
+    return revision_id
+
+
+def layout_attempts(seed, project_id: str, revision_id: str) -> list[str]:
+    rows = seed.all(
+        "SELECT id, run_id, stage, fencing_token FROM jobs "
+        "WHERE scene_revision_id = %s AND state = 'succeeded'",
+        revision_id,
+    )
+    return [
+        attempt_prefix(project_id, str(r["run_id"]), r["stage"], str(r["id"]), r["fencing_token"])
+        for r in rows
+    ]
+
+
+def test_a_valid_layout_save_leaves_only_its_scene_once_its_cleanup_runs(db, seed, store, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    run_outputs = sorted(store.list_keys(f"tenants/{pid}/runs/{run_id}/"))
+    revision_id = save_layout(
+        seed, pid, run_id, seed.one("SELECT layout FROM scene_revisions")["layout"]
+    )
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 4
+    attempts = layout_attempts(seed, pid, revision_id)
+    assert len(attempts) == 4
+    assert any(key.endswith("/model.glb") for p in attempts for key in store.list_keys(p))
+
+    assert run_all_due_cleanups(db, sup) == ["succeeded"]
+    assert all(store.list_keys(p) == [] for p in attempts)
+    # The revision's own files stay, and so does what the run wrote: later saves re-texture
+    # from its reconstruction.
+    assert store.list_keys(f"tenants/{pid}/scenes/{revision_id}/")
+    assert sorted(store.list_keys(f"tenants/{pid}/runs/{run_id}/")) == run_outputs
+
+
+def test_a_layout_save_that_fails_validation_leaves_nothing_behind(db, seed, store, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    run_outputs = sorted(store.list_keys(f"tenants/{pid}/runs/{run_id}/"))
+    layout = copy.deepcopy(seed.one("SELECT layout FROM scene_revisions")["layout"])
+    layout["spawn"]["feet"] = [0.0, 0.0, 1.5]  # inside the divider wall
+    revision_id = save_layout(seed, pid, run_id, layout)
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 3 + ["failed"]
+    attempts = layout_attempts(seed, pid, revision_id)
+    assert len(attempts) == 3
+
+    # One cleanup for the invalid revision's scene, one for what its stages wrote.
+    assert run_all_due_cleanups(db, sup) == ["succeeded", "succeeded"]
+    assert all(store.list_keys(p) == [] for p in attempts)
+    assert store.list_keys(f"tenants/{pid}/scenes/{revision_id}/") == []
+    assert sorted(store.list_keys(f"tenants/{pid}/runs/{run_id}/")) == run_outputs
+
+
+def test_an_attempt_of_a_layout_save_is_kept_only_while_its_revision_is_pending(
+    db, seed, store, sup
+):
+    pid = seed.project()
+    rev = make_revision(seed, pid, state="pending", run_status="succeeded")
+    job_id = seed.job(pid, "packaging", {}, run_id=rev["run"], scene_revision_id=rev["revision"])
+    seed.exec("UPDATE jobs SET state = 'succeeded', fencing_token = 1 WHERE id = %s", job_id)
+    attempt = attempt_of(pid, rev["run"], job_id)
+    store.put_bytes(attempt + "model.glb", b"x")
+    enqueue(db, pid, [attempt], reason="layout_settled")
+    assert run_due_cleanup(db, sup) == "succeeded"
+    assert store.list_keys(attempt) == [attempt + "model.glb"]  # a later stage may read it
+
+    seed.exec(
+        "UPDATE scene_revisions SET validation_state = 'valid' WHERE id = %s", rev["revision"]
+    )
+    enqueue(db, pid, [attempt], reason="layout_settled")
+    assert run_due_cleanup(db, sup) == "succeeded"
+    assert store.list_keys(attempt) == []
 
 
 def test_a_worker_lost_on_its_last_attempt_leaves_nothing_behind(db, seed, store, sup):

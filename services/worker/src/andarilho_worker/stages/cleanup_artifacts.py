@@ -6,7 +6,8 @@ kinds of prefix:
 * an attempt prefix ``tenants/{p}/runs/{r}/attempts/{stage}/{job}/{fence}/`` of an
   attempt that was lost or cancelled before it committed (the reaper's view, or a
   job cancelled before a later attempt could sweep what it left), one a worker
-  failed to delete before the job ended, or the outputs of a run that ended unfinished;
+  failed to delete before the job ended, the outputs of a run that ended unfinished,
+  or the outputs of a layout save whose revision is now valid or invalid;
 * a scene prefix ``tenants/{p}/scenes/{revision}/`` of a revision that is now invalid,
   because its pipeline failed or was cancelled before validation committed it.
 
@@ -22,7 +23,8 @@ are kept:
   no cleanup, so keeping it here would keep its files until the project is deleted.)
 * the attempt prefix a succeeded job committed under (its last fence), while its run
   has not failed or been cancelled. A succeeded camera_reconstruction holds the frames
-  that layout re-texturing needs. The job's earlier fences are stale and deleted.
+  that layout re-texturing needs. A layout save's job is kept only while its revision
+  is pending. The job's earlier fences are stale and deleted.
 
 Every requested prefix is checked before anything is deleted.
 """
@@ -104,8 +106,11 @@ def _revision_keep_reason(conn: Any, *, project_id: str, revision_id: str) -> st
 
 def _job_keep_reason(conn: Any, *, project_id: str, job_id: str, fence: int) -> str | None:
     row = conn.execute(
-        "SELECT j.state, j.fencing_token, r.status AS run_status FROM jobs j "
+        "SELECT j.state, j.fencing_token, j.scene_revision_id, r.status AS run_status, "
+        "v.validation_state FROM jobs j "
         "LEFT JOIN reconstruction_runs r ON r.id = j.run_id AND r.project_id = j.project_id "
+        "LEFT JOIN scene_revisions v ON v.id = j.scene_revision_id "
+        "AND v.project_id = j.project_id "
         "WHERE j.id = %s AND j.project_id = %s",
         (job_id, project_id),
     ).fetchone()
@@ -113,6 +118,13 @@ def _job_keep_reason(conn: Any, *, project_id: str, job_id: str, fence: int) -> 
     # succeeded job is never claimed or reaped again, so its fence is the one it committed
     # under. Every other attempt, including one of a job that is gone, is unreferenced.
     if row is None or row["state"] != "succeeded" or row["fencing_token"] != fence:
+        return None
+    if row["scene_revision_id"] is not None:
+        # A layout save's stages feed only its own revision: packaging copies what the
+        # scene needs into the revision's prefix, and later saves re-texture from the
+        # run's reconstruction. Once the revision is settled, nothing reads them.
+        if row["validation_state"] == "pending":
+            return "the layout save is still being processed"
         return None
     # A run that ended unfinished never had a valid scene to re-texture, and a retry is
     # a new run, so nothing reads what its stages wrote.
