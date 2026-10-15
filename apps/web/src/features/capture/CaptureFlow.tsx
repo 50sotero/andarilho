@@ -16,14 +16,16 @@ import {
 import { UploadList, type UploadRowView } from "@/features/uploads/UploadList";
 import { api, newIdempotencyKey } from "@/lib/api/client";
 import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
-import type { MediaKind, RunQuality, Upload } from "@/lib/api/types";
+import type { IntakePolicy, MediaKind, RunQuality, Upload } from "@/lib/api/types";
 import { loadResumeRecord, pruneResumeRecords, removeResumeRecord } from "@/lib/upload-resume";
 import { usePolling } from "@/lib/use-polling";
 import { CaptureGuidance } from "./CaptureGuidance";
 import {
   ACCEPT,
+  DEFAULT_INTAKE_POLICY,
   declaredContentType,
   formatBytes,
+  PER_FILE_CODES,
   validateIntake,
   type CandidateFile,
 } from "./validation";
@@ -102,6 +104,7 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
   const [error, setError] = useState<FriendlyError | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [announcement, setAnnouncement] = useState("");
+  const [policy, setPolicy] = useState<IntakePolicy>(DEFAULT_INTAKE_POLICY);
 
   const uploadersRef = useRef(new Map<string, MultipartUpload>());
   const limiterRef = useRef(createLimiter(DEFAULT_CONCURRENCY));
@@ -109,6 +112,21 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
     null,
   );
   const rowSeq = useRef(0);
+
+  useEffect(() => {
+    // The deployment's limits; until they arrive (or if they cannot be read) the
+    // API's defaults apply, and the API enforces its own values either way.
+    let active = true;
+    api
+      .getIntakePolicy()
+      .then(({ data }) => {
+        if (active) setPolicy(data);
+      })
+      .catch(() => undefined);
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     pruneResumeRecords();
@@ -177,15 +195,11 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
       })),
   ];
 
-  // Type checks only apply to newly selected files; rows were already validated.
-  const validation = validateIntake(allForValidation);
-  const selectionValidation = validateIntake(candidates);
-  const typeErrors = selectionValidation.errors.filter((e) =>
-    ["UNSUPPORTED_TYPE", "EMPTY_FILE", "FLOOR_PLAN_TOO_LARGE"].includes(e.code),
-  );
-  const aggregateErrors = validation.errors.filter(
-    (e) => !["UNSUPPORTED_TYPE", "EMPTY_FILE", "FLOOR_PLAN_TOO_LARGE"].includes(e.code),
-  );
+  // Per-file checks only apply to newly selected files; rows were already validated.
+  const validation = validateIntake(allForValidation, policy);
+  const selectionValidation = validateIntake(candidates, policy);
+  const typeErrors = selectionValidation.errors.filter((e) => PER_FILE_CODES.includes(e.code));
+  const aggregateErrors = validation.errors.filter((e) => !PER_FILE_CODES.includes(e.code));
   const blockingErrors = [...typeErrors, ...aggregateErrors];
 
   const resumableCount = useMemo(() => {
@@ -421,7 +435,7 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
             Capture guidance (read before recording)
           </summary>
           <div className="mt-3">
-            <CaptureGuidance headingLevel={3} />
+            <CaptureGuidance headingLevel={3} policy={policy} />
           </div>
         </details>
       </Card>

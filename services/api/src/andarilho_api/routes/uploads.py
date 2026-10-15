@@ -16,7 +16,7 @@ from andarilho_api.auth import current_subject
 from andarilho_api.db import get_db
 from andarilho_api.deps import get_settings_dep, get_storage, utcnow
 from andarilho_api.domain.membership import WRITERS, load_project, load_scoped, lock_row
-from andarilho_api.domain.quotas import check_upload
+from andarilho_api.domain.quotas import check_upload, intake_policy
 from andarilho_api.errors import ApiError, invalid_state, validation_failed
 from andarilho_api.models import (
     ACTIVE_RUN_STATUSES,
@@ -63,6 +63,12 @@ def _expired() -> ApiError:
         "This upload has expired.",
         suggested_action="Start a new upload for this file.",
     )
+
+
+@router.get("/intake-policy")
+def get_intake_policy(subject: Subject, settings: Config) -> dict[str, int]:
+    """The deployment's capture limits, so the browser checks a selection before uploading."""
+    return intake_policy(settings)
 
 
 @router.post("/projects/{project_id}/uploads", status_code=201)

@@ -1,4 +1,5 @@
-import { INTAKE_LIMITS } from "./validation";
+import type { IntakePolicy } from "@/lib/api/types";
+import { DEFAULT_INTAKE_POLICY, formatBytes, INTAKE_LIMITS } from "./validation";
 
 export const CAPTURE_TIPS: readonly string[] = [
   "Use a normal perspective camera, good light, and a consistent lens/zoom.",
@@ -11,7 +12,14 @@ export const CAPTURE_TIPS: readonly string[] = [
   "Capture only spaces and material you have permission to process and share.",
 ];
 
-export function CaptureGuidance({ headingLevel = 2 }: { headingLevel?: 2 | 3 }) {
+export function CaptureGuidance({
+  headingLevel = 2,
+  policy = DEFAULT_INTAKE_POLICY,
+}: {
+  headingLevel?: 2 | 3;
+  /** The deployment's limits when known (signed-in pages); the defaults otherwise. */
+  policy?: IntakePolicy;
+}) {
   const Heading = headingLevel === 2 ? "h2" : "h3";
   return (
     <div className="space-y-4">
@@ -25,9 +33,14 @@ export function CaptureGuidance({ headingLevel = 2 }: { headingLevel?: 2 | 3 }) 
         <p className="font-medium">Beta intake limits</p>
         <ul className="list-disc pl-5">
           <li>One video, up to {INTAKE_LIMITS.maxVideoSeconds / 60} minutes (MP4 or MOV).</li>
-          <li>Up to {INTAKE_LIMITS.maxPhotos} supplementary photos (JPEG or PNG).</li>
-          <li>Up to 2 GiB in total.</li>
-          <li>An optional floor plan up to 20 MiB (PNG, JPEG or PDF).</li>
+          <li>
+            Up to {policy.maxPhotos} supplementary photos (JPEG or PNG), or at least{" "}
+            {policy.minPhotosWithoutVideo} overlapping photos without a video.
+          </li>
+          <li>Up to {formatBytes(policy.maxTotalBytes)} in total.</li>
+          <li>
+            An optional floor plan up to {formatBytes(policy.maxFloorPlanBytes)} (PNG, JPEG or PDF).
+          </li>
         </ul>
         <p className="mt-2">
           These are starting limits, not reconstruction guarantees. Areas the camera never saw

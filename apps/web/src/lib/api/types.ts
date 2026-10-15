@@ -148,6 +148,16 @@ export interface PartUrlsResponse {
   expiresAt: string;
 }
 
+/** The deployment's capture limits (`GET /v1/intake-policy`); the API enforces them. */
+export interface IntakePolicy {
+  maxTotalBytes: number;
+  maxVideoBytes: number;
+  maxPhotoBytes: number;
+  maxFloorPlanBytes: number;
+  maxPhotos: number;
+  minPhotosWithoutVideo: number;
+}
+
 /** An existing provider tour attached to a project (README section 15): an embed only. */
 export interface TourImport {
   id: string;

@@ -23,6 +23,9 @@ _PINNED: dict[str, Any] = json.loads(
     (Path(__file__).with_name("recipes.json")).read_text(encoding="utf-8")
 )
 
+# Capture intake rules the worker enforces (published to the web app).
+INTAKE: dict[str, Any] = dict(_PINNED["intake"])
+
 # Reserved seconds per quality tier (cost policy, not part of the pipeline digest).
 _RESERVATIONS = {
     "preview": (1800, 900),

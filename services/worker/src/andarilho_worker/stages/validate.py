@@ -5,9 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from andarilho_worker.errors import StageError
+from andarilho_worker.recipes import INTAKE
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
-MIN_PHOTOS_WITHOUT_VIDEO = 30
+MIN_PHOTOS_WITHOUT_VIDEO = int(INTAKE["minPhotosWithoutVideo"])
 
 
 def _load(conn: Any, ctx: StageContext) -> dict[str, Any]:

@@ -51,13 +51,18 @@ def worker_recipes() -> dict[str, Any]:
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return {
-        quality: {
-            "name": recipe.name,
-            "digest": recipe.digest,
-            "stages": [{"stage": st.stage, "capability": st.capability} for st in recipe.stages],
-            "params": dict(recipe.params),
-        }
-        for quality, recipe in module.RECIPES.items()
+        **{
+            quality: {
+                "name": recipe.name,
+                "digest": recipe.digest,
+                "stages": [
+                    {"stage": st.stage, "capability": st.capability} for st in recipe.stages
+                ],
+                "params": dict(recipe.params),
+            }
+            for quality, recipe in module.RECIPES.items()
+        },
+        "intake": dict(module.INTAKE),
     }
 
 

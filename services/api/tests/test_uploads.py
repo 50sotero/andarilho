@@ -80,6 +80,21 @@ def test_completing_on_a_versioned_bucket_leaves_no_staging_bytes(client, auth, 
     assert s3.get_object(Bucket=BUCKET, Key=row.immutable_key)["Body"].read() == b"v" * 1000
 
 
+def test_intake_policy_publishes_the_deployment_limits(client, auth, app):
+    assert client.get("/v1/intake-policy").status_code == 401
+    app.state.settings.upload_max_total_bytes = 3 * 1024 * MIB
+    app.state.settings.upload_max_photos = 120
+    policy = client.get("/v1/intake-policy", headers=auth()).json()
+    assert policy == {
+        "maxTotalBytes": 3 * 1024 * MIB,
+        "maxVideoBytes": 3 * 1024 * MIB,  # no separate video cap: the total applies
+        "maxPhotoBytes": 50 * MIB,
+        "maxFloorPlanBytes": 20 * MIB,
+        "maxPhotos": 120,
+        "minPhotosWithoutVideo": 30,  # the worker's rule, from recipes.json
+    }
+
+
 def test_photo_count_limit(client, auth, db, app):
     app.state.settings.upload_max_photos = 2
     pid = create_project(client, auth)["id"]

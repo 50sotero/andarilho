@@ -12,6 +12,7 @@ import type {
   ProjectDetail,
   ProjectList,
   ImportResolution,
+  IntakePolicy,
   RunAccepted,
   RunAdvice,
   TourImport,
@@ -171,6 +172,8 @@ export function createApiClient(fetchImpl: FetchLike = (input, init) => fetch(in
       request<{ items: TourImport[] }>(`/v1/projects/${id(projectId)}/imports`),
     deleteImport: (importId: string) =>
       request<void>(`/v1/imports/${id(importId)}`, { method: "DELETE" }),
+
+    getIntakePolicy: () => request<IntakePolicy>("/v1/intake-policy"),
 
     getRunAdvice: (runId: string) =>
       request<RunAdvice>(`/v1/runs/${id(runId)}/advice`, { method: "POST", body: {} }),

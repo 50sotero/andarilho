@@ -4,18 +4,29 @@
  * the API and the inspection worker verify file signatures and decodability.
  * These checks exist to give fast, friendly feedback before uploading.
  */
-import type { MediaKind } from "@/lib/api/types";
+import type { IntakePolicy, MediaKind } from "@/lib/api/types";
 
 export const MiB = 1024 * 1024;
 export const GiB = 1024 * MiB;
 
+/** Product guidance the API does not configure. */
 export const INTAKE_LIMITS = {
   maxVideos: 1,
   maxVideoSeconds: 5 * 60, // advisory
-  maxPhotos: 300,
-  maxTotalBytes: 2 * GiB,
-  maxFloorPlanBytes: 20 * MiB,
 } as const;
+
+/**
+ * The API's default intake policy, used until `GET /v1/intake-policy` answers
+ * (and on pages without a session). The API enforces the deployment's own values.
+ */
+export const DEFAULT_INTAKE_POLICY: IntakePolicy = {
+  maxTotalBytes: 2 * GiB,
+  maxVideoBytes: 2 * GiB,
+  maxPhotoBytes: 50 * MiB,
+  maxFloorPlanBytes: 20 * MiB,
+  maxPhotos: 300,
+  minPhotosWithoutVideo: 30,
+};
 
 interface TypeRule {
   extensions: readonly string[];
@@ -68,10 +79,13 @@ export interface IntakeIssue {
     | "NO_CAPTURE_MEDIA"
     | "TOO_MANY_VIDEOS"
     | "TOO_MANY_PHOTOS"
+    | "TOO_FEW_PHOTOS"
     | "TOO_MANY_FLOOR_PLANS"
     | "UNSUPPORTED_TYPE"
     | "EMPTY_FILE"
     | "FLOOR_PLAN_TOO_LARGE"
+    | "PHOTO_TOO_LARGE"
+    | "VIDEO_TOO_LARGE"
     | "TOTAL_TOO_LARGE"
     | "VIDEO_TOO_LONG"
     | "NO_VIDEO";
@@ -119,7 +133,19 @@ export function formatBytes(bytes: number): string {
   return `${bytes} B`;
 }
 
-export function validateIntake(files: readonly CandidateFile[]): IntakeResult {
+/** Per-file problems: they belong to a newly selected file, not to the whole set. */
+export const PER_FILE_CODES: readonly IntakeIssue["code"][] = [
+  "UNSUPPORTED_TYPE",
+  "EMPTY_FILE",
+  "FLOOR_PLAN_TOO_LARGE",
+  "PHOTO_TOO_LARGE",
+  "VIDEO_TOO_LARGE",
+];
+
+export function validateIntake(
+  files: readonly CandidateFile[],
+  policy: IntakePolicy = DEFAULT_INTAKE_POLICY,
+): IntakeResult {
   const errors: IntakeIssue[] = [];
   const warnings: IntakeIssue[] = [];
   const videos = files.filter((f) => f.mediaKind === "video");
@@ -132,6 +158,12 @@ export function validateIntake(files: readonly CandidateFile[]): IntakeResult {
       code: "NO_CAPTURE_MEDIA",
       message: "Add a walkthrough video or overlapping photos. A floor plan alone is not enough.",
     });
+  } else if (videos.length === 0 && photos.length < policy.minPhotosWithoutVideo) {
+    // The worker rejects these sets outright; say so before anything is uploaded.
+    errors.push({
+      code: "TOO_FEW_PHOTOS",
+      message: `Without a video, add at least ${policy.minPhotosWithoutVideo} overlapping photos (you selected ${photos.length}), or add a walkthrough video.`,
+    });
   } else if (videos.length === 0) {
     warnings.push({
       code: "NO_VIDEO",
@@ -142,10 +174,10 @@ export function validateIntake(files: readonly CandidateFile[]): IntakeResult {
   if (videos.length > INTAKE_LIMITS.maxVideos) {
     errors.push({ code: "TOO_MANY_VIDEOS", message: "Use one continuous walkthrough video." });
   }
-  if (photos.length > INTAKE_LIMITS.maxPhotos) {
+  if (photos.length > policy.maxPhotos) {
     errors.push({
       code: "TOO_MANY_PHOTOS",
-      message: `Use at most ${INTAKE_LIMITS.maxPhotos} photos (you selected ${photos.length}).`,
+      message: `Use at most ${policy.maxPhotos} photos (you selected ${photos.length}).`,
     });
   }
   if (plans.length > 1) {
@@ -170,10 +202,16 @@ export function validateIntake(files: readonly CandidateFile[]): IntakeResult {
         fileName: file.name,
       });
     }
-    if (file.mediaKind === "floor_plan" && file.size > INTAKE_LIMITS.maxFloorPlanBytes) {
+    const sizeRule = {
+      floor_plan: ["FLOOR_PLAN_TOO_LARGE", policy.maxFloorPlanBytes, "floor plans"],
+      photo: ["PHOTO_TOO_LARGE", policy.maxPhotoBytes, "photos"],
+      video: ["VIDEO_TOO_LARGE", policy.maxVideoBytes, "videos"],
+    } as const satisfies Record<MediaKind, readonly [IntakeIssue["code"], number, string]>;
+    const [code, maxBytes, noun] = sizeRule[file.mediaKind];
+    if (file.size > maxBytes) {
       errors.push({
-        code: "FLOOR_PLAN_TOO_LARGE",
-        message: `${file.name} is ${formatBytes(file.size)}; floor plans can be up to 20 MiB.`,
+        code,
+        message: `${file.name} is ${formatBytes(file.size)}; ${noun} can be up to ${formatBytes(maxBytes)}.`,
         fileName: file.name,
       });
     }
@@ -190,10 +228,10 @@ export function validateIntake(files: readonly CandidateFile[]): IntakeResult {
     }
   }
 
-  if (totalBytes > INTAKE_LIMITS.maxTotalBytes) {
+  if (totalBytes > policy.maxTotalBytes) {
     errors.push({
       code: "TOTAL_TOO_LARGE",
-      message: `The selection is ${formatBytes(totalBytes)}; the limit is 2 GiB in total.`,
+      message: `The selection is ${formatBytes(totalBytes)}; the limit is ${formatBytes(policy.maxTotalBytes)} in total.`,
     });
   }
 

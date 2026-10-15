@@ -246,6 +246,14 @@ COMMON = {
     "renderShDegree": 1,
 }
 
+# Capture intake rules shared with the API, which publishes them to the web app
+# (scripts/generate-contracts.py copies them into the API's recipes.json). Not part
+# of any recipe digest.
+INTAKE = {
+    # Photos alone rarely connect rooms; fewer than this never register reliably.
+    "minPhotosWithoutVideo": 30,
+}
+
 RECIPES: dict[str, Recipe] = {
     "preview": Recipe(
         "preview-v1",

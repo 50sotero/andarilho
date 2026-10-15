@@ -8,6 +8,7 @@ import uuid
 from sqlalchemy import and_, func, not_, or_, select
 from sqlalchemy.orm import Session
 
+from andarilho_api.domain.recipes import INTAKE
 from andarilho_api.errors import ApiError, validation_failed
 from andarilho_api.models import Upload
 from andarilho_api.settings import Settings
@@ -37,6 +38,22 @@ def max_bytes_for(settings: Settings, media_kind: str) -> int:
         "photo": settings.upload_max_photo_bytes,
         "floor_plan": settings.upload_max_floor_plan_bytes,
     }[media_kind]
+
+
+def intake_policy(settings: Settings) -> dict[str, int]:
+    """The intake limits the web app checks before uploading (README section 7).
+
+    The API still enforces each of them; publishing them keeps the browser's early
+    feedback in step with a deployment that changes the configurable limits.
+    """
+    return {
+        "maxTotalBytes": settings.upload_max_total_bytes,
+        "maxVideoBytes": min(settings.video_max_bytes, settings.upload_max_total_bytes),
+        "maxPhotoBytes": settings.upload_max_photo_bytes,
+        "maxFloorPlanBytes": settings.upload_max_floor_plan_bytes,
+        "maxPhotos": settings.upload_max_photos,
+        "minPhotosWithoutVideo": int(INTAKE["minPhotosWithoutVideo"]),
+    }
 
 
 def check_upload(
