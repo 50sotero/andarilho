@@ -75,6 +75,38 @@ export function removalMode(
   return "best-effort";
 }
 
+/**
+ * Whether a run can start, and the line explaining what it will use or what is
+ * missing. Files still in the selection are not uploads yet: a run started now
+ * would silently leave them out, so they must be uploaded (or cleared) first.
+ */
+export function startReadiness(state: {
+  submitting: boolean;
+  selectedNotUploaded: number;
+  allRowsSettled: boolean;
+  inputCount: number;
+  hasFloorPlan: boolean;
+  blockingErrors: number;
+}): { canSubmit: boolean; hint: string } {
+  const canSubmit =
+    !state.submitting &&
+    state.selectedNotUploaded === 0 &&
+    state.allRowsSettled &&
+    state.inputCount > 0 &&
+    state.blockingErrors === 0;
+  let hint: string;
+  if (state.selectedNotUploaded > 0) {
+    hint = `Upload or clear the ${state.selectedNotUploaded} selected file(s) first; they are not part of a run until they are uploaded and verified.`;
+  } else if (state.inputCount === 0) {
+    hint = "Upload a video or photos, and wait until they are verified.";
+  } else if (!state.allRowsSettled) {
+    hint = "Waiting for all uploads to finish and be verified. Remove rejected files to continue.";
+  } else {
+    hint = `${state.inputCount} input file(s)${state.hasFloorPlan ? " and a floor plan" : ""} will be used.`;
+  }
+  return { canSubmit, hint };
+}
+
 function initialProgress(size: number): UploadProgress {
   return {
     phase: "idle",
@@ -377,8 +409,14 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
     selectedPrevious.find((u) => u.mediaKind === "floor_plan")?.id ??
     null;
   const allRowsSettled = rows.every((r) => r.serverStatus === "verified");
-  const canSubmit =
-    !submitting && allRowsSettled && inputUploadIds.length > 0 && aggregateErrors.length === 0;
+  const { canSubmit, hint: startHint } = startReadiness({
+    submitting,
+    selectedNotUploaded: candidates.length,
+    allRowsSettled,
+    inputCount: inputUploadIds.length,
+    hasFloorPlan: floorPlanUploadId !== null,
+    blockingErrors: aggregateErrors.length,
+  });
 
   async function submit() {
     if (!canSubmit) return;
@@ -618,13 +656,7 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
             <label htmlFor={ids.supp}>Include supplementary photos</label>
           </div>
         </div>
-        <p className="mt-3 text-sm text-stone-700 dark:text-stone-300">
-          {inputUploadIds.length === 0
-            ? "Upload a video or photos, and wait until they are verified."
-            : !allRowsSettled
-              ? "Waiting for all uploads to finish and be verified. Remove rejected files to continue."
-              : `${inputUploadIds.length} input file(s)${floorPlanUploadId ? " and a floor plan" : ""} will be used.`}
-        </p>
+        <p className="mt-3 text-sm text-stone-700 dark:text-stone-300">{startHint}</p>
         <div className="mt-3">
           <ErrorNotice error={error} />
         </div>

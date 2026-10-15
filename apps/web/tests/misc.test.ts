@@ -15,7 +15,7 @@ import {
 } from "@/features/processing/stages";
 import { expiryFromDays } from "@/features/sharing/SharePanel";
 import { awaitingRevision, fallbackLayout } from "@/features/projects/PrivateWalk";
-import { removalMode } from "@/features/capture/CaptureFlow";
+import { removalMode, startReadiness } from "@/features/capture/CaptureFlow";
 import { rejectionMessage } from "@/features/uploads/UploadList";
 import { envelopeExpired } from "@/components/viewer/envelope";
 import type { DeliveryEnvelope, Layout, Run, SceneDetail } from "@/lib/api/types";
@@ -232,5 +232,32 @@ describe("delivery envelope expiry", () => {
   });
   it("treats an unparseable expiry as expired", () => {
     expect(envelopeExpired({ expiresAt: "soon" }, now)).toBe(true);
+  });
+});
+
+describe("starting a run from the capture page", () => {
+  const ready = {
+    submitting: false,
+    selectedNotUploaded: 0,
+    allRowsSettled: true,
+    inputCount: 40,
+    hasFloorPlan: false,
+    blockingErrors: 0,
+  };
+  it("starts when every input is uploaded and verified", () => {
+    expect(startReadiness(ready)).toEqual({
+      canSubmit: true,
+      hint: "40 input file(s) will be used.",
+    });
+  });
+  it("waits for files that are selected but not uploaded, even with enough inputs", () => {
+    const pending = startReadiness({ ...ready, selectedNotUploaded: 2 });
+    expect(pending.canSubmit).toBe(false);
+    expect(pending.hint).toMatch(/Upload or clear the 2 selected file\(s\) first/);
+  });
+  it("waits for verification and blocking errors", () => {
+    expect(startReadiness({ ...ready, allRowsSettled: false }).canSubmit).toBe(false);
+    expect(startReadiness({ ...ready, blockingErrors: 1 }).canSubmit).toBe(false);
+    expect(startReadiness({ ...ready, inputCount: 0 }).canSubmit).toBe(false);
   });
 });
