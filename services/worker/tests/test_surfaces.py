@@ -102,6 +102,40 @@ def test_floor_and_ceiling_face_the_right_way(surfaces):
     np.testing.assert_allclose(ceiling.normal, [0, -1, 0], atol=1e-12)
 
 
+def _surface_named(surfaces: list[Surface], name: str) -> Surface:
+    return next(s for s in surfaces if s.name == name)
+
+
+def _world_ring(s: Surface) -> np.ndarray:
+    """World positions (K, 3) of a surface's outer ring."""
+    return s.origin + s.outer[:, :1] * s.u_axis + s.outer[:, 1:] * s.v_axis
+
+
+def test_sill_top_faces_up_at_the_sill_height(surfaces):
+    # The sill is the wall below the window: its top sits at the opening's bottom edge, faces
+    # up into the room, and spans the opening along the east wall (z from 0.8 to 1.8).
+    top = _surface_named(surfaces, "wall-east-sill-window:top")
+    np.testing.assert_allclose(top.normal, [0, 1, 0], atol=1e-12)
+    ring = _world_ring(top)
+    np.testing.assert_allclose(ring[:, 1], 0.9, atol=1e-12)
+    assert ring[:, 2].min() == pytest.approx(0.8)
+    assert ring[:, 2].max() == pytest.approx(1.8)
+    # The door opens onto the floor, so its wall has no sill.
+    assert not any(s.name.startswith("wall-north-sill") for s in surfaces)
+
+
+def test_lintel_undersides_face_down_at_the_lintel_height(surfaces):
+    # A lintel is the wall above an opening: its underside sits at the opening's top edge and
+    # faces down into the opening. The door's lintel is at 2.1 m, the window's at 1.8 m.
+    for name, height in (
+        ("wall-north-lintel-door:bottom", 2.1),
+        ("wall-east-lintel-window:bottom", 1.8),
+    ):
+        bottom = _surface_named(surfaces, name)
+        np.testing.assert_allclose(bottom.normal, [0, -1, 0], atol=1e-12, err_msg=name)
+        np.testing.assert_allclose(_world_ring(bottom)[:, 1], height, atol=1e-12, err_msg=name)
+
+
 def _long_faces(surfaces: list[Surface]) -> list[Surface]:
     """The two long faces (``:a`` and ``:b``) of every wall piece."""
     return [s for s in surfaces if s.kind in WALL_KINDS and s.name.endswith((":a", ":b"))]

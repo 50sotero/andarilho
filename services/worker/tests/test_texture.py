@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -13,7 +13,15 @@ import pytest
 
 from andarilho_worker.geometry import texture as texture_module
 from andarilho_worker.geometry.layout import floor_supports, rectangle_layout
-from andarilho_worker.geometry.surfaces import Atlas, build_atlas, chart_texels, layout_surfaces
+from andarilho_worker.geometry.surfaces import (
+    Atlas,
+    ChartPlacement,
+    Surface,
+    build_atlas,
+    chart_grid,
+    chart_texels,
+    layout_surfaces,
+)
 from andarilho_worker.geometry.texture import (
     TextureFrame,
     TextureParams,
@@ -43,9 +51,16 @@ PITCHES = (-0.1, 0.25, -0.55, -0.1, 0.25, -0.5, -0.1, 0.25, -0.6, -0.1, 0.25, -0
 # --------------------------------------------------------------------------
 
 
+CHECKER_PHASE = 0.07  # metres; keeps every face plane 0.02 m or more from a checker line
+
+
 def truth(points: np.ndarray, surface_index: int) -> np.ndarray:
-    """Ground-truth colour: a base colour per surface with a 0.2 m checker in world space."""
-    cells = np.floor(points / 0.2).astype(np.int64).sum(axis=1) % 2
+    """Ground-truth colour: a base colour per surface with a 0.2 m checker in world space.
+
+    A point exactly on a checker line takes its parity from float rounding, so the checker is
+    offset by CHECKER_PHASE to keep the room's walls, floor and ceiling off the lines.
+    """
+    cells = np.floor((points + CHECKER_PHASE) / 0.2).astype(np.int64).sum(axis=1) % 2
     shade = np.where(cells == 0, 1.0, 0.55)
     return shade[:, None] * PALETTE[surface_index % len(PALETTE)]
 
@@ -135,6 +150,65 @@ def _room() -> dict[str, Any]:
     return rectangle_layout((-1.5, -1.25), (1.5, 1.25), elevation=0.0, height=2.6)
 
 
+def _furnished_room() -> dict[str, Any]:
+    """``_room`` with an open door and an open window, and a box standing in the room.
+
+    The window is open because a closed pane fills the opening from the sill up, so no ray from
+    inside the room reaches the sill's top.
+    """
+    layout = _room()
+    layout["openings"] = [
+        {
+            "id": "door",
+            "wallId": "wall-north",
+            "offset": 0.9,
+            "width": 0.8,
+            "bottom": 0.0,
+            "top": 2.1,
+            "state": "open",
+            "provenance": "user",
+        },
+        {
+            "id": "window",
+            "wallId": "wall-east",
+            "offset": 0.6,
+            "width": 0.9,
+            "bottom": 0.9,
+            "top": 1.8,
+            "state": "open",
+            "provenance": "user",
+        },
+    ]
+    layout["obstacles"] = [
+        {
+            "id": "box",
+            "floorId": "floor-0",
+            "footprint": [[-0.9, 0.3], [-0.4, 0.3], [-0.4, 0.8], [-0.9, 0.8]],
+            "height": 0.8,
+            "provenance": "user",
+        }
+    ]
+    return layout
+
+
+def _big_room_frames(surfaces) -> list[TextureFrame]:
+    """Eight cameras near the middle of a 12 x 10 m room, so every wall is 4.5 m or more away."""
+    frames = []
+    for k in range(8):
+        yaw = np.deg2rad(45.0 * k)
+        eye = [0.5 * np.cos(yaw + 0.7), 1.4, 0.5 * np.sin(yaw + 0.7)]
+        frames.append(_frame(surfaces, f"hall-{k}", eye, yaw, pitch=-0.2).frame)
+    return frames
+
+
+def _aimed(surfaces, name: str, eye: Sequence[float], target: Sequence[float]) -> _Shot:
+    """A rendered camera at ``eye`` whose optical axis points straight at ``target``."""
+    d = np.asarray(target, dtype=np.float64) - np.asarray(eye, dtype=np.float64)
+    yaw = float(np.arctan2(d[0], -d[2]))
+    pitch = float(np.arctan2(d[1], np.hypot(d[0], d[2])))
+    return _frame(surfaces, name, eye, yaw, pitch)
+
+
 def _room_shots(surfaces, count: int = 12, scales: Sequence[float] | None = None) -> list[_Shot]:
     shots = []
     for k in range(count):
@@ -216,11 +290,9 @@ class _Run:
     frames: list[TextureFrame]
 
 
-@pytest.fixture(scope="module")
-def room_run() -> _Run:
-    layout = _room()
+def _texture_run(layout: dict[str, Any], shots: list[_Shot]) -> _Run:
+    """Texture a layout from the given rendered cameras and chart the truth."""
     surfaces = layout_surfaces(layout)
-    shots = _room_shots(surfaces)
     frames = [shot.frame for shot in shots]
     start = time.perf_counter()
     mesh = texture_layout(layout, frames)
@@ -230,21 +302,46 @@ def room_run() -> _Run:
 
 
 @pytest.fixture(scope="module")
+def room_run() -> _Run:
+    layout = _room()
+    return _texture_run(layout, _room_shots(layout_surfaces(layout)))
+
+
+@pytest.fixture(scope="module")
+def furnished_run() -> _Run:
+    layout = _furnished_room()
+    surfaces = layout_surfaces(layout)
+    # Close cameras at the window and the door: from the standard ring a 10 cm sill or lintel spans
+    # only a few pixels, so its colour aliases. Each close camera looks straight at its face.
+    close = [
+        _aimed(surfaces, "window-sill", [0.85, 1.4, -0.2], [1.5, 0.9, -0.2]),
+        _aimed(surfaces, "window-lintel", [0.85, 1.0, -0.2], [1.5, 1.8, -0.2]),
+        _aimed(surfaces, "door-lintel", [-0.2, 1.4, -0.85], [-0.2, 2.1, -1.25]),
+    ]
+    return _texture_run(layout, _room_shots(surfaces) + close)
+
+
+@pytest.fixture(scope="module")
 def room_prefill(room_run: _Run) -> TexturedMesh:
     # The same frames blended without hole filling: only texels a frame saw are coloured.
     return texture_layout(room_run.layout, room_run.frames, TextureParams(hole_fill_texels=0))
 
 
-def _kind_errors(run: _Run, kind: str) -> np.ndarray:
-    """Absolute colour errors on truly seen texels of one kind, shape (M, 3)."""
+def _face_errors(run: _Run, select: Callable[[Surface], bool]) -> np.ndarray:
+    """Absolute colour errors on truly seen texels of the selected faces, shape (M, 3)."""
     parts = []
-    for k, chart in enumerate(run.charts):
-        if chart.kind != kind:
+    for k, (surface, chart) in enumerate(zip(run.surfaces, run.charts, strict=True)):
+        if not select(surface):
             continue
         mask = chart.inside & chart.seen
         colours = _colours(run.mesh, chart, mask)
         parts.append(np.abs(colours - truth(chart.world[mask], k)))
     return np.concatenate(parts)
+
+
+def _kind_errors(run: _Run, kind: str) -> np.ndarray:
+    """Absolute colour errors on truly seen texels of one kind, shape (M, 3)."""
+    return _face_errors(run, lambda s: s.kind == kind)
 
 
 # --------------------------------------------------------------------------
@@ -308,11 +405,70 @@ def test_walls_the_cameras_faced_are_covered(room_run, room_prefill):
     assert all(0.0 <= value <= 1.0 for value in room_run.mesh.coverage.values())
 
 
+def _faces_out_of_room(layout, surface) -> bool:
+    """True for the long wall face on the outside of the room, which a camera inside never faces."""
+    return (
+        surface.kind == "wall"
+        and surface.name.endswith((":a", ":b"))
+        and not _faces_into_room(layout, surface)
+    )
+
+
+def test_outer_wall_faces_stay_unseen_from_inside_a_large_room():
+    # An outer face lies 0.1 m behind the room-side face. From 3.5 m or more that gap falls inside
+    # the depth tolerance (2% of the depth plus 3 cm), so the depth test alone would let the outer
+    # face through. The facing gate (cos >= min_cos) keeps it unseen: with the gate open, the same
+    # frames paint it.
+    layout = rectangle_layout((-6.0, -5.0), (6.0, 5.0), elevation=0.0, height=2.5)
+    surfaces = layout_surfaces(layout)
+    frames = _big_room_frames(surfaces)
+    params = TextureParams(texel_size=0.02)
+    gated = texture_layout(layout, frames, params)
+    open_gate = texture_layout(layout, frames, dataclasses.replace(params, min_cos=-1.0))
+    atlas = build_atlas(surfaces, texel_size=gated.texel_size)
+
+    assert sum(_faces_out_of_room(layout, s) for s in surfaces) == 4
+    outer_total = outer_painted = inner_total = inner_seen = 0
+    for surface, placement in zip(surfaces, atlas.placements, strict=True):
+        if surface.kind != "wall":
+            continue
+        pixels, _, inside = chart_texels(surface, placement, atlas)
+        px = pixels[inside]
+        gated_rgb = gated.pages[placement.page][px[:, 1], px[:, 0]]
+        open_rgb = open_gate.pages[placement.page][px[:, 1], px[:, 0]]
+        if _faces_out_of_room(layout, surface):
+            assert np.all(gated_rgb == UNSEEN), surface.name
+            outer_total += len(px)
+            outer_painted += int(np.any(open_rgb != UNSEEN, axis=1).sum())
+        else:
+            inner_total += len(px)
+            inner_seen += int(np.any(gated_rgb != UNSEEN, axis=1).sum())
+    # The room-side faces must be seen, so the unseen outer faces are not an empty atlas; and the
+    # open gate must paint the outer faces, so it is the gate that keeps them unseen.
+    assert inner_seen > 0.9 * inner_total
+    assert outer_painted > 0.5 * outer_total
+    assert outer_total > 50_000
+
+
 def test_floor_is_in_view_and_reproduced(room_run):
     assert room_run.mesh.coverage["floor"] > 0.5
     errors = _kind_errors(room_run, "floor")
     assert errors.size > 50_000
     assert errors.mean() < MAE_BOUND
+
+
+def test_sills_lintels_and_obstacle_faces_reproduce_ground_truth(furnished_run):
+    # The sill top and the lintel undersides are thin strips of wall and the box's faces are
+    # small, so each group is measured on its own rather than through the kind-level figures.
+    groups = {
+        "sill top": lambda s: s.kind == "sill" and s.name.endswith(":top"),
+        "lintel underside": lambda s: s.kind == "lintel" and s.name.endswith(":bottom"),
+        "obstacle": lambda s: s.kind == "obstacle",
+    }
+    for label, select in groups.items():
+        errors = _face_errors(furnished_run, select)
+        assert errors.size > 300, label
+        assert errors.mean() < MAE_BOUND, label
 
 
 def test_texture_layout_runs_quickly(room_run):
@@ -645,6 +801,61 @@ def test_procedural_layout_is_deterministic_with_full_coverage():
         assert np.array_equal(a, b)
     assert set(first.coverage) == {"floor", "wall", "ceiling", "all"}
     assert all(value == 1.0 for value in first.coverage.values())
+
+
+def _chart_samples(
+    mesh: TexturedMesh, surface: Surface, placement: ChartPlacement, atlas: Atlas
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Surface (u, v) and RGB of the texels on one chart's surface: (M,), (M,), (M, 3)."""
+    pixels, _, inside = chart_texels(surface, placement, atlas)
+    u, v = chart_grid(placement, atlas)
+    rgb = mesh.pages[placement.page][pixels[:, 1], pixels[:, 0]].astype(np.float64)
+    return u.ravel()[inside], v.ravel()[inside], rgb[inside]
+
+
+def test_procedural_patterns_follow_their_kind():
+    layout = _furnished_room()
+    surfaces = layout_surfaces(layout)
+    mesh = procedural_texture_layout(layout)
+    atlas = build_atlas(surfaces, texel_size=mesh.texel_size)
+    samples = [
+        _chart_samples(mesh, surface, placement, atlas)
+        for surface, placement in zip(surfaces, atlas.placements, strict=True)
+    ]
+
+    # Floor: 0.18 m boards along v. The darker seams are left out; within a board only the grain
+    # varies, and neighbouring boards take their own tones.
+    floor = next(i for i, s in enumerate(surfaces) if s.kind == "floor")
+    _, floor_v, floor_rgb = samples[floor]
+    scaled = floor_v / 0.18
+    board = np.floor(scaled)
+    across = scaled - board
+    keep = (across > 0.03) & (across < 0.97)
+    board, red = board[keep], floor_rgb[keep, 0]
+    boards = np.unique(board)
+    means = np.array([red[board == b].mean() for b in boards])
+    spreads = [np.ptp(red[board == b]) for b in boards]
+    assert boards.size >= 12  # the 2.5 m run along v holds about 14 boards
+    assert max(spreads) < 10  # the grain alone spans 7.5 units of red
+    assert np.ptp(means) > 5
+    assert np.mean(np.abs(np.diff(means)) > 1) > 0.8
+
+    # Obstacles: a 0.1 m checker in surface coordinates, exactly its two tones.
+    for i, surface in enumerate(surfaces):
+        if surface.kind != "obstacle":
+            continue
+        u, v, rgb = samples[i]
+        parity = (np.floor(u / 0.1) + np.floor(v / 0.1)) % 2
+        expected = np.where(
+            parity[:, None] == 0, texture_module.CHECKER_A, texture_module.CHECKER_B
+        )
+        np.testing.assert_array_equal(rgb, expected, err_msg=surface.name)
+
+    # The ceiling is whiter than the plaster walls.
+    ceiling = next(i for i, s in enumerate(surfaces) if s.kind == "ceiling")
+    wall_rgb = np.concatenate([samples[i][2] for i, s in enumerate(surfaces) if s.kind == "wall"])
+    ceiling_luma = float((samples[ceiling][2] @ texture_module.LUMA).mean())
+    assert ceiling_luma > float((wall_rgb @ texture_module.LUMA).mean()) + 5
 
 
 def test_texture_params_round_trip_into_the_atlas():
