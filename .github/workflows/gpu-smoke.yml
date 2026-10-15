@@ -44,12 +44,19 @@ jobs:
       - name: capture pipeline smoke
         run: |
           mkdir -p "$RUNNER_TEMP/out"
-          docker run --rm --gpus all             -v "$RUNNER_TEMP/fixture:/data:ro" -v "$RUNNER_TEMP/out:/out"             andarilho-worker-gpu:smoke             python -m andarilho_worker.smoke --video /data/capture.mp4 --out /out --max-seconds 4800
+          docker run --rm --gpus all \
+            -v "$RUNNER_TEMP/fixture:/data:ro" -v "$RUNNER_TEMP/out:/out" \
+            andarilho-worker-gpu:smoke \
+            python -m andarilho_worker.smoke --video /data/capture.mp4 --out /out --max-seconds 4800
           test -s "$RUNNER_TEMP/out/report.json"
           cat "$RUNNER_TEMP/out/report.json"
+      # The report and the scene bundle it describes (render, collision, manifest,
+      # layout, poster), so the result can be walked locally with VIEWER_BUNDLE_DIR.
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: gpu-smoke-report
-          path: ${{ runner.temp }}/out/report.json
+          path: |
+            ${{ runner.temp }}/out/report.json
+            ${{ runner.temp }}/out/bundle/
           if-no-files-found: ignore
