@@ -9,8 +9,10 @@ from helpers import drain
 from psycopg.types.json import Jsonb
 
 from andarilho_worker import queue
-from andarilho_worker.errors import StageError
+from andarilho_worker.artifacts import LocalObjectStore
+from andarilho_worker.errors import StageError, TransientError
 from andarilho_worker.stages import STAGES
+from andarilho_worker.stages.base import finish
 from andarilho_worker.supervisor import Supervisor
 
 
@@ -51,7 +53,8 @@ def attempt_of(project_id: str, run_id: str, job_id: str, fence: int = 1) -> str
 
 
 def make_run_job(seed, project_id: str, run_id: str, state: str) -> str:
-    """A packaging job of ``run_id`` that is in ``state`` (a lease is held while running)."""
+    """A packaging job of ``run_id`` that is in ``state`` (a lease is held while running),
+    claimed once, so its only attempt ran at fence 1."""
     job_id = seed.job(project_id, "packaging", {}, run_id=run_id)
     if state == "running":
         seed.exec(
@@ -60,7 +63,7 @@ def make_run_job(seed, project_id: str, run_id: str, state: str) -> str:
             job_id,
         )
     else:
-        seed.exec("UPDATE jobs SET state = %s WHERE id = %s", state, job_id)
+        seed.exec("UPDATE jobs SET state = %s, fencing_token = 1 WHERE id = %s", state, job_id)
     return job_id
 
 
@@ -248,6 +251,24 @@ def test_an_attempt_of_a_succeeded_job_is_kept(db, seed, store, sup):
     assert cleanup_row(seed, pid)["result_manifest"]["kept"] == [attempt]
 
 
+def test_only_the_fence_a_succeeded_job_committed_under_is_kept(db, seed, store, sup):
+    # A worker that could not sweep fence 1 before succeeding at fence 2 queues fence 1.
+    pid = seed.project()
+    rev = make_revision(seed, pid)
+    job_id = make_run_job(seed, pid, rev["run"], "succeeded")
+    seed.exec("UPDATE jobs SET fencing_token = 2 WHERE id = %s", job_id)
+    stale, committed = (attempt_of(pid, rev["run"], job_id, fence) for fence in (1, 2))
+    for prefix in (stale, committed):
+        store.put_bytes(prefix + "out.bin", b"x")
+    enqueue(db, pid, [stale, committed], reason="delete_failed")
+
+    assert run_due_cleanup(db, sup) == "succeeded"
+    assert store.list_keys(stale) == []
+    assert store.list_keys(committed) == [committed + "out.bin"]
+    manifest = cleanup_row(seed, pid)["result_manifest"]
+    assert manifest["deleted"] == [stale] and manifest["kept"] == [committed]
+
+
 @pytest.mark.parametrize(
     "job_state",
     [
@@ -391,3 +412,114 @@ def test_a_requeued_attempt_cancelled_before_its_retry_leaves_nothing_behind(db,
 
     assert run_due_cleanup(db, sup) == "succeeded"
     assert store.list_keys(f"tenants/{pid}/runs/{run_id}/") == []
+
+
+class UndeletableStore(LocalObjectStore):
+    """Writes work but deletes fail, as when the object store refuses them for a while."""
+
+    def delete_prefix(self, prefix: str) -> int:
+        raise OSError("delete refused")
+
+
+def writes_then_retries(ctx):
+    ctx.store.put_bytes(ctx.attempt_key("partial.bin"), b"partial")
+    raise TransientError()
+
+
+def undeletable_worker(db, store, settings, stage) -> Supervisor:
+    return Supervisor(db, UndeletableStore(store.root), settings,
+                      stages={**STAGES, "validating": stage}, delay_fn=lambda attempt: 0.0)  # fmt: skip
+
+
+def queued_cleanups(seed, project_id: str) -> list[dict]:
+    rows = seed.all(
+        "SELECT input_manifest FROM jobs WHERE project_id = %s AND stage = 'artifact_cleanup'",
+        project_id,
+    )
+    return [row["input_manifest"] for row in rows]
+
+
+def test_attempts_a_worker_could_not_delete_are_queued_when_retries_run_out(
+    db, seed, store, settings, sup
+):
+    worker = undeletable_worker(db, store, settings, writes_then_retries)
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, max_attempts=3)
+    assert [d[1] for d in drain(db, worker)] == ["retry_wait", "retry_wait", "failed"]
+    attempts = f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/"
+    assert len(store.list_keys(attempts)) == 3  # every delete and every sweep failed
+    # A retry sweeps again, so only the failure that ended the job queued them.
+    assert queued_cleanups(seed, pid) == [
+        {
+            "projectId": pid,
+            "prefixes": [f"{attempts}{fence}/" for fence in (1, 2, 3)],
+            "reason": "delete_failed",
+        }
+    ]
+
+    assert run_due_cleanup(db, sup) == "succeeded"  # a worker whose deletes work
+    assert store.list_keys(attempts) == []
+
+
+@pytest.mark.parametrize("outcome", ["failed", "cancelled"])
+def test_an_attempt_a_worker_could_not_delete_is_queued_when_the_job_ends(
+    db, seed, store, settings, outcome
+):
+    def writes_then_ends(ctx):
+        ctx.store.put_bytes(ctx.attempt_key("partial.bin"), b"partial")
+        if outcome == "failed":
+            raise StageError("INVALID_MEDIA")
+        # Cancellation lands after the stage's own checks, before completion.
+        seed.exec(
+            "UPDATE reconstruction_runs SET cancel_requested_at = now() WHERE id = %s", ctx.run_id
+        )
+        seed.exec("UPDATE jobs SET cancel_requested_at = now() WHERE id = %s", ctx.job_id)
+        return finish(ctx, {})
+
+    worker = undeletable_worker(db, store, settings, writes_then_ends)
+    pid = seed.project()
+    run_id, job_id = seed.run(pid)
+    assert worker.execute(queue.claim(db, "worker-test", "cpu")) == outcome
+    attempt = f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/1/"
+    assert [m["prefixes"] for m in queued_cleanups(seed, pid)] == [[attempt]]
+
+
+def test_a_job_that_succeeds_queues_the_earlier_attempt_it_could_not_sweep(
+    db, seed, store, settings, sup
+):
+    def second_time_lucky(ctx):
+        ctx.store.put_bytes(ctx.attempt_key("output.bin"), b"x")
+        if ctx.attempt == 1:
+            raise TransientError()
+        return finish(ctx, {})
+
+    worker = undeletable_worker(db, store, settings, second_time_lucky)
+    pid = seed.project()
+    run_id, job_id = seed.run(pid)
+    assert worker.execute(queue.claim(db, "worker-test", "cpu")) == "retry_wait"
+    assert queue.promote_retry_wait(db) == 1
+    assert worker.execute(queue.claim(db, "worker-test", "cpu")) == "succeeded"
+    attempts = f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/"
+    assert [m["prefixes"] for m in queued_cleanups(seed, pid)] == [[f"{attempts}1/"]]
+
+    # The next stage waits so that the cleanup is the job claimed next.
+    seed.exec("UPDATE jobs SET available_at = now() + interval '1 hour' WHERE stage = 'preparing'")
+    assert run_due_cleanup(db, sup) == "succeeded"
+    assert store.list_keys(f"{attempts}1/") == []
+    assert f"{attempts}2/output.bin" in store.list_keys(f"{attempts}2/")
+
+
+def test_a_job_failed_before_its_stage_runs_queues_what_earlier_attempts_left(
+    db, seed, store, settings
+):
+    worker = undeletable_worker(db, store, settings, writes_then_retries)
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, max_attempts=3)
+    assert worker.execute(queue.claim(db, "worker-test", "cpu")) == "retry_wait"
+    # Earlier stages and attempts consumed the whole run budget before the retry.
+    budget = seed.one("SELECT resource_budget FROM reconstruction_runs")["resource_budget"]
+    seed.exec("UPDATE usage_ledger SET actual_cpu_seconds = %s", int(budget["maxSeconds"]))
+    assert queue.promote_retry_wait(db) == 1
+    assert worker.execute(queue.claim(db, "worker-test", "cpu")) == "failed"
+    attempt = f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/1/"
+    assert [m["prefixes"] for m in queued_cleanups(seed, pid)] == [[attempt]]

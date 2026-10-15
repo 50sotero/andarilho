@@ -373,6 +373,19 @@ def test_reaper_queues_cleanup_for_cancelled_attempts_but_not_requeued_ones(db, 
     assert cleanup_jobs(seed, pid2) == []
 
 
+def test_reaper_queues_every_fence_a_job_ran_under_when_it_ends_it(db, seed):
+    # A lost attempt's sweep of the earlier fences may have failed before it was lost.
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, max_attempts=2)
+    for outcome in ("queued", "failed"):
+        job = queue.claim(db, "w", "cpu")  # fences 1 and 3; each reaper bump adds one
+        expire(seed, job.id)
+        assert [o.state for o in queue.reap_expired(db)] == [outcome]
+    [cleanup] = cleanup_jobs(seed, pid)
+    attempts = f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/"
+    assert cleanup["input_manifest"]["prefixes"] == [f"{attempts}{fence}/" for fence in (1, 2, 3)]
+
+
 def test_failing_a_run_queues_its_first_revision_scene_prefix(db, seed):
     pid = seed.project()
     run_id, _ = seed.run(pid, first_stage="packaging")

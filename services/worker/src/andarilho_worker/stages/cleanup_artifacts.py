@@ -5,7 +5,8 @@ kinds of prefix:
 
 * an attempt prefix ``tenants/{p}/runs/{r}/attempts/{stage}/{job}/{fence}/`` of an
   attempt that was lost or cancelled before it committed (the reaper's view, or a
-  job cancelled before a later attempt could sweep what it left);
+  job cancelled before a later attempt could sweep what it left), or one a worker
+  failed to delete before the job ended;
 * a scene prefix ``tenants/{p}/scenes/{revision}/`` of a revision that is now invalid,
   because its pipeline failed or was cancelled before validation committed it.
 
@@ -19,8 +20,9 @@ are kept:
   cost: a failed layout save may still be the active draft when this job runs, and
   its files then stay until the project is deleted, because moving the pointer on
   queues no cleanup;
-* the attempt prefix of a succeeded job. A succeeded camera_reconstruction holds the
-  frames that layout re-texturing needs.
+* the attempt prefix a succeeded job committed under (its last fence). A succeeded
+  camera_reconstruction holds the frames that layout re-texturing needs. The job's
+  earlier fences are stale and deleted.
 
 Every requested prefix is checked before anything is deleted.
 """
@@ -94,13 +96,15 @@ def _revision_keep_reason(conn: Any, *, project_id: str, revision_id: str) -> st
     return None
 
 
-def _job_keep_reason(conn: Any, *, project_id: str, job_id: str) -> str | None:
+def _job_keep_reason(conn: Any, *, project_id: str, job_id: str, fence: int) -> str | None:
     row = conn.execute(
-        "SELECT state FROM jobs WHERE id = %s AND project_id = %s", (job_id, project_id)
+        "SELECT state, fencing_token FROM jobs WHERE id = %s AND project_id = %s",
+        (job_id, project_id),
     ).fetchone()
-    # Only a succeeded attempt holds outputs that a later stage may still read. Every
-    # other state, including a job that is gone, leaves its outputs unreferenced.
-    if row is not None and row["state"] == "succeeded":
+    # Only the attempt that succeeded holds outputs that a later stage may still read. A
+    # succeeded job is never claimed or reaped again, so its fence is the one it committed
+    # under. Every other attempt, including one of a job that is gone, is unreferenced.
+    if row is not None and row["state"] == "succeeded" and row["fencing_token"] == fence:
         return "the attempt's job succeeded"
     return None
 
@@ -125,7 +129,12 @@ def run(ctx: StageContext) -> StageResult:
             )
         else:
             reason = ctx.query(
-                partial(_job_keep_reason, project_id=ctx.project_id, job_id=match["job"])
+                partial(
+                    _job_keep_reason,
+                    project_id=ctx.project_id,
+                    job_id=match["job"],
+                    fence=int(match["fence"]),
+                )
             )
         if reason is not None:
             log.info("artifact cleanup keeps %s: %s", prefix, reason)

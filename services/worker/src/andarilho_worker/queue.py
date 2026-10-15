@@ -403,6 +403,11 @@ def _queue_scene_cleanup(conn: psycopg.Connection, project_id: str, revision_id:
     )
 
 
+def _queue_leftovers(conn: psycopg.Connection, job: ClaimedJob, leftovers: Sequence[str]) -> None:
+    """The job has ended, so no later attempt sweeps the prefixes this one could not delete."""
+    queue_artifact_cleanup(conn, job.project_id, leftovers, reason="delete_failed")
+
+
 # Findings on the revision a run's own pipeline created when the run ends before
 # that revision is validated (the API writes the same cancellation finding).
 RUN_FAILED_FINDING = {
@@ -598,9 +603,12 @@ def complete_job(
     commit: CommitHook | None = None,
     usage_seconds: float = 0.0,
     finish_run: bool = False,
+    leftovers: Sequence[str] = (),
 ) -> None:
     """Mark the job succeeded and insert the next stage in ONE fenced transaction.
 
+    ``leftovers`` (here and in the other transitions) are attempt prefixes the worker
+    could not delete; they are queued for ``artifact_cleanup`` when the job ends.
     Raises :class:`Cancelled` (nothing written) when cancellation won the race,
     and :class:`LeaseLost` when the fence moved or the lease already expired.
     """
@@ -620,6 +628,7 @@ def complete_job(
         elif job.stage != "project_cleanup":
             raise LeaseLost(job.id)
         add_usage(conn, job, usage_seconds)
+        _queue_leftovers(conn, job, leftovers)
         if next_job is not None:
             _insert_next(conn, job, next_job)
         elif finish_run and job.run_level:
@@ -631,7 +640,9 @@ def complete_job(
             settle_ledger(conn, job.run_id)  # type: ignore[arg-type]
 
 
-def cancel_job(db: Database, job: ClaimedJob, *, usage_seconds: float = 0.0) -> bool:
+def cancel_job(
+    db: Database, job: ClaimedJob, *, usage_seconds: float = 0.0, leftovers: Sequence[str] = ()
+) -> bool:
     """Acknowledge cancellation after the process group has been stopped (fenced)."""
     with db.transaction() as conn:
         try:
@@ -641,6 +652,7 @@ def cancel_job(db: Database, job: ClaimedJob, *, usage_seconds: float = 0.0) -> 
         conn.execute(_clear_lease_sql("cancelled") + " WHERE id = %s", (job.id,))
         _event(conn, job.id, job.stage, "cancelled", "Cancelled.")
         add_usage(conn, job, usage_seconds)
+        _queue_leftovers(conn, job, leftovers)
         if job.run_id:
             finalize_run_if_cancelled(conn, job.run_id)
     return True
@@ -653,10 +665,12 @@ def fail_job(
     *,
     on_fail: CommitHook | None = None,
     usage_seconds: float = 0.0,
+    leftovers: Sequence[str] = (),
 ) -> str:
     """Permanent failure. Returns the resulting job state ('failed' or 'cancelled')."""
     with db.transaction() as conn:
         locked = _lock(conn, job, require_live=False)
+        _queue_leftovers(conn, job, leftovers)
         if locked.stop_requested:
             conn.execute(_clear_lease_sql("cancelled") + " WHERE id = %s", (job.id,))
             _event(conn, job.id, job.stage, "cancelled", "Cancelled.")
@@ -693,19 +707,26 @@ def retry_job(
     *,
     delay_seconds: float,
     usage_seconds: float = 0.0,
+    leftovers: Sequence[str] = (),
 ) -> str:
-    """Transient failure: retry_wait with backoff, or failed when attempts are exhausted."""
+    """Transient failure: retry_wait with backoff, or failed when attempts are exhausted.
+
+    A retried job's next attempt sweeps ``leftovers`` again, and a job cancelled before
+    that attempt has all its fences queued, so only the terminal outcomes queue them.
+    """
     with db.transaction() as conn:
         locked = _lock(conn, job, require_live=False)
         if locked.stop_requested:
             conn.execute(_clear_lease_sql("cancelled") + " WHERE id = %s", (job.id,))
             _event(conn, job.id, job.stage, "cancelled", "Cancelled.")
             add_usage(conn, job, usage_seconds)
+            _queue_leftovers(conn, job, leftovers)
             if job.run_id:
                 finalize_run_if_cancelled(conn, job.run_id)
             return "cancelled"
         add_usage(conn, job, usage_seconds)
         if locked.row["attempts"] >= locked.row["max_attempts"]:
+            _queue_leftovers(conn, job, leftovers)
             final = {**error, "retryable": False}
             conn.execute(
                 _clear_lease_sql("failed") + ", error = %s WHERE id = %s",
@@ -823,13 +844,15 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                 )
             if run_id and row["state"] in ("failed", "cancelled"):
                 # The lost attempt wrote its outputs under the fence the bump just
-                # replaced. A job that ended here is never claimed again, so nothing
-                # would sweep them. A re-queued job is swept by its next attempt, or by
-                # the cancellation paths if it is cancelled before that attempt starts.
-                lost_attempt = attempt_prefix(
-                    project_id, run_id, row["stage"], job_id, int(row["fencing_token"]) - 1
-                )
-                queue_artifact_cleanup(conn, project_id, [lost_attempt], reason="attempt_lost")
+                # replaced, and its sweep of the earlier fences may have failed. A job
+                # that ended here is never claimed again, so nothing would sweep them. A
+                # re-queued job is swept by its next attempt, or by the cancellation
+                # paths if it is cancelled before that attempt starts.
+                attempts = [
+                    attempt_prefix(project_id, run_id, row["stage"], job_id, fence)
+                    for fence in range(1, int(row["fencing_token"]))
+                ]
+                queue_artifact_cleanup(conn, project_id, attempts, reason="attempt_lost")
             if run_id and row["state"] == "failed" and row["scene_revision_id"] is None:
                 fail_run(conn, run_id, lost)
             elif row["state"] == "failed" and row["stage"] == "upload_inspection":

@@ -217,11 +217,11 @@ class Supervisor:
         try:
             recipe, provenance_digest = self._recipe(job)
         except RecipeMismatch:
-            return self._fail(job, error_body("RECIPE_MISMATCH"), None, 0.0)
+            return self._fail_unstarted(job, "RECIPE_MISMATCH")
         except KeyError:
-            return self._fail(job, error_body("INTERNAL_ERROR"), None, 0.0)
+            return self._fail_unstarted(job, "INTERNAL_ERROR")
         if stage_fn is None:
-            return self._fail(job, error_body("INTERNAL_ERROR"), None, 0.0)
+            return self._fail_unstarted(job, "INTERNAL_ERROR")
         timeout = MAINTENANCE_TIMEOUT
         if recipe is not None and job.stage in recipe.stage_names():
             timeout = recipe.spec(job.stage).timeout_seconds
@@ -232,7 +232,7 @@ class Supervisor:
             # run after the reconstruction settled and keep only their stage timeout.
             remaining = self._remaining_run_seconds(job)
             if remaining <= 0:
-                return self._fail(job, error_body("BUDGET_EXHAUSTED"), None, 0.0)
+                return self._fail_unstarted(job, "BUDGET_EXHAUSTED")
             timeout = min(timeout, remaining)
         deadline = datetime.now(UTC) + timedelta(seconds=timeout)
         token = CancellationToken(deadline)
@@ -293,7 +293,9 @@ class Supervisor:
         def used() -> float:
             return time.monotonic() - started
 
-        self._sweep_earlier_attempts(job)
+        # Prefixes this attempt failed to delete. The transition that ends the job queues
+        # them for cleanup, since no later attempt will sweep them; a retry sweeps again.
+        leftovers = self._sweep_earlier_attempts(job)
         try:
             try:
                 result = stage_fn(ctx)
@@ -304,7 +306,7 @@ class Supervisor:
                 # No output references an attempt that did not succeed. A worker that
                 # lost its lease leaves this to the attempt that replaced it.
                 if not token.lease_lost:
-                    self._discard_attempt(job, job.fencing_token)
+                    leftovers += self._discard_attempt(job, job.fencing_token)
                 raise
             try:
                 queue.complete_job(
@@ -319,12 +321,13 @@ class Supervisor:
                     commit=result.commit,
                     usage_seconds=used(),
                     finish_run=result.finish_run,
+                    leftovers=leftovers,
                 )
             except Cancelled:
                 # Cancellation won the race to completion, which wrote nothing: the
                 # outputs are unreferenced and no retry will sweep them.
                 if not token.lease_lost:
-                    self._discard_attempt(job, job.fencing_token)
+                    leftovers += self._discard_attempt(job, job.fencing_token)
                 raise
             return "succeeded"
         except LeaseLost:
@@ -333,56 +336,85 @@ class Supervisor:
         except Cancelled:
             if token.lease_lost:
                 return "lost"
-            return "cancelled" if queue.cancel_job(self.db, job, usage_seconds=used()) else "lost"
+            cancelled = queue.cancel_job(self.db, job, usage_seconds=used(), leftovers=leftovers)
+            return "cancelled" if cancelled else "lost"
         except Deferred as deferred:
             queue.defer_job(
                 self.db, job, delay_seconds=deferred.delay_seconds, patch=deferred.manifest_patch
             )
             return "deferred"
         except TransientError as exc:
-            return self._retry(job, exc.body(), used())
+            return self._retry(job, exc.body(), used(), leftovers)
         except StageError as exc:
-            return self._fail(job, exc.body(), exc.on_fail, used())
+            return self._fail(job, exc.body(), exc.on_fail, used(), leftovers)
         except (ProcessTimeout, ScratchBudgetExceeded):
-            return self._fail(job, error_body("BUDGET_EXHAUSTED"), None, used())
+            return self._fail(job, error_body("BUDGET_EXHAUSTED"), None, used(), leftovers)
         except (RunnerError, psycopg.OperationalError, OSError) as exc:
             log.warning("job %s transient failure: %s", job.id, type(exc).__name__)
-            return self._retry(job, error_body("TRANSIENT_FAILURE", retryable=True), used())
+            body = error_body("TRANSIENT_FAILURE", retryable=True)
+            return self._retry(job, body, used(), leftovers)
         except Exception:
             log.exception("job %s failed unexpectedly", job.id)
-            return self._retry(job, error_body("INTERNAL_ERROR", retryable=True), used())
+            body = error_body("INTERNAL_ERROR", retryable=True)
+            return self._retry(job, body, used(), leftovers)
 
-    def _sweep_earlier_attempts(self, job: ClaimedJob) -> None:
+    def _sweep_earlier_attempts(self, job: ClaimedJob) -> list[str]:
         """Delete what earlier attempts of this job left (a crashed worker, a lost lease
         or a failed delete): only the current fence can still succeed, and nothing reads
-        an earlier fence's objects. A worker that crashes on the job's last attempt
-        leaves its objects until the project is deleted."""
+        an earlier fence's objects. Returns the prefixes that could not be deleted."""
         if not job.run_id:
-            return
+            return []
+        leftovers: list[str] = []
         for fence in range(1, job.fencing_token):
-            self._discard_attempt(job, fence)
+            leftovers += self._discard_attempt(job, fence)
+        return leftovers
 
-    def _discard_attempt(self, job: ClaimedJob, fence: int) -> None:
-        """Best effort: a failure leaves the objects for the next attempt's sweep."""
+    def _discard_attempt(self, job: ClaimedJob, fence: int) -> list[str]:
+        """Best effort: returns the prefix when its delete failed, for the caller to pass
+        to the transition that ends the job."""
         if not job.run_id:
-            return
+            return []
         prefix = attempt_prefix(job.project_id, job.run_id, job.stage, job.id, fence)
         try:
             self.store.delete_prefix(prefix)
             self.store.abort_multipart_uploads(prefix)
         except Exception:
             log.warning("job %s: could not delete attempt %s's objects", job.id, fence)
+            return [prefix]
+        return []
 
-    def _retry(self, job: ClaimedJob, body: dict[str, Any], used: float) -> str:
+    def _fail_unstarted(self, job: ClaimedJob, code: str) -> str:
+        """Fail a job before its stage runs. No attempt swept what the earlier ones
+        left, so their prefixes are queued for cleanup with the failure."""
+        earlier = []
+        if job.run_id:
+            earlier = [
+                attempt_prefix(job.project_id, job.run_id, job.stage, job.id, fence)
+                for fence in range(1, job.fencing_token)
+            ]
+        return self._fail(job, error_body(code), None, 0.0, earlier)
+
+    def _retry(
+        self, job: ClaimedJob, body: dict[str, Any], used: float, leftovers: list[str]
+    ) -> str:
         try:
             return queue.retry_job(
-                self.db, job, body, delay_seconds=self.delay_fn(job.attempts), usage_seconds=used
+                self.db,
+                job,
+                body,
+                delay_seconds=self.delay_fn(job.attempts),
+                usage_seconds=used,
+                leftovers=leftovers,
             )
         except LeaseLost:
             return "lost"
 
-    def _fail(self, job: ClaimedJob, body: dict[str, Any], on_fail, used: float) -> str:
+    def _fail(
+        self, job: ClaimedJob, body: dict[str, Any], on_fail, used: float, leftovers: list[str]
+    ) -> str:
         try:
-            return queue.fail_job(self.db, job, body, on_fail=on_fail, usage_seconds=used)
+            return queue.fail_job(
+                self.db, job, body, on_fail=on_fail, usage_seconds=used, leftovers=leftovers
+            )
         except LeaseLost:
             return "lost"
