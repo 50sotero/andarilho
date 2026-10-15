@@ -330,6 +330,30 @@ def settle_ledger(conn: psycopg.Connection, run_id: str) -> bool:
     return row is not None
 
 
+# Findings on the revision a run's own pipeline created when the run ends before
+# that revision is validated (the API writes the same cancellation finding).
+RUN_FAILED_FINDING = {
+    "code": "RUN_FAILED",
+    "message": "Processing failed before this scene was ready. Retry the run to try again.",
+}
+RUN_CANCELLED_FINDING = {
+    "code": "RUN_CANCELLED",
+    "message": "Processing was cancelled before this scene was ready.",
+}
+
+
+def fail_run_revision(conn: psycopg.Connection, run_id: str, finding: Mapping[str, str]) -> None:
+    """The run's first revision (created in geometry_proposal) stops pending.
+
+    Otherwise the scene would wait forever for a validation that never runs.
+    """
+    conn.execute(
+        "UPDATE scene_revisions SET validation_state = 'invalid', validation_findings = %s "
+        "WHERE run_id = %s AND revision = 1 AND validation_state = 'pending'",
+        (Jsonb([dict(finding)]), run_id),
+    )
+
+
 def finalize_run_if_cancelled(conn: psycopg.Connection, run_id: str) -> bool:
     """When a cancelled run has no active jobs left, mark it cancelled and release budget."""
     row = conn.execute(
@@ -351,6 +375,7 @@ def finalize_run_if_cancelled(conn: psycopg.Connection, run_id: str) -> bool:
     ).fetchone()
     if row is None:
         return False
+    fail_run_revision(conn, run_id, RUN_CANCELLED_FINDING)
     released = release_ledger(conn, run_id)
     log.info("run %s cancelled (ledger released=%s)", run_id, released)
     return True
@@ -372,6 +397,7 @@ def fail_run(conn: psycopg.Connection, run_id: str, error: Mapping[str, Any]) ->
         "WHERE run_id = %s AND scene_revision_id IS NULL AND state IN ('queued', 'retry_wait')",
         (run_id,),
     )
+    fail_run_revision(conn, run_id, RUN_FAILED_FINDING)
     release_ledger(conn, run_id)
     return True
 

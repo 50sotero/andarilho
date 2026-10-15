@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import threading
+import uuid
 
 import psycopg
 import pytest
+from psycopg.types.json import Jsonb
 
 from andarilho_worker import queue
 from andarilho_worker.errors import Cancelled, LeaseLost, error_body
@@ -14,6 +16,30 @@ def expire(seed, job_id: str) -> None:
     seed.exec(
         "UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = %s", job_id
     )
+
+
+def first_revision(seed, project_id: str, run_id: str) -> str:
+    """The scene and revision 1 a run's geometry_proposal stage creates (still pending)."""
+    scene_id, revision_id = str(uuid.uuid4()), str(uuid.uuid4())
+    seed.exec(
+        "INSERT INTO scenes (id, project_id, run_id, version) VALUES (%s, %s, %s, 1)",
+        scene_id, project_id, run_id,
+    )  # fmt: skip
+    seed.exec(
+        "INSERT INTO scene_revisions (id, scene_id, project_id, run_id, revision, layout_revision, "
+        "layout, validation_state, approval_state, created_by) "
+        "VALUES (%s, %s, %s, %s, 1, 1, %s, 'pending', 'draft', 'user-1')",
+        revision_id, scene_id, project_id, run_id, Jsonb({}),
+    )  # fmt: skip
+    return revision_id
+
+
+def revision_findings(seed, revision_id: str) -> tuple[str, list[str]]:
+    row = seed.one(
+        "SELECT validation_state, validation_findings FROM scene_revisions WHERE id = %s",
+        revision_id,
+    )
+    return row["validation_state"], [f["code"] for f in row["validation_findings"] or []]
 
 
 def test_competing_workers_only_one_wins(db, seed):
@@ -246,3 +272,31 @@ def test_reaper_charges_lost_attempts_to_the_run_budget(db, seed):
     assert [o.state for o in queue.reap_expired(db)] == ["queued"]
     used = seed.one("SELECT actual_cpu_seconds FROM usage_ledger")["actual_cpu_seconds"]
     assert 595 <= used <= 605
+
+
+def test_a_failed_run_stops_its_first_revision_pending(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, first_stage="packaging")
+    revision_id = first_revision(seed, pid, run_id)
+    job = queue.claim(db, "w", "cpu")
+    assert queue.fail_job(db, job, error_body("INVALID_MEDIA")) == "failed"
+    assert revision_findings(seed, revision_id) == ("invalid", ["RUN_FAILED"])
+
+    pid2 = seed.project()
+    run2, _ = seed.run(pid2, first_stage="packaging", max_attempts=1)
+    revision2 = first_revision(seed, pid2, run2)
+    job = queue.claim(db, "w", "cpu")
+    assert queue.retry_job(db, job, error_body("TRANSIENT_FAILURE"), delay_seconds=0) == "failed"
+    assert revision_findings(seed, revision2) == ("invalid", ["RUN_FAILED"])
+
+
+def test_a_cancelled_run_stops_its_first_revision_pending(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, first_stage="packaging")
+    revision_id = first_revision(seed, pid, run_id)
+    job = queue.claim(db, "w", "cpu")
+    seed.exec("UPDATE reconstruction_runs SET cancel_requested_at = now() WHERE id = %s", run_id)
+    seed.exec("UPDATE jobs SET cancel_requested_at = now() WHERE id = %s", job.id)
+    assert queue.cancel_job(db, job)
+    assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "cancelled"
+    assert revision_findings(seed, revision_id) == ("invalid", ["RUN_CANCELLED"])

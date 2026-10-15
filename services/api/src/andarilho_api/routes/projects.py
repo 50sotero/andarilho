@@ -154,9 +154,15 @@ def _project_detail(db: Session, project: Project, role: str) -> dict[str, Any]:
     published = published_revision_id(db, project)
     scene = scene_of(published if viewer else project.active_draft_revision_id)
     if scene is None and not viewer:
+        # A scene still being processed, but not one whose run failed or was
+        # cancelled: that scene never gets a revision to review or walk.
         scene = db.execute(
             select(Scene)
-            .where(Scene.project_id == pid)
+            .join(ReconstructionRun, ReconstructionRun.id == Scene.run_id)
+            .where(
+                Scene.project_id == pid,
+                ReconstructionRun.status.not_in(("failed", "cancelled")),
+            )
             .order_by(Scene.created_at.desc(), Scene.id)
             .limit(1)
         ).scalar_one_or_none()

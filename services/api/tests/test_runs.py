@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
-from factories import active_run, capture_set, create_project
+from factories import active_run, capture_set, create_project, layout
 from sqlalchemy import select
 
 from andarilho_api.domain.recipes import RECIPES
@@ -14,6 +14,8 @@ from andarilho_api.models import (
     Job,
     JobEvent,
     ReconstructionRun,
+    Scene,
+    SceneRevision,
     UsageLedger,
 )
 
@@ -169,6 +171,47 @@ def test_cancel_pending_jobs_finishes_run(client, auth, db, project, state):
     # Cancel is idempotent; the ledger is released once.
     again = client.post(f"/v1/runs/{info['runId']}/cancel", headers=auth())
     assert again.status_code == 202 and again.json()["status"] == "cancelled"
+
+
+def _first_revision(db, project_id: str, run_id: str) -> uuid.UUID:
+    """The scene and pending revision 1 a run's geometry_proposal stage creates."""
+    pid, rid = uuid.UUID(project_id), uuid.UUID(run_id)
+    scene_id, rev_id = uuid.uuid4(), uuid.uuid4()
+    db.add(Scene(id=scene_id, project_id=pid, run_id=rid))
+    db.flush()
+    db.add(
+        SceneRevision(
+            id=rev_id,
+            scene_id=scene_id,
+            project_id=pid,
+            run_id=rid,
+            revision=1,
+            layout_revision=1,
+            layout=layout(),
+            validation_state="pending",
+            created_by="user-a",
+        )
+    )
+    db.commit()
+    return rev_id
+
+
+def test_cancelling_a_run_ends_its_unfinished_scene(client, auth, db, project):
+    info = active_run(db, project["id"], job_states=("succeeded", "queued"))
+    rev_id = _first_revision(db, project["id"], info["runId"])
+    # While the run is processing, the project offers its scene (it validates soon).
+    detail = client.get(f"/v1/projects/{project['id']}", headers=auth()).json()
+    assert detail["scene"] is not None
+
+    response = client.post(f"/v1/runs/{info['runId']}/cancel", headers=auth())
+    assert response.status_code == 202 and response.json()["status"] == "cancelled"
+    db.expire_all()
+    revision = db.get(SceneRevision, rev_id)
+    assert revision.validation_state == "invalid"
+    assert [f["code"] for f in revision.validation_findings] == ["RUN_CANCELLED"]
+    # A scene that will never get a revision is not offered for review or walking.
+    detail = client.get(f"/v1/projects/{project['id']}", headers=auth()).json()
+    assert detail["scene"] is None
 
 
 def test_cancel_with_running_job_marks_and_waits(client, auth, db, project):

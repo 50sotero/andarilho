@@ -639,6 +639,18 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
       </Card>
     );
   }
+  if (scene && !scene.revision) {
+    // The scene exists but its first revision is still processing, or its run
+    // ended before that revision was ready.
+    return (
+      <Card>
+        <p>This scene has no layout to review yet. It appears after processing succeeds.</p>
+        <Link href={`${base}/processing`} className="text-sm underline">
+          Check processing
+        </Link>
+      </Card>
+    );
+  }
   if (!layout || !viewBox || !revision) {
     return (
       <div className="space-y-2">

@@ -26,12 +26,19 @@ from andarilho_api.models import (
     Job,
     Project,
     ReconstructionRun,
+    SceneRevision,
     Upload,
     UsageLedger,
 )
 from andarilho_api.settings import Settings
 
 ACTIVE_RUN_INDEX = "uq_reconstruction_runs_one_active"
+# Shown on a run's first revision when the run is cancelled before it is ready
+# (the worker writes the same finding; see queue.RUN_CANCELLED_FINDING).
+RUN_CANCELLED_FINDING = {
+    "code": "RUN_CANCELLED",
+    "message": "Processing was cancelled before this scene was ready.",
+}
 
 
 def active_run_exists() -> ApiError:
@@ -153,6 +160,18 @@ def _finalize_cancelled(db: Session, run: ReconstructionRun, now: datetime) -> N
         update(UsageLedger)
         .where(UsageLedger.run_id == run.id, UsageLedger.state == "reserved")
         .values(state="released", settled_at=now)
+    )
+    # The revision this run's pipeline created (if it got that far) will never be
+    # validated: stop it pending, as the worker does for runs that end unfinished.
+    db.execute(
+        update(SceneRevision)
+        .where(
+            SceneRevision.run_id == run.id,
+            SceneRevision.revision == 1,
+            SceneRevision.validation_state == "pending",
+        )
+        .values(validation_state="invalid", validation_findings=[RUN_CANCELLED_FINDING])
+        .execution_options(synchronize_session=False)
     )
 
 
