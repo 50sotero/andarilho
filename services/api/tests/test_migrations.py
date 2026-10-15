@@ -50,8 +50,15 @@ def _project(db: Session) -> uuid.UUID:
 
 
 def _training_run(db: Session, project_id: uuid.UUID) -> uuid.UUID:
-    """A run whose validating job succeeded and whose historical training job is recorded."""
+    """A finished run of the splat pipeline: its validating and training jobs succeeded."""
     run_id = uuid.UUID(active_run(db, str(project_id), job_states=("succeeded",))["runId"])
+    db.execute(
+        text(
+            "UPDATE reconstruction_runs SET status = 'succeeded', finished_at = now() "
+            "WHERE id = :id"
+        ),
+        {"id": run_id},
+    )
     db.add(
         Job(
             project_id=project_id,
@@ -176,6 +183,30 @@ def test_downgrade_to_0006_removes_scene_analysis_jobs_only(database_url, engine
 
 
 @pytest.mark.parametrize(
+    ("stage", "start", "target"),
+    [("scene_analysis", "0007", "0006"), ("texturing", "0006", "0005")],
+)
+def test_downgrade_refuses_while_a_run_is_active_before_it_reaches_the_removed_stage(
+    database_url, engine, stage, start, target
+):
+    # The run has no job of the stage yet, but its pinned recipe will need one. Each
+    # migration's own guard is reached from its own revision.
+    with _alembic(database_url) as config:
+        try:
+            if start != _revision(engine):
+                command.downgrade(config, start)
+            with Session(engine) as db:
+                project_id = _project(db)
+                active_run(db, str(project_id), job_states=("succeeded", "queued"))
+            with pytest.raises(RuntimeError, match=rf"1 run\(s\) and 0 {stage} job"):
+                command.downgrade(config, target)
+            assert _revision(engine) == start
+            assert _stages(engine) == ["preparing", "validating"]
+        finally:
+            command.upgrade(config, "head")
+
+
+@pytest.mark.parametrize(
     ("stage", "target", "state"),
     [
         ("scene_analysis", "0006", "queued"),
@@ -186,8 +217,7 @@ def test_downgrade_to_0006_removes_scene_analysis_jobs_only(database_url, engine
 def test_downgrade_refuses_while_a_job_of_the_removed_stage_can_still_run(
     database_url, engine, stage, target, state
 ):
-    # Deleting it would strand its run: still active, holding its reservation and the
-    # project's only active-run slot, with no job left to finish it.
+    # A layout save's job runs on a finished run; deleting it would strand its revision.
     with Session(engine) as db:
         project_id = _project(db)
         run_id = _training_run(db, project_id)

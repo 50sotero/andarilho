@@ -28,27 +28,31 @@ _MAINTENANCE = "'upload_inspection', 'project_cleanup', 'upload_cleanup', 'artif
 
 
 def _refuse_active(stage: str) -> None:
-    """Stop the downgrade while any scene_analysis job can still run.
+    """Stop the downgrade while any run, or any scene_analysis job, can still run.
 
-    Deleting a queued or running job would strand its run: still queued or running,
-    holding its usage reservation and the project's single active-run slot, with no job
-    left to advance or finalize it. Let such runs finish, or cancel them, first.
+    A run is pinned to the recipe it was submitted with, and the recipes published since 0007 reach
+    scene_analysis even when their scene_analysis job is not queued yet. After the downgrade a
+    current worker could not insert that job, and a rolled-back worker cannot run the
+    pinned recipe, so either way the run fails. The database does not record which
+    stages a recipe has, so every queued or running run blocks the downgrade. Layout
+    saves queue scene_analysis on finished runs, so active jobs of the stage are counted
+    too: deleting one would strand its revision. Let them finish, or cancel them, first.
     """
-    active = (
-        op.get_bind()
-        .execute(
-            sa.text(
-                "SELECT count(*) FROM jobs "
-                "WHERE stage = :stage AND state IN ('queued', 'running', 'retry_wait')"
-            ),
-            {"stage": stage},
-        )
-        .scalar_one()
-    )
-    if active:
+    bind = op.get_bind()
+    runs = bind.execute(
+        sa.text("SELECT count(*) FROM reconstruction_runs WHERE status IN ('queued', 'running')")
+    ).scalar_one()
+    jobs = bind.execute(
+        sa.text(
+            "SELECT count(*) FROM jobs "
+            "WHERE stage = :stage AND state IN ('queued', 'running', 'retry_wait')"
+        ),
+        {"stage": stage},
+    ).scalar_one()
+    if runs or jobs:
         raise RuntimeError(
-            f"cannot downgrade: {active} scene_analysis job(s) are still active; "
-            "let their runs finish or cancel them first"
+            f"cannot downgrade: {runs} run(s) and {jobs} scene_analysis job(s) are still active; "
+            "let them finish or cancel them first"
         )
 
 
