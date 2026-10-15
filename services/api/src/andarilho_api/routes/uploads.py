@@ -210,8 +210,9 @@ def sign_parts(
 def _reject(db: Session, upload: Upload, code: str, *, cleanup: bool = False) -> None:
     upload.status = "rejected"
     upload.rejection_code = code
-    # The multipart upload ID stays: project deletion re-aborts every recorded upload and
-    # checks its parts are gone, since a part in flight can land after an abort.
+    # A multipart upload ID that is still set names an aborted, not a completed, upload.
+    # It stays: a part in flight can land after an abort, so the cleanup aborts it again
+    # and checks no part is left before forgetting it.
     upload.updated_at = utcnow()
     if cleanup:
         _queue_cleanup(db, upload)
@@ -265,7 +266,7 @@ def complete_upload(
             storage.abort_multipart_upload(upload.staging_key, multipart_id)
         except StorageError:
             logger.warning("multipart abort failed; lifecycle rules will reconcile")
-        _reject(db, upload, "SIZE_MISMATCH")
+        _reject(db, upload, "SIZE_MISMATCH", cleanup=True)
         raise _size_mismatch()
 
     try:
@@ -281,6 +282,9 @@ def _freeze(db: Session, storage: Storage, upload: Upload, info: ObjectInfo | No
     """Verify size, copy to the immutable key, and enqueue inspection atomically."""
     if info is None:
         raise _storage_unavailable()
+    # The multipart upload is complete: its parts became the staging object, and no part
+    # can be added to it any more, so there is nothing left to reconcile.
+    upload.multipart_upload_id = None
     if info.size != upload.expected_bytes:
         deleted = _delete_staging(storage, upload.staging_key)
         _reject(db, upload, "SIZE_MISMATCH", cleanup=not deleted)
@@ -313,7 +317,6 @@ def _freeze(db: Session, storage: Storage, upload: Upload, info: ObjectInfo | No
     upload.immutable_key = frozen_key
     upload.storage_version = version
     upload.actual_bytes = info.size
-    upload.multipart_upload_id = None
     upload.updated_at = utcnow()
     db.add(
         Job(
@@ -393,6 +396,9 @@ def delete_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store
                 logger.warning("multipart abort failed; lifecycle rules will reconcile")
         upload.status = "aborted"  # its multipart upload ID stays, as in _reject
         upload.updated_at = utcnow()
+        # A part in flight can still land after the abort: the cleanup aborts the upload
+        # again until no part is left.
+        _queue_cleanup(db, upload)
         db.commit()
     return Response(status_code=204)
 
@@ -445,7 +451,8 @@ def _remove_verified(db: Session, upload: Upload) -> None:
 
 def _queue_cleanup(db: Session, upload: Upload) -> None:
     """Queue ``upload_cleanup``, which deletes the staging copy and, once the upload
-    is removed or rejected, its frozen bytes. A cleanup still waiting to run reads
+    is removed or rejected, its frozen bytes, and makes sure an aborted multipart upload
+    has no part left. A cleanup still waiting to run reads
     the upload's current state, so it covers this request too; a running one may
     have read it before this change, so another is queued (both steps are idempotent).
     """

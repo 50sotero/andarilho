@@ -737,6 +737,82 @@ def test_upload_cleanup_deletes_a_staging_copy_the_api_could_not(db, seed, store
     assert row["status"] == "verified" and store.list_keys(row["immutable_key"]) != []
 
 
+def _aborted_upload(seed, pid: str) -> str:
+    """An upload removed mid-upload, as the API leaves it: aborted, its multipart upload
+    ID (``mp-x``) kept, and its cleanup queued."""
+    uid = str(uuid.uuid4())
+    staging = f"tenants/{pid}/staging/{uid}"
+    seed.exec(
+        "INSERT INTO uploads (id, project_id, created_by, media_kind, display_filename, "
+        "declared_content_type, expected_bytes, staging_key, multipart_upload_id, part_size, "
+        "part_count, status, expires_at) VALUES (%s, %s, 'user-1', 'video', 'walk.mp4', "
+        "'video/mp4', 10, %s, 'mp-x', 16777216, 1, 'aborted', now() + interval '1 day')",
+        uid, pid, staging,
+    )  # fmt: skip
+    seed.job(pid, "upload_cleanup", {"uploadId": uid, "projectId": pid, "key": None,
+             "stagingKey": staging}, upload_id=uid)  # fmt: skip
+    return uid
+
+
+def _run_upload_cleanup(db, worker) -> list[str]:
+    """Run one pass of the queued upload cleanup now."""
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET available_at = now() WHERE stage = 'upload_cleanup' "
+            "AND state IN ('queued', 'retry_wait')"
+        )
+    queue.promote_retry_wait(db)
+    job = queue.claim(db, "worker-test", "cpu")
+    return [] if job is None else [worker.execute(job)]
+
+
+def _multipart_id(seed, uid: str) -> str | None:
+    return seed.one("SELECT multipart_upload_id FROM uploads WHERE id = %s", uid)[
+        "multipart_upload_id"
+    ]
+
+
+def test_upload_cleanup_aborts_a_removed_upload_again_until_no_part_is_left(
+    db, seed, store, settings
+):
+    # A part in flight when the user removed the upload can land after the API's abort.
+    pid = seed.project()
+    uid = _aborted_upload(seed, pid)
+    late = _LatePartStore(store.root, late=1)
+    late.stored_parts["mp-x"] = 1
+    sup = Supervisor(db, late, settings, delay_fn=lambda attempt: 0.0)
+
+    assert _run_upload_cleanup(db, sup) == ["deferred"]  # aborts; a part lands right after
+    assert late.stored_parts == {"mp-x": 1}
+    assert _run_upload_cleanup(db, sup) == ["deferred"]  # the check finds it: abort again
+    assert late.stored_parts == {} and _multipart_id(seed, uid) == "mp-x"
+    # A later check, with no abort before it, finds nothing: the ID is forgotten.
+    assert _run_upload_cleanup(db, sup) == ["succeeded"]
+    assert late.aborts == {"mp-x": 2} and _multipart_id(seed, uid) is None
+
+
+def test_upload_cleanup_checks_parts_only_a_horizon_after_its_abort(db, seed, store, settings):
+    pid = seed.project()
+    uid = _aborted_upload(seed, pid)
+    slow = replace(settings, cleanup_reconcile_horizon_seconds=600)
+    sup = Supervisor(db, store, slow, delay_fn=lambda attempt: 0.0)
+
+    assert _run_upload_cleanup(db, sup) == ["deferred"]
+    [job] = _upload_cleanups(seed, uid)
+    assert 590 < job["wait"].total_seconds() <= 600
+    store.stored_parts["mp-x"] = 1  # a part in flight lands after the abort
+    # An early pass neither aborts again, which would push the quiet interval back, nor
+    # finishes.
+    assert _run_upload_cleanup(db, sup) == ["deferred"]
+    assert store.stored_parts == {"mp-x": 1}
+    _age_cleanup(seed, 700, "multipartAbortedAt", stage="upload_cleanup")
+    assert _run_upload_cleanup(db, sup) == ["deferred"]  # the check finds the part
+    assert store.stored_parts == {} and _multipart_id(seed, uid) == "mp-x"
+    _age_cleanup(seed, 700, "multipartAbortedAt", stage="upload_cleanup")
+    assert _run_upload_cleanup(db, sup) == ["succeeded"]
+    assert _multipart_id(seed, uid) is None
+
+
 def test_inspection_out_of_retries_rejects_and_cleans_up(db, seed, store, settings):
     stages = {**STAGES, "upload_inspection": _transient_stage}
     sup = Supervisor(db, store, settings, stages=stages, delay_fn=lambda attempt: 0.0)
@@ -1030,9 +1106,9 @@ def test_project_cleanup_completes_only_once_no_multipart_part_is_left(db, seed,
     assert seed.one("SELECT 1 FROM uploads WHERE project_id = %s", pid) is None
 
 
-def _age_cleanup(seed, seconds: float, *fields: str) -> None:
+def _age_cleanup(seed, seconds: float, *fields: str, stage: str = "project_cleanup") -> None:
     """Move the cleanup job's recorded times back, as if ``seconds`` had passed."""
-    row = seed.one("SELECT id, input_manifest FROM jobs WHERE stage = 'project_cleanup'")
+    row = seed.one("SELECT id, input_manifest FROM jobs WHERE stage = %s", stage)
     manifest = dict(row["input_manifest"])
     for field in fields:
         manifest[field] = float(manifest[field]) - seconds

@@ -320,7 +320,10 @@ def test_abort_upload_and_release_quota(client, auth, db, settings):
     row = db.get(Upload, uuid.UUID(upload_id))
     db.refresh(row)
     assert row.status == "aborted"
-    assert row.multipart_upload_id is not None  # project deletion checks its parts are gone
+    assert row.multipart_upload_id is not None
+    # A part in flight can land after the abort, so a cleanup checks none is left.
+    [job] = _cleanup_jobs(db, upload_id)
+    assert job.state == "queued" and job.input_manifest["stagingKey"] == row.staging_key
     assert _init(client, auth, pid, size=10).status_code == 201
 
 
