@@ -594,8 +594,10 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
       setShownRevisionId(result.data.sceneRevisionId);
       dirtyRef.current = false;
       setDirty(false);
-      await loadScene(false);
+      // The save's ETag first, then the reload's: if someone saved in between, the
+      // reload adopts their revision and its newer ETag, which must win.
       if (result.etag) setEtag(result.etag);
+      await loadScene(false);
     } catch (err) {
       setError(toFriendlyError(err));
     } finally {
