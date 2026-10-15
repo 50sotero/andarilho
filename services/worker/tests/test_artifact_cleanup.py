@@ -283,6 +283,26 @@ def test_a_succeeded_attempt_of_a_run_that_ended_unfinished_is_deleted(
     assert cleanup_row(seed, pid)["result_manifest"]["deleted"] == [attempt]
 
 
+def test_a_run_ending_after_an_upgrade_cleans_up_its_legacy_training_outputs(db, seed, store, sup):
+    # Migration 0006 keeps historical training rows. When such a run fails, its training
+    # attempt is queued with the other outputs and must not make the whole cleanup refuse.
+    pid = seed.project()
+    rev = make_revision(seed, pid, run_status="failed")
+    packaging = make_run_job(seed, pid, rev["run"], "succeeded")
+    training = seed.job(pid, "training", {}, run_id=rev["run"])
+    seed.exec("UPDATE jobs SET state = 'succeeded', fencing_token = 1 WHERE id = %s", training)
+    legacy = f"tenants/{pid}/runs/{rev['run']}/attempts/training/{training}/1/"
+    current = attempt_of(pid, rev["run"], packaging)
+    store.put_bytes(legacy + "splat.ply", b"x")
+    store.put_bytes(current + "out.bin", b"x")
+    with db.transaction() as conn:
+        queue.queue_run_outputs(conn, rev["run"])
+
+    assert run_all_due_cleanups(db, sup) == ["succeeded"]
+    assert store.list_keys(legacy) == [] and store.list_keys(current) == []
+    assert sorted(cleanup_row(seed, pid)["result_manifest"]["deleted"]) == sorted([legacy, current])
+
+
 def test_only_the_fence_a_succeeded_job_committed_under_is_kept(db, seed, store, sup):
     # A worker that could not sweep fence 1 before succeeding at fence 2 queues fence 1.
     pid = seed.project()

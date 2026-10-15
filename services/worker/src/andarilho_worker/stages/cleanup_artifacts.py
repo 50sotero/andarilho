@@ -35,15 +35,18 @@ from functools import partial
 from typing import Any
 
 from andarilho_worker.errors import StageError
-from andarilho_worker.recipes import RUN_STAGES
+from andarilho_worker.recipes import LEGACY_RUN_STAGES, RUN_STAGES
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
 log = logging.getLogger(__name__)
 
 _UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+# Legacy stages are accepted too: a run that ends unfinished after an upgrade queues the
+# outputs of its historical jobs (e.g. training) along with the rest.
 ATTEMPT = re.compile(
     rf"tenants/(?P<project>{_UUID})/runs/(?P<run>{_UUID})/attempts/"
-    rf"(?P<stage>{'|'.join(RUN_STAGES)})/(?P<job>{_UUID})/(?P<fence>[1-9][0-9]*)/"
+    rf"(?P<stage>{'|'.join(RUN_STAGES + LEGACY_RUN_STAGES)})/(?P<job>{_UUID})/"
+    rf"(?P<fence>[1-9][0-9]*)/"
 )
 SCENE = re.compile(rf"tenants/(?P<project>{_UUID})/scenes/(?P<revision>{_UUID})/")
 

@@ -31,6 +31,10 @@ RUN_STAGES = (
     "packaging",
     "scene_validation",
 )
+# Stages retired from the pipeline whose historical job rows (and attempt prefixes) may
+# still exist after an upgrade: the Gaussian-splat trainer. Matches the API's
+# LEGACY_JOB_STAGES. Nothing new runs in them, but their outputs can still be cleaned up.
+LEGACY_RUN_STAGES = ("training",)
 # Only COLMAP needs a GPU; texturing and everything after it run on the CPU.
 GPU_STAGES = frozenset({"camera_reconstruction"})
 # A layout save re-runs these stages on the revision's own layout, reusing the run's frames
