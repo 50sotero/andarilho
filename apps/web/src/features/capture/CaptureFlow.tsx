@@ -63,15 +63,21 @@ function readVideoDuration(file: File): Promise<number | null> {
 /**
  * How removing an upload row involves the server. A verified file is released
  * through its own flow; while a file is being checked the server may refuse
- * (409), so the row stays until it confirms; an unfinished or rejected upload is
- * aborted best-effort (expiry and cleanup reconcile it); a row the server never
- * saw is only dropped locally.
+ * (409), so the row stays until it confirms. That includes a completion still in
+ * flight or just finished, before the row has seen the new status: if completion
+ * wins, the file is being checked. An unfinished or rejected upload is aborted
+ * best-effort (expiry and cleanup reconcile it); a row the server never saw is only
+ * dropped locally.
  */
 export function removalMode(
   serverStatus: UploadRowView["serverStatus"],
+  phase: UploadRowView["progress"]["phase"] | null = null,
 ): "release-verified" | "confirm" | "best-effort" | "local" {
   if (serverStatus === "verified") return "release-verified";
   if (serverStatus === "uploaded_unverified") return "confirm";
+  if (serverStatus === null && (phase === "completing" || phase === "completed")) {
+    return "confirm";
+  }
   return "best-effort";
 }
 
@@ -359,7 +365,9 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
     const uploader = uploadersRef.current.get(id);
     const row = rows.find((r) => r.id === id);
     const uploadId = row?.uploadId ?? uploader?.state.uploadId;
-    const mode = uploadId ? removalMode(row?.serverStatus ?? null) : "local";
+    const mode = uploadId
+      ? removalMode(row?.serverStatus ?? null, row?.progress.phase ?? null)
+      : "local";
     if (mode === "release-verified") {
       if (!(await removeVerified(uploadId!, row!.name))) return;
     } else if (mode === "confirm") {

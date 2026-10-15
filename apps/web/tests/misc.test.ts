@@ -256,6 +256,13 @@ describe("upload row removal", () => {
     expect(removalMode("rejected")).toBe("best-effort");
     expect(removalMode(null)).toBe("best-effort");
   });
+
+  it("waits for the server while completion may be turning the upload into a checked file", () => {
+    expect(removalMode(null, "completing")).toBe("confirm");
+    expect(removalMode(null, "completed")).toBe("confirm");
+    expect(removalMode(null, "uploading")).toBe("best-effort");
+    expect(removalMode("rejected", "completed")).toBe("best-effort");
+  });
 });
 
 describe("delivery envelope expiry", () => {
