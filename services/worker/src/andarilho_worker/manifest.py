@@ -39,11 +39,16 @@ def _clean_number(v: float) -> float | int:
 
 
 def navigation_for(geometry_source: str, layout_revision: int) -> dict[str, Any]:
-    approved = geometry_source in ("user_confirmed_trace", "synthetic_fixture")
+    """Navigation for a packaged scene: walkable at once, whatever its geometry source.
+
+    The collision mesh is built from the same layout as the model, so an automatic proposal
+    is walkable without review. Review is optional editing, and approval only publishes. The
+    source is kept in the provenance, not here.
+    """
     return {
-        "mode": "approved_collision" if approved else "inspection_only",
+        "mode": "approved_collision",
         "layoutRevision": layout_revision,
-        "approved": approved,
+        "approved": True,
         "playerRadius": 0.25,
         "playerHeight": 1.7,
         "eyeHeight": 1.6,

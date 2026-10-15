@@ -22,7 +22,12 @@ from andarilho_worker.geometry.glb import (
     inspect_textured_glb,
     read_glb,
 )
-from andarilho_worker.geometry.layout import Finding, floor_supports, validate_layout
+from andarilho_worker.geometry.layout import (
+    Finding,
+    floor_supports,
+    furniture_footprint,
+    validate_layout,
+)
 from andarilho_worker.geometry.polygon import point_in_polygon
 
 BOUNDS_TOLERANCE = 1e-3
@@ -169,6 +174,12 @@ def check_collision_glb(
                 continue
             if point_in_polygon((feet[0], feet[2]), obstacle["footprint"]):
                 findings.append(Finding("SPAWN_BLOCKED", "spawn is inside an obstacle"))
+        for item in layout.get("furniture", []):
+            # Solid furniture blocks the spawn like an obstacle; a piece that is not solid
+            # is not in the collision mesh and does not.
+            solid_here = item.get("solid", True) and item["floorId"] == manifest["spawn"]["floorId"]
+            if solid_here and point_in_polygon((feet[0], feet[2]), furniture_footprint(item)):
+                findings.append(Finding("SPAWN_BLOCKED", "spawn is inside a piece of furniture"))
     return findings
 
 

@@ -4,9 +4,9 @@ Everything lands under ``tenants/{project}/scenes/{scene_revision_id}/`` and is
 written with :func:`put_immutable` (an existing object with different bytes is a
 conflict, never overwritten). The render asset is the textured model from
 ``texturing``, copied to this revision's prefix, so every revision keeps its own model.
-Navigation is only ``approved_collision`` when the layout came from a user save
-(``user_confirmed_trace``) or the synthetic fixture; automatic proposals are
-``inspection_only``.
+Every packaged scene is ``approved_collision``: its collision and its model come from the
+same layout, so an automatic proposal is walkable at once. Review is optional editing, and
+approval only publishes.
 
 The poster, quality and scale status come from this run's outputs in both pipelines,
 so a layout save reads the same run facts as the initial run did.
@@ -94,7 +94,10 @@ def run(ctx: StageContext) -> StageResult:
         raise StageError("MISSING_INPUT")
 
     quality = out.get("coverage") or SYNTHETIC_QUALITY
-    warnings = [*quality.get("warnings", []), *out.get("frameWarnings", [])]
+    # The scene analysis may be missing (a skipped or disabled stage), so its warnings are
+    # optional. They follow the frame warnings, and the unseen-area warning stays last.
+    analysis = [str(w) for w in (out.get("analysisWarnings") or [])]
+    warnings = [*quality.get("warnings", []), *out.get("frameWarnings", []), *analysis]
     unseen = unseen_warning(ctx.output("textureCoverage"))
     if unseen is not None:
         warnings.append(unseen)
