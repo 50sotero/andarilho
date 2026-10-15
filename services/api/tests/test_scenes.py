@@ -357,6 +357,18 @@ def test_viewers_only_receive_the_live_published_revision(client, auth, db, setu
     assert client.post(url, json=body, headers=auth()).status_code == 200  # owners still can
 
 
+def test_publishing_invalidates_the_scene_etag(client, auth, setup):
+    assert _approve(client, auth, setup).status_code == 200
+    # Two owner tabs loaded the scene at version 2; the first one publishes.
+    first = _share(client, auth, setup, 2)
+    assert first.status_code == 201 and first.headers["ETag"] == '"3"'
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"3"'
+    # The second tab's stale ETag no longer passes, so it cannot publish over it.
+    stale = _share(client, auth, setup, 2)
+    assert stale.status_code == 409
+    assert _share(client, auth, setup, 3).status_code == 201
+
+
 def test_revoking_newest_share_keeps_older_live_link_published(client, auth, db, setup):
     assert _approve(client, auth, setup).status_code == 200
     assert _share(client, auth, setup, 2).status_code == 201

@@ -272,7 +272,12 @@ def scene_delivery(
 
 @router.post("/scenes/{scene_id}/shares", status_code=201)
 def create_share(
-    scene_id: uuid.UUID, body: ShareCreate, request: Request, subject: Subject, db: Db
+    scene_id: uuid.UUID,
+    body: ShareCreate,
+    request: Request,
+    response: Response,
+    subject: Subject,
+    db: Db,
 ):
     project, scene = _lock_scene(db, scene_id, subject, OWNER)
     check_if_match(request, scene.version, "scene")
@@ -299,6 +304,9 @@ def create_share(
     db.add(share)
     project.published_revision_id = revision.id
     project.updated_at = utcnow()
+    # Publishing changes what the scene's viewers see: a tab still holding the old
+    # ETag must get a conflict instead of silently publishing over this.
+    scene.version += 1
     if revision.manifest_sha256 is None:
         revision.manifest_sha256 = manifest_sha256(revision)
     audit.record(
@@ -312,6 +320,7 @@ def create_share(
     )
     db.commit()
     db.refresh(share)
+    response.headers["ETag"] = ser.etag(scene.version)
     return {"share": ser.share(share), "token": token, "path": f"/s/{token}"}
 
 
