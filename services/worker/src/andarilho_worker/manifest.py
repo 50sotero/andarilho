@@ -10,8 +10,6 @@ from typing import Any
 from andarilho_worker.contracts import SCHEMA_VERSION
 from andarilho_worker.geometry.layout import layout_bounds
 
-IDENTITY_MATRIX = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
-
 
 def scene_prefix(project_id: str, scene_revision_id: str) -> str:
     return f"tenants/{project_id}/scenes/{scene_revision_id}/"

@@ -6,7 +6,7 @@ walls onto the X and Z axes, scales it so the cameras sit at a walking person's 
 (1.5 m, an estimate until the user measures a distance) and puts the floor at y = 0.
 The result is recorded as ``worldFromColmap`` (column major,
 ``THREE.Matrix4.fromArray`` compatible). Points and poses are never rewritten: the
-texturing and viewer stages apply the matrix when they need the canonical world.
+texturing stage applies the matrix when it needs them in the canonical world.
 Scale is ``estimated`` until a user measurement exists.
 
 The stage streams the ``sparse/`` members of ``dataset.tar`` (the frames under

@@ -165,13 +165,21 @@ def _reporter(ctx: StageContext) -> Callable[[int, int], None]:
 
 
 def run(ctx: StageContext) -> StageResult:
-    started = time.monotonic()
     revision_id = str(ctx.output("sceneRevisionId"))
     data = ctx.query(lambda conn: _load(conn, ctx, revision_id))
     if data["revision"] is None:
         raise StageError("MISSING_INPUT")
-    layout = dict(data["revision"]["layout"])
-    stages = data["stages"]
+    return paint(ctx, dict(data["revision"]["layout"]), data["stages"])
+
+
+def paint(
+    ctx: StageContext, layout: dict[str, Any], stages: Mapping[str, Mapping[str, Any]]
+) -> StageResult:
+    """Texture ``layout`` from the run's stage outputs, keyed by stage name.
+
+    The database-free half of the stage, which the smoke runner calls directly.
+    """
+    started = time.monotonic()
     params, jpeg_quality = _settings(ctx)
     preparing = stages.get("preparing") or {}
     poster_key = preparing.get("posterKey") or None

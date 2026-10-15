@@ -143,6 +143,30 @@ def load_evidence(ctx: StageContext) -> tuple[np.ndarray, np.ndarray] | None:
     return points, cameras
 
 
+def proposed_layout(ctx: StageContext) -> tuple[dict[str, Any], dict[str, float]]:
+    """The automatic single-room layout from the run's ``normalizing`` outputs.
+
+    Returns the layout and the shift of each side that snapped to the evidence. Shared
+    with the smoke runner, which has no database.
+    """
+    bounds = ctx.output("proposalBounds")
+    min_xz, max_xz = bounds["minXZ"], bounds["maxXZ"]
+    snapped: dict[str, float] = {}
+    evidence = load_evidence(ctx)
+    if evidence is not None:
+        min_xz, max_xz, snapped = snap_rectangle(
+            min_xz, max_xz, points=evidence[0], cameras=evidence[1], height=bounds["height"]
+        )
+    layout = rectangle_layout(
+        min_xz,
+        max_xz,
+        elevation=bounds["floorY"],
+        height=bounds["height"],
+        spawn=ctx.outputs().get("proposalSpawn"),
+    )
+    return layout, snapped
+
+
 def _load_revision(conn: Any, ctx: StageContext) -> dict[str, Any] | None:
     return conn.execute(
         "SELECT id, scene_id, revision, layout_revision, layout, base_revision_id "
@@ -209,20 +233,7 @@ def run(ctx: StageContext) -> StageResult:
     elif ctx.outputs().get("quality") == "synthetic":
         layout, source = synthetic_layout(), "synthetic"
     else:
-        bounds = ctx.output("proposalBounds")
-        min_xz, max_xz = bounds["minXZ"], bounds["maxXZ"]
-        evidence = load_evidence(ctx)
-        if evidence is not None:
-            min_xz, max_xz, snapped = snap_rectangle(
-                min_xz, max_xz, points=evidence[0], cameras=evidence[1], height=bounds["height"]
-            )
-        layout = rectangle_layout(
-            min_xz,
-            max_xz,
-            elevation=bounds["floorY"],
-            height=bounds["height"],
-            spawn=ctx.outputs().get("proposalSpawn"),
-        )
+        layout, snapped = proposed_layout(ctx)
         source = "proposal"
     findings = [f.as_dict() for f in validate_layout(layout)]
     if findings:

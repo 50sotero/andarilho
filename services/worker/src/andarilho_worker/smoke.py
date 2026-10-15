@@ -1,17 +1,22 @@
-"""Run the real capture pipeline on one local video, without a database.
+"""Run the real capture pipeline on one local capture, without a database.
 
-Used by the manual GPU smoke workflow and for local experiments on a GPU host:
+Used by the manual GPU smoke workflow and for local experiments:
 
     python -m andarilho_worker.smoke --video /data/capture.mp4 --out /out [--quality preview]
+    python -m andarilho_worker.smoke --dataset /data/dataset.tar --out /out [--layout l.json]
 
-It drives ``preparing`` → ``camera_reconstruction`` → ``training`` →
-``normalizing`` through the same stage functions, pinned recipe, subprocess
-supervision and output contracts as the worker, using a local object store.
-The geometry and packaging stages need the database and are not run; instead
-``--out/bundle`` receives what they would package for review, built by the same
-functions: the render asset, the automatic single-room layout proposal, its
-collision GLB, the poster and a scene manifest, checked by the same scene validator (the
-viewer's dev page opens it with ``?bundle=``). A JSON report is written to
+``--video`` drives ``preparing`` → ``camera_reconstruction`` → ``normalizing`` (a
+GPU host) through the same stage functions, pinned recipe, subprocess supervision
+and output contracts as the worker, using a local object store. ``--dataset`` starts
+from the ``dataset.tar`` a reconstruction stored (undistorted frames plus the COLMAP
+model) and runs only ``normalizing``, so it needs no GPU.
+
+In the worker the proposal, texturing and packaging stages read the database; here
+the same functions run without it. ``--out/bundle`` receives what review would see:
+the automatic single-room proposal (or the ``--layout`` file, in the run's canonical
+world, standing in for a reviewed layout), the model textured from the frames, its
+collision GLB, the poster and a scene manifest, checked by the same scene validator
+(the viewer's dev page opens it with ``?bundle=``). A JSON report is written to
 ``--out``; the process exits non-zero if any stage fails or the bundle does not
 validate, so a broken toolchain cannot pass silently.
 """
@@ -22,16 +27,19 @@ import argparse
 import hashlib
 import json
 import sys
+import tarfile
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Any
 
 from andarilho_worker.artifacts import LocalObjectStore, ObjectStore
 from andarilho_worker.errors import StageError
-from andarilho_worker.geometry.layout import collision_glb, rectangle_layout, validate_layout
+from andarilho_worker.geometry.layout import collision_glb, validate_layout
 from andarilho_worker.manifest import asset_entry, build_manifest, scene_prefix
 from andarilho_worker.recipes import recipe_for
 from andarilho_worker.runner import ProcessRunner
@@ -43,9 +51,14 @@ from andarilho_worker.stages.base import (
     StageContext,
     StageServices,
 )
+from andarilho_worker.stages.package_scene import GEOMETRY_SOURCE, unseen_warning
+from andarilho_worker.stages.propose_geometry import proposed_layout
+from andarilho_worker.stages.texture import paint
 from andarilho_worker.validation import canonical_json, validate_scene
 
-CAPTURE_STAGES = ("preparing", "camera_reconstruction", "training", "normalizing")
+CAPTURE_STAGES = ("preparing", "camera_reconstruction", "normalizing")
+DATASET_STAGES = ("normalizing",)
+DATASET_WARNING = "Started from a stored dataset: the frame selection was not rerun."
 
 
 def _sha256(path: Path) -> str:
@@ -56,49 +69,87 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _context(base: StageContext, stage: str, outputs: Mapping[str, Any]) -> StageContext:
+    scratch = base.scratch / stage
+    scratch.mkdir(parents=True, exist_ok=True)
+    return replace(base, stage=stage, scratch=scratch, input_manifest={"outputs": dict(outputs)})
+
+
+def _video_inputs(store: ObjectStore, video: Path, project_id: str) -> dict[str, Any]:
+    upload_id = str(uuid.uuid4())
+    key = f"tenants/{project_id}/originals/{upload_id}"
+    store.put_file(key, video, "video/mp4")
+    return {
+        "inputs": [
+            {
+                "uploadId": upload_id,
+                "mediaKind": "video",
+                "key": key,
+                "storageVersion": None,
+                "sha256": _sha256(video),
+                "bytes": video.stat().st_size,
+                "contentType": "video/mp4",
+                "metadata": {},
+            }
+        ]
+    }
+
+
+def _dataset_outputs(base: StageContext, dataset: Path) -> dict[str, Any]:
+    """What ``camera_reconstruction`` would have output for a stored ``dataset.tar``.
+
+    The archive holds only the registered frames, so their count stands in for both
+    the registered and the selected views.
+    """
+    with tarfile.open(dataset) as tar:
+        frames = sum(1 for m in tar.getmembers() if m.isfile() and m.name.startswith("images/"))
+    key = replace(base, stage="camera_reconstruction").attempt_key("dataset.tar")
+    base.store.put_file(key, dataset, "application/x-tar")
+    coverage = {
+        "registeredViews": frames,
+        "selectedViews": frames,
+        "disconnectedComponents": 1,
+        "registeredRatio": 1.0,
+        "warnings": [DATASET_WARNING],
+    }
+    return {"datasetKey": key, "coverage": coverage}
+
+
 def write_bundle(
     store: ObjectStore,
-    outputs: dict[str, Any],
+    outputs: Mapping[str, Any],
+    layout: dict[str, Any],
+    layout_source: str,
     bundle: Path,
     *,
     project_id: str,
     run_id: str,
     recipe_digest: str,
 ) -> dict[str, Any]:
-    """Package the normalized scene as review would see it, without a database.
+    """Package the textured scene as ``packaging`` would, then run the scene validator.
 
-    Mirrors ``geometry_proposal`` (rectangle layout from the proposal bounds) and
-    ``packaging`` (manifest), then runs the scene validator. The proposal stays
-    ``inspection_only``: walking it needs a reviewed layout, as in the product.
+    A proposal stays ``inspection_only``: walking it needs a reviewed layout, as in the
+    product. A ``--layout`` file stands in for that review.
     """
-    bounds = outputs["proposalBounds"]
-    layout = rectangle_layout(
-        bounds["minXZ"],
-        bounds["maxXZ"],
-        elevation=bounds["floorY"],
-        height=bounds["height"],
-        spawn=outputs.get("proposalSpawn"),
-    )
-    findings = [f.as_dict() for f in validate_layout(layout)]
-    if findings:
-        return {"findings": findings}
     bundle.mkdir(parents=True, exist_ok=True)
     revision_id = str(uuid.uuid4())
     prefix = scene_prefix(project_id, revision_id)
-    render_format = str(outputs["renderFormat"])
-    render_path = bundle / f"scene.{render_format}"
-    render_sha = store.download(str(outputs["renderKey"]), render_path)
+    model_path = bundle / "model.glb"
+    model_sha = store.download(str(outputs["modelKey"]), model_path)
     collision_path = bundle / "collision.glb"
     collision_path.write_bytes(collision_glb(layout))
-    files = {prefix + render_path.name: render_path, prefix + collision_path.name: collision_path}
+    files = {prefix + model_path.name: model_path, prefix + collision_path.name: collision_path}
     poster = None
     if outputs.get("posterKey"):
         poster_path = bundle / "poster.webp"
         store.download(str(outputs["posterKey"]), poster_path)
         files[prefix + poster_path.name] = poster_path
         poster = asset_entry(prefix + poster_path.name, poster_path, "webp")
-    quality = {k: v for k, v in (outputs.get("coverage") or {}).items() if k != "registeredRatio"}
-    quality["warnings"] = [*quality.get("warnings", []), *(outputs.get("frameWarnings") or [])]
+    quality = {k: v for k, v in dict(outputs["coverage"]).items() if k != "registeredRatio"}
+    warnings = [*quality.get("warnings", []), *(outputs.get("frameWarnings") or [])]
+    unseen = unseen_warning(outputs["textureCoverage"])
+    quality["warnings"] = warnings if unseen is None else [*warnings, unseen]
+    scale_status = "user_measured" if layout.get("calibration") else str(outputs["scaleStatus"])
     manifest = build_manifest(
         scene_id=str(uuid.uuid4()),
         scene_revision_id=revision_id,
@@ -106,14 +157,11 @@ def write_bundle(
         run_id=run_id,
         layout=layout,
         layout_revision=1,
-        render=asset_entry(
-            prefix + render_path.name, render_path, render_format, sha256=render_sha
-        ),
+        render=asset_entry(prefix + model_path.name, model_path, "glb", sha256=model_sha),
         collision=asset_entry(prefix + collision_path.name, collision_path, "glb"),
         poster=poster,
-        world_from_decoded_render=outputs["worldFromDecodedRender"],
-        scale_status=str(outputs["scaleStatus"]),
-        geometry_source="proposal",
+        scale_status=scale_status,
+        geometry_source=GEOMETRY_SOURCE[layout_source],
         recipe_digest=recipe_digest,
         capture_set_id=str(outputs["captureSetId"]),
         quality=quality,
@@ -130,26 +178,35 @@ def write_bundle(
     (bundle / "manifest.json").write_bytes(canonical_json(manifest))
     (bundle / "layout.json").write_text(json.dumps(layout, indent=2), encoding="utf-8")
     return {
-        "renderFile": f"{bundle.name}/{render_path.name}",
-        "renderBytes": render_path.stat().st_size,
-        "renderSha256": render_sha,
+        "renderFile": f"{bundle.name}/{model_path.name}",
+        "renderBytes": model_path.stat().st_size,
+        "renderSha256": model_sha,
         "posterFile": f"{bundle.name}/poster.webp" if poster else None,
         "bounds": manifest["bounds"],
         "spawn": manifest["spawn"],
+        "navigation": manifest["navigation"]["mode"],
         "findings": findings,
     }
 
 
-def run_smoke(video: Path, out: Path, quality: str, max_seconds: int) -> dict[str, Any]:
+def run_smoke(
+    out: Path,
+    quality: str,
+    max_seconds: int,
+    *,
+    video: Path | None = None,
+    dataset: Path | None = None,
+    layout_file: Path | None = None,
+) -> dict[str, Any]:
     out.mkdir(parents=True, exist_ok=True)
     work = out / "work"
     store = LocalObjectStore(work / "store")
-    project_id, run_id, upload_id = (str(uuid.uuid4()) for _ in range(3))
-    key = f"tenants/{project_id}/originals/{upload_id}"
-    store.put_file(key, video, "video/mp4")
+    project_id, run_id = str(uuid.uuid4()), str(uuid.uuid4())
     recipe = recipe_for(quality)
     settings = Settings(
-        database_url="postgresql://unused", worker_capability="gpu", worker_scratch_dir=work
+        database_url="postgresql://unused",
+        worker_capability="gpu" if video is not None else "cpu",
+        worker_scratch_dir=work,
     )
     services = StageServices(
         store=store,
@@ -157,24 +214,7 @@ def run_smoke(video: Path, out: Path, quality: str, max_seconds: int) -> dict[st
         settings=settings,
         progress=lambda message, data: print(f"  {message}", flush=True) or True,
     )
-    outputs: dict[str, Any] = {
-        "captureSetId": str(uuid.uuid4()),
-        "quality": quality,
-        "inputs": [
-            {
-                "uploadId": upload_id,
-                "mediaKind": "video",
-                "key": key,
-                "storageVersion": None,
-                "sha256": _sha256(video),
-                "bytes": video.stat().st_size,
-                "contentType": "video/mp4",
-                "metadata": {},
-            }
-        ],
-    }
     deadline = datetime.now(UTC) + timedelta(seconds=max_seconds)
-    report: dict[str, Any] = {"quality": quality, "recipeDigest": recipe.digest, "stages": []}
     base = StageContext(
         job_id="smoke",
         run_id=run_id,
@@ -188,34 +228,69 @@ def run_smoke(video: Path, out: Path, quality: str, max_seconds: int) -> dict[st
         deadline=deadline,
         max_scratch_bytes=settings.max_scratch_bytes,
         cancellation=CancellationToken(deadline),
-        job=JobInfo(project_id, run_id, None, None, "gpu"),
+        job=JobInfo(project_id, run_id, None, None, settings.worker_capability),
         services=services,
     )
-    for stage in CAPTURE_STAGES:
+    outputs: dict[str, Any] = {"captureSetId": str(uuid.uuid4()), "quality": quality}
+    stage_outputs: dict[str, dict[str, Any]] = {}
+    report: dict[str, Any] = {"quality": quality, "recipeDigest": recipe.digest, "stages": []}
+
+    def timed(stage: str, step: Callable[[], Any]) -> Any:
         print(f"[{stage}]", flush=True)
-        scratch = work / stage
-        scratch.mkdir(parents=True, exist_ok=True)
-        ctx = replace(base, stage=stage, scratch=scratch, input_manifest={"outputs": outputs})
         started = time.monotonic()
-        result = STAGES[stage](ctx)
-        outputs = {**outputs, **dict(result.outputs)}
+        result = step()
+        report["stages"].append({"stage": stage, "seconds": round(time.monotonic() - started, 1)})
+        return result
+
+    if video is not None and dataset is None:
+        outputs |= _video_inputs(store, video, project_id)
+        stages = CAPTURE_STAGES
+    elif dataset is not None and video is None:
+        stage_outputs["camera_reconstruction"] = _dataset_outputs(base, dataset)
+        outputs |= stage_outputs["camera_reconstruction"]
+        stages = DATASET_STAGES
+    else:
+        raise ValueError("exactly one of video and dataset is required")
+    for stage in stages:
+        result = timed(stage, partial(STAGES[stage], _context(base, stage, outputs)))
+        stage_outputs[stage] = dict(result.outputs)
+        outputs |= stage_outputs[stage]
         if "frame" in result.manifest:
             report["frame"] = result.manifest["frame"]
-        report["stages"].append({"stage": stage, "seconds": round(time.monotonic() - started, 1)})
-    bundle = write_bundle(
-        store,
-        outputs,
-        out / "bundle",
-        project_id=project_id,
-        run_id=run_id,
-        recipe_digest=recipe.digest,
-    )
+
+    snapped: dict[str, float] = {}
+    if layout_file is not None:
+        layout, layout_source = json.loads(layout_file.read_text(encoding="utf-8")), "user"
+    else:
+        layout, snapped = proposed_layout(_context(base, "geometry_proposal", outputs))
+        layout_source = "proposal"
+    findings = [f.as_dict() for f in validate_layout(layout)]
+    report.update(layoutSource=layout_source, snappedSides=snapped)
+    if findings:
+        report["bundle"] = {"findings": findings}
+    else:
+        textured = timed(
+            "texturing", lambda: paint(_context(base, "texturing", outputs), layout, stage_outputs)
+        )
+        outputs |= dict(textured.outputs)
+        report["texturing"] = {
+            k: textured.manifest[k] for k in ("frames", "texelSize", "pages", "modelBytes")
+        }
+        report["bundle"] = write_bundle(
+            store,
+            outputs,
+            layout,
+            layout_source,
+            out / "bundle",
+            project_id=project_id,
+            run_id=run_id,
+            recipe_digest=recipe.digest,
+        )
     report.update(
-        bundle=bundle,
         coverage=outputs.get("coverage"),
-        splatCount=outputs.get("splatCount"),
+        textureCoverage=outputs.get("textureCoverage"),
         frameCount=outputs.get("frameCount"),
-        worldFromDecodedRender=outputs.get("worldFromDecodedRender"),
+        worldFromColmap=outputs.get("worldFromColmap"),
     )
     (out / "report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
@@ -223,13 +298,23 @@ def run_smoke(video: Path, out: Path, quality: str, max_seconds: int) -> dict[st
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--video", type=Path, required=True)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--video", type=Path)
+    source.add_argument("--dataset", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--layout", type=Path)
     parser.add_argument("--quality", choices=("preview", "standard"), default="preview")
     parser.add_argument("--max-seconds", type=int, default=3600)
     args = parser.parse_args(argv)
     try:
-        report = run_smoke(args.video, args.out, args.quality, args.max_seconds)
+        report = run_smoke(
+            args.out,
+            args.quality,
+            args.max_seconds,
+            video=args.video,
+            dataset=args.dataset,
+            layout_file=args.layout,
+        )
     except StageError as exc:
         print(f"smoke failed: {exc.code}: {exc}", file=sys.stderr)
         return 1
