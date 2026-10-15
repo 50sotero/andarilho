@@ -866,3 +866,137 @@ def test_texture_params_round_trip_into_the_atlas():
     mesh = texture_layout(layout, frames, TextureParams(texel_size=0.02))
     assert mesh.texel_size == pytest.approx(0.02)
     assert all(page.shape == (2048, 2048, 3) and page.dtype == np.uint8 for page in mesh.pages)
+
+
+# --------------------------------------------------------------------------
+# Furniture
+# --------------------------------------------------------------------------
+
+SOFA_RGB = (42, 111, 143)  # the test piece's colour, #2a6f8f
+
+
+def _sofa_room() -> dict[str, Any]:
+    """``_room`` with a 0.5 x 0.8 x 1.0 m box standing 0.25 m off the west wall.
+
+    The cameras circle within 0.25 m of the centre, so every camera is east of the box and the
+    west wall behind it is hidden from all of them below the box's top.
+    """
+    layout = _room()
+    layout["furniture"] = [
+        {
+            "id": "sofa",
+            "floorId": "floor-0",
+            "category": "sofa",
+            "position": [-1.0, 0.0],
+            "yawRadians": 0.0,
+            "size": [0.5, 0.8, 1.0],
+            "solid": True,
+            "parts": [{"shape": "box", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#2a6f8f"}],
+        }
+    ]
+    return layout
+
+
+def _shade(normal: np.ndarray) -> np.ndarray:
+    """The part colour's fixed face shade, written out from the texturing rule."""
+    light = np.array([0.35, 0.85, 0.4])
+    light /= np.linalg.norm(light)
+    return 0.6 + 0.4 * max(0.0, float(normal @ light))
+
+
+@pytest.fixture(scope="module")
+def sofa_run() -> _Run:
+    layout = _sofa_room()
+    return _texture_run(layout, _room_shots(layout_surfaces(layout)))
+
+
+def test_furniture_the_frames_see_reproduces_ground_truth(sofa_run):
+    # The top and the east face are in view. The north, south and west faces are not: the
+    # cameras never get beyond them. So about 1.3 of the piece's 2.9 m2 is seen.
+    truth = _truth_coverage(sofa_run.charts)["furniture"]
+    assert truth == pytest.approx(1.3 / 2.9, abs=0.03)
+    assert sofa_run.mesh.coverage["furniture"] >= truth - 0.01
+    errors = _kind_errors(sofa_run, "furniture")
+    assert errors.size > 5_000
+    assert errors.mean() < MAE_BOUND
+
+
+def test_the_wall_behind_a_piece_stays_unseen_where_the_piece_hides_it(sofa_run):
+    # The west wall stands 0.25 m behind the piece. The band checked here is the wall behind the
+    # piece's middle, below its top: away from the room corners, where the depth tolerance lets
+    # grazing texels through, and away from the piece's side edges.
+    index = next(
+        k
+        for k, s in enumerate(sofa_run.surfaces)
+        if s.kind == "wall" and s.extras.get("wallId") == "wall-west" and s.normal[0] > 0
+    )
+    chart = sofa_run.charts[index]
+    rows = np.unique(chart.pixels[:, 1]).size
+    cols = np.unique(chart.pixels[:, 0]).size
+    shape = (rows, cols)
+    seen = chart.seen.reshape(shape)
+    # The blend fills at most six texels from a seen one; seven steps keep clear of that.
+    reach = seen.copy()
+    for _ in range(7):
+        reach |= _touching(reach)
+    height = chart.world[:, 1].reshape(shape)
+    along = chart.world[:, 2].reshape(shape)
+    behind = (height > 0.1) & (height < 0.6) & (np.abs(along) < 0.3)
+    deep = chart.inside.reshape(shape) & ~reach & behind
+    assert deep.sum() > 1_000
+    assert not np.any(seen[deep])
+    colours = _colours(sofa_run.mesh, chart, np.ones(len(chart.pixels), dtype=bool))
+    assert np.all(colours.reshape(shape + (3,))[deep] == UNSEEN)
+
+
+def test_an_unseen_piece_face_takes_its_part_colour_in_shade(sofa_run):
+    # The face on the west side looks at the west wall, away from every camera.
+    index = next(
+        k
+        for k, s in enumerate(sofa_run.surfaces)
+        if s.kind == "furniture" and np.allclose(s.normal, [-1, 0, 0])
+    )
+    chart = sofa_run.charts[index]
+    assert not chart.seen.any()
+    colours = _colours(sofa_run.mesh, chart, chart.inside)
+    expected = np.clip(np.rint(np.array(SOFA_RGB) * _shade(np.array([-1.0, 0.0, 0.0]))), 0, 255)
+    assert expected.tolist() == [25, 67, 86]
+    assert np.all(colours == expected)
+
+
+def test_coverage_counts_the_architecture_in_all_and_furniture_apart():
+    def surface(kind: str) -> Surface:
+        return Surface(
+            name=kind,
+            kind=kind,
+            origin=np.zeros(3),
+            u_axis=np.array([1.0, 0.0, 0.0]),
+            v_axis=np.array([0.0, 1.0, 0.0]),
+            normal=np.array([0.0, 0.0, 1.0]),
+            outer=np.zeros((3, 2)),
+        )
+
+    surfaces = [surface("wall"), surface("furniture")]
+    surface_of_inside = np.array([0, 0, 0, 0, 1, 1, 1, 1])
+    seen = np.array([True, True, True, False, False, False, False, False])
+    coverage = texture_module._coverage(surfaces, surface_of_inside, seen)
+    assert coverage["wall"] == pytest.approx(0.75)
+    assert coverage["furniture"] == 0.0
+    assert coverage["all"] == pytest.approx(0.75)  # furniture does not dilute the architecture
+
+
+def test_procedural_furniture_takes_its_part_colour_in_shade():
+    layout = _sofa_room()
+    surfaces = layout_surfaces(layout)
+    mesh = procedural_texture_layout(layout)
+    atlas = build_atlas(surfaces, texel_size=mesh.texel_size)
+    assert mesh.coverage["furniture"] == 1.0
+    checked = 0
+    for surface, placement in zip(surfaces, atlas.placements, strict=True):
+        if surface.kind != "furniture":
+            continue
+        _, _, rgb = _chart_samples(mesh, surface, placement, atlas)
+        expected = np.clip(np.rint(np.array(SOFA_RGB) * _shade(surface.normal)), 0, 255)
+        assert np.all(rgb == expected), surface.name
+        checked += len(rgb)
+    assert checked > 0

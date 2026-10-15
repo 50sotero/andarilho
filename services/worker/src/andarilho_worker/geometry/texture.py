@@ -7,7 +7,9 @@ weighting each by how square and close the view is, and ignores frames where a n
 surface hides the texel (checked against a depth map of the whole layout). The result
 is one RGB image per atlas page, plus the fraction of each kind of surface that any
 frame saw. Texels no frame sees keep ``unseen_rgb``, filled from their neighbours on
-the same chart where possible.
+the same chart where possible. Furniture is the exception: a furniture texel that no
+frame saw takes its part's colour in a fixed face shade, so an unseen piece never reads
+grey.
 
 ``procedural_texture_layout`` paints the same atlas with deterministic patterns, for
 synthetic layouts that have no frames.
@@ -43,6 +45,10 @@ PLASTER = (236.0, 228.0, 214.0)
 CEILING_RGB = (246.0, 245.0, 242.0)
 CHECKER_A = (196.0, 186.0, 170.0)
 CHECKER_B = (150.0, 142.0, 130.0)
+# Furniture faces are shaded by a fixed light from above and to the front, so an unseen
+# face still reads as its part colour: 0.6 when it faces away from the light, 1.0 when it
+# faces straight into it.
+FURNITURE_LIGHT = np.array([0.35, 0.85, 0.4]) / np.linalg.norm([0.35, 0.85, 0.4])
 
 
 @dataclass
@@ -365,6 +371,14 @@ def _paint_pages(
     return pages
 
 
+def _furniture_rgb(surface: Surface) -> np.ndarray:
+    """A furniture face's part colour in its fixed shade, as 0..255 floats."""
+    facing = max(0.0, float(surface.normal @ FURNITURE_LIGHT))
+    shade = 0.6 + 0.4 * facing
+    colour = np.asarray(surface.extras["color"], dtype=np.float64) * shade
+    return np.clip(np.rint(colour), 0.0, 255.0)
+
+
 def _coverage(surfaces, surface_of_inside: np.ndarray, seen: np.ndarray) -> dict[str, float]:
     count = len(surfaces)
     inside_per = np.bincount(surface_of_inside, minlength=count).astype(np.float64)
@@ -376,8 +390,12 @@ def _coverage(surfaces, surface_of_inside: np.ndarray, seen: np.ndarray) -> dict
             continue
         total = inside_per[mask].sum()
         coverage[kind] = float(seen_per[mask].sum() / total) if total > 0 else 0.0
-    total = inside_per.sum()
-    coverage["all"] = float(seen_per.sum() / total) if total > 0 else 0.0
+    # "all" is the architecture only, so the warning about unseen walls, floor and ceiling is
+    # not diluted by furniture, which has its own entry.
+    architecture = np.array([s.kind != "furniture" for s in surfaces], dtype=bool)
+    total = inside_per[architecture].sum()
+    seen_total = seen_per[architecture].sum()
+    coverage["all"] = float(seen_total / total) if total > 0 else 0.0
     return coverage
 
 
@@ -463,6 +481,14 @@ def texture_layout(
     seen = np.zeros(len(table.inside), dtype=bool)
     seen[cand] = seen_c
     colour[cand[seen_c]] = np.clip(final_rgb[seen_c] / final_w[seen_c, None], 0.0, 255.0)
+    # Furniture no frame saw starts from its part colour in shade. _paint_pages overwrites
+    # these texels with their neighbours' colours wherever a seen texel is close enough.
+    furniture = np.array([s.kind == "furniture" for s in surfaces], dtype=bool)
+    surface_rgb = np.zeros((len(surfaces), 3))
+    for k in np.flatnonzero(furniture):
+        surface_rgb[k] = _furniture_rgb(surfaces[k])
+    unseen_furniture = table.inside & ~seen & furniture[table.surface]
+    colour[unseen_furniture] = surface_rgb[table.surface[unseen_furniture]]
 
     coverage = _coverage(surfaces, table.surface[cand], seen_c)
     pages = _paint_pages(atlas, table, colour, seen, params)
@@ -509,9 +535,12 @@ def procedural_texture_layout(
         page[:] = np.asarray(params.unseen_rgb, dtype=np.uint8)
     for surface, placement in zip(surfaces, atlas.placements, strict=True):
         u, v = chart_grid(placement, atlas)
-        rng = np.random.default_rng(zlib.crc32(surface.name.encode("utf-8")))
-        rgb = _procedural_rgb(surface.kind, u, v, rng)
         h, w = u.shape
+        if surface.kind == "furniture":
+            rgb = np.broadcast_to(_furniture_rgb(surface), (h, w, 3))
+        else:
+            rng = np.random.default_rng(zlib.crc32(surface.name.encode("utf-8")))
+            rgb = _procedural_rgb(surface.kind, u, v, rng)
         y0, x0 = placement.y, placement.x
         pages[placement.page][y0 : y0 + h, x0 : x0 + w] = np.clip(np.rint(rgb), 0, 255).astype(
             np.uint8
