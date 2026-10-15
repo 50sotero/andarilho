@@ -16,10 +16,33 @@ export const RESUME_RECORD_VERSION = 2;
 /** Bytes hashed at the start and the middle of every part, and at the end of the file. */
 export const SAMPLE_BYTES = 16 * 1024;
 
+/**
+ * What a resume record and a creation key belong to: the file, and how it is uploaded.
+ * The same file chosen as a photo and as a floor plan is two uploads, and neither may
+ * take over the other's.
+ */
 export interface FileIdentity {
   name: string;
   size: number;
   lastModified: number;
+  mediaKind: string;
+  /** The declared content type sent when creating the upload. */
+  contentType: string;
+}
+
+/** A file's identity for an upload of `mediaKind` (a DOM `File` cannot be spread). */
+export function uploadIdentity(
+  file: { name: string; size: number; lastModified: number },
+  mediaKind: string,
+  contentType: string,
+): FileIdentity {
+  return {
+    name: file.name,
+    size: file.size,
+    lastModified: file.lastModified,
+    mediaKind,
+    contentType,
+  };
 }
 
 export interface CompletedPartRecord {
@@ -50,7 +73,8 @@ export interface KeyValueStorage {
 }
 
 export function fileFingerprint(file: FileIdentity): string {
-  return `v1:${file.size}:${file.lastModified}:${encodeURIComponent(file.name)}`;
+  const kind = `${encodeURIComponent(file.mediaKind)}:${encodeURIComponent(file.contentType)}`;
+  return `v2:${kind}:${file.size}:${file.lastModified}:${encodeURIComponent(file.name)}`;
 }
 
 /** The part of a file `contentSample` reads. */

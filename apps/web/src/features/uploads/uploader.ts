@@ -29,8 +29,10 @@ import {
   saveResumeRecord,
   withCompletedPart,
   type CompletedPartRecord,
+  type FileIdentity,
   type KeyValueStorage,
   type UploadResumeRecord,
+  uploadIdentity,
 } from "@/lib/upload-resume";
 
 export const DEFAULT_CONCURRENCY = 3;
@@ -159,6 +161,8 @@ export class MultipartUpload {
   readonly file: UploadableFile;
   readonly mediaKind: MediaKind;
   readonly contentType: string;
+  /** The file sent as this media kind and content type: what finds its saved state. */
+  readonly identity: FileIdentity;
   readonly fingerprint: string;
 
   private readonly api: UploaderApi;
@@ -195,7 +199,8 @@ export class MultipartUpload {
     this.file = file;
     this.mediaKind = mediaKind;
     this.contentType = contentType;
-    this.fingerprint = fileFingerprint(file);
+    this.identity = uploadIdentity(file, mediaKind, contentType);
+    this.fingerprint = fileFingerprint(this.identity);
     this.api = options.api;
     this.putPart = options.putPart ?? fetchPutPart;
     this.storage = options.storage === undefined ? getDefaultStorage() : options.storage;
@@ -302,7 +307,7 @@ export class MultipartUpload {
       this.discardRecord();
     }
 
-    let saved = loadResumeRecord(this.projectId, this.file, {
+    let saved = loadResumeRecord(this.projectId, this.identity, {
       storage: this.storage,
       now: this.now(),
     });

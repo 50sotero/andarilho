@@ -22,7 +22,13 @@ import { MemoryStorage, ThrowingStorage } from "./memory-storage";
 
 const MiB = 1024 * 1024;
 const NOW = Date.parse("2026-10-14T12:00:00Z");
-const file = { name: "walk through.mp4", size: 40 * MiB, lastModified: 1_700_000_000_000 };
+const file = {
+  name: "walk through.mp4",
+  size: 40 * MiB,
+  lastModified: 1_700_000_000_000,
+  mediaKind: "video",
+  contentType: "video/mp4",
+};
 
 function record(overrides: Partial<UploadResumeRecord> = {}): UploadResumeRecord {
   return {
@@ -49,9 +55,20 @@ describe("fileFingerprint", () => {
     expect(fileFingerprint({ ...file, lastModified: file.lastModified + 1 })).not.toBe(base);
     expect(fileFingerprint({ ...file, name: "other.mp4" })).not.toBe(base);
   });
+  it("tells apart the same file uploaded as another media kind or content type", () => {
+    // A JPEG chosen as a photo and as a floor plan is two uploads.
+    const photo = { ...file, mediaKind: "photo", contentType: "image/jpeg" };
+    expect(fileFingerprint({ ...photo, mediaKind: "floor_plan" })).not.toBe(fileFingerprint(photo));
+    expect(fileFingerprint({ ...photo, contentType: "image/png" })).not.toBe(
+      fileFingerprint(photo),
+    );
+  });
   it("does not let ':' in names collide with other fields", () => {
-    expect(fileFingerprint({ name: "a:1", size: 2, lastModified: 3 })).not.toBe(
-      fileFingerprint({ name: "a", size: 2, lastModified: 3 }),
+    expect(fileFingerprint({ ...file, name: "a:1", size: 2, lastModified: 3 })).not.toBe(
+      fileFingerprint({ ...file, name: "a", size: 2, lastModified: 3 }),
+    );
+    expect(fileFingerprint({ ...file, mediaKind: "a:b", contentType: "c" })).not.toBe(
+      fileFingerprint({ ...file, mediaKind: "a", contentType: "b:c" }),
     );
   });
 });

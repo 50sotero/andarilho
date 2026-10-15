@@ -17,7 +17,12 @@ import { UploadList, type UploadRowView } from "@/features/uploads/UploadList";
 import { api, newIdempotencyKey } from "@/lib/api/client";
 import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
 import type { IntakePolicy, MediaKind, RunQuality, Upload } from "@/lib/api/types";
-import { loadResumeRecord, pruneResumeRecords, removeResumeRecord } from "@/lib/upload-resume";
+import {
+  loadResumeRecord,
+  pruneResumeRecords,
+  removeResumeRecord,
+  uploadIdentity,
+} from "@/lib/upload-resume";
 import { usePolling } from "@/lib/use-polling";
 import { CaptureGuidance } from "./CaptureGuidance";
 import { SceneAnalysisNotice, sceneAnalysisNoticeShown } from "./SceneAnalysisNotice";
@@ -242,8 +247,16 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
   const blockingErrors = [...typeErrors, ...aggregateErrors];
 
   const resumableCount = useMemo(() => {
-    const files = [video, ...photos, plan].filter((f): f is File => Boolean(f));
-    return files.filter((f) => loadResumeRecord(projectId, f) !== null).length;
+    const chosen: [File | null, MediaKind][] = [
+      [video, "video"],
+      ...photos.map((f): [File, MediaKind] => [f, "photo"]),
+      [plan, "floor_plan"],
+    ];
+    return chosen.filter(([file, kind]) => {
+      if (!file) return false;
+      const identity = uploadIdentity(file, kind, declaredContentType(file, kind));
+      return loadResumeRecord(projectId, identity) !== null;
+    }).length;
   }, [projectId, video, photos, plan]);
 
   async function onVideoChange(file: File | null) {

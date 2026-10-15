@@ -17,6 +17,7 @@ import {
   loadResumeRecord,
   resumeKey,
   saveResumeRecord,
+  uploadIdentity,
 } from "@/lib/upload-resume";
 import { MemoryStorage } from "./memory-storage";
 
@@ -85,6 +86,8 @@ function fakeApi(fileSize: number, overrides: Partial<UploaderApi> = {}) {
 }
 
 const partOf = (url: string) => Number(url.split("/").pop());
+/** The identity of a file sent as these tests' uploaders send it, as a video. */
+const video = (file: UploadableFile) => uploadIdentity(file, "video", "video/mp4");
 const noSleep = vi.fn(async () => undefined);
 
 describe("MultipartUpload", () => {
@@ -269,7 +272,7 @@ describe("MultipartUpload", () => {
     await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
     expect(upload.state.phase).toBe("paused");
 
-    const saved = loadResumeRecord("p1", fakeFile(size), { storage });
+    const saved = loadResumeRecord("p1", video(fakeFile(size)), { storage });
     expect(saved?.uploadId).toBe("u-new");
     expect(saved?.completedParts.map((p) => p.partNumber)).toEqual([1, 2]);
 
@@ -304,6 +307,49 @@ describe("MultipartUpload", () => {
     expect(storage.length).toBe(0);
   });
 
+  it("never resumes the same file's upload made as another media kind", async () => {
+    // One JPEG chosen as a photo and as the floor plan: a photo upload cannot serve as
+    // the capture set's floor plan.
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const created: string[] = [];
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (_p: string, body: { mediaKind: string }) => {
+        created.push(body.mediaKind);
+        const upload = uploadRecord(`u-${body.mediaKind}`);
+        return { data: { upload, partSize: PART, partCount: 2 }, etag: null };
+      }),
+      getUpload: vi.fn(async (id: string) => ({
+        data: { upload: uploadRecord(id, "initiated"), completedParts: [] },
+        etag: null,
+      })),
+    });
+    const file = fakeFile(size, "plan.jpg");
+    const photo = new MultipartUpload("p1", file, "photo", "image/jpeg", {
+      api,
+      putPart: async () => {
+        photo.pause();
+        throw new DOMException("Aborted", "AbortError");
+      },
+      storage,
+      concurrency: 1,
+    });
+    await expect(photo.start()).rejects.toBeInstanceOf(UploadAbortedError);
+
+    const plan = new MultipartUpload("p1", file, "floor_plan", "image/jpeg", {
+      api,
+      putPart: async (url) => `"e${partOf(url)}"`,
+      storage,
+    });
+    const uploaded = await plan.start();
+    expect(created).toEqual(["photo", "floor_plan"]);
+    expect(uploaded.id).toBe("u-floor_plan");
+    // The paused photo upload keeps its own record, and resumes as the photo it is.
+    expect(
+      loadResumeRecord("p1", uploadIdentity(file, "photo", "image/jpeg"), { storage })?.uploadId,
+    ).toBe("u-photo");
+  });
+
   it("starts a new upload when the saved one no longer exists on the server", async () => {
     const size = 2 * PART;
     const storage = new MemoryStorage();
@@ -313,7 +359,7 @@ describe("MultipartUpload", () => {
         version: RESUME_RECORD_VERSION,
         uploadId: "u-gone",
         projectId: "p1",
-        fingerprint: fileFingerprint(file),
+        fingerprint: fileFingerprint(video(file)),
         sample: (await contentSample(file, PART))!,
         partSize: PART,
         partCount: 2,
@@ -331,7 +377,7 @@ describe("MultipartUpload", () => {
     await upload.start();
     expect(api.getUpload).toHaveBeenCalledTimes(1);
     expect(api.createUpload).toHaveBeenCalledTimes(1);
-    expect(storage.getItem(resumeKey("p1", fileFingerprint(file)))).toBeNull();
+    expect(storage.getItem(resumeKey("p1", fileFingerprint(video(file))))).toBeNull();
   });
 
   it("treats an upload the server already completed as done after a reload", async () => {
@@ -343,7 +389,7 @@ describe("MultipartUpload", () => {
         version: RESUME_RECORD_VERSION,
         uploadId: "u-done",
         projectId: "p1",
-        fingerprint: fileFingerprint(file),
+        fingerprint: fileFingerprint(video(file)),
         sample: (await contentSample(file, PART))!,
         partSize: PART,
         partCount: 2,
@@ -370,7 +416,7 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).not.toHaveBeenCalled();
     expect(api.completeUpload).not.toHaveBeenCalled();
     expect(putPart).not.toHaveBeenCalled();
-    expect(storage.getItem(resumeKey("p1", fileFingerprint(file)))).toBeNull();
+    expect(storage.getItem(resumeKey("p1", fileFingerprint(video(file))))).toBeNull();
   });
 
   it("starts a new upload for another file with the same name, size and date", async () => {
@@ -382,7 +428,7 @@ describe("MultipartUpload", () => {
         version: RESUME_RECORD_VERSION,
         uploadId: "u-old",
         projectId: "p1",
-        fingerprint: fileFingerprint(first),
+        fingerprint: fileFingerprint(video(first)),
         sample: (await contentSample(first, PART))!,
         partSize: PART,
         partCount: 3,
@@ -393,7 +439,7 @@ describe("MultipartUpload", () => {
     );
     // The same identity, different bytes: its upload must be neither reused nor mixed.
     const other = fakeFile(size, "walk.mp4", 2);
-    expect(loadResumeRecord("p1", other, { storage })?.uploadId).toBe("u-old");
+    expect(loadResumeRecord("p1", video(other), { storage })?.uploadId).toBe("u-old");
     const { api } = fakeApi(size);
     const uploaded: number[] = [];
     const upload = new MultipartUpload("p1", other, "video", "video/mp4", {
@@ -421,7 +467,7 @@ describe("MultipartUpload", () => {
         version: RESUME_RECORD_VERSION,
         uploadId: "u-done",
         projectId: "p1",
-        fingerprint: fileFingerprint(first),
+        fingerprint: fileFingerprint(video(first)),
         sample: (await contentSample(first, PART))!,
         partSize: PART,
         partCount: 2,
