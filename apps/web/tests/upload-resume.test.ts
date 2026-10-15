@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  CLOCK_SKEW_ALLOWANCE_MS,
   CREATION_KEY_TTL_MS,
   EXPIRY_SAFETY_MARGIN_MS,
   RESUME_RECORD_VERSION,
@@ -194,9 +195,16 @@ describe("persistence", () => {
 
   it("ignores and removes expired records, but keeps one within the safety margin", () => {
     const storage = new MemoryStorage();
-    saveResumeRecord(record({ expiresAt: new Date(NOW - 1000).toISOString() }), storage);
+    const lapsed = NOW - CLOCK_SKEW_ALLOWANCE_MS - 1000;
+    saveResumeRecord(record({ expiresAt: new Date(lapsed).toISOString() }), storage);
     expect(loadResumeRecord("project-1", file, { storage, now: NOW })).toBeNull();
     expect(storage.length).toBe(0);
+
+    // Just past its expiry by this device's clock, which may be fast: the server decides.
+    const justPast = record({ expiresAt: new Date(NOW - 1000).toISOString() });
+    saveResumeRecord(justPast, storage);
+    expect(loadResumeRecord("project-1", file, { storage, now: NOW })).not.toBeNull();
+    removeResumeRecord("project-1", justPast.fingerprint, storage);
 
     // The server may still accept it, and it holds quota: the uploader asks the server.
     const nearExpiry = record({
@@ -246,7 +254,15 @@ describe("persistence", () => {
     const storage = new MemoryStorage();
     saveResumeRecord(record(), storage);
     saveResumeRecord(
-      record({ fingerprint: "old", expiresAt: new Date(NOW - 1).toISOString() }),
+      record({
+        fingerprint: "old",
+        expiresAt: new Date(NOW - CLOCK_SKEW_ALLOWANCE_MS - 1).toISOString(),
+      }),
+      storage,
+    );
+    // Past its expiry by less than a fast clock could account for: the server decides.
+    saveResumeRecord(
+      record({ fingerprint: "recent", expiresAt: new Date(NOW - 1).toISOString() }),
       storage,
     );
     storage.setItem("andarilho:upload:broken", "nope");

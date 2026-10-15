@@ -230,6 +230,7 @@ def test_full_upload_flow_with_immutable_copy(client, auth, db, s3):
     status = client.get(f"/v1/uploads/{upload_id}", headers=auth()).json()
     assert [p["partNumber"] for p in status["completedParts"]] == [1]
     assert status["completedParts"][0]["size"] == 1000
+    assert status["acceptingParts"] is True
 
     done = client.post(f"/v1/uploads/{upload_id}/complete", json={}, headers=auth())
     assert done.status_code == 202, done.text
@@ -469,6 +470,10 @@ def test_expired_upload_rejects_parts_and_holds_quota_until_its_parts_are_gone(
     row = db.get(Upload, uuid.UUID(upload_id))
     row.expires_at = datetime.now(UTC) - timedelta(seconds=1)
     db.commit()
+    # Still "initiated" until the worker marks it, but the server's clock says it is over.
+    status = client.get(f"/v1/uploads/{upload_id}", headers=auth()).json()
+    assert status["upload"]["status"] == "initiated"
+    assert status["acceptingParts"] is False
     response = client.post(
         f"/v1/uploads/{upload_id}/parts", json={"partNumbers": [1]}, headers=auth()
     )

@@ -141,6 +141,8 @@ export interface CompletedPart {
 export interface UploadStatusResponse {
   upload: Upload;
   completedParts: { partNumber: number; etag: string; size: number }[];
+  // Whether the upload still takes parts, by the server's clock.
+  acceptingParts: boolean;
 }
 
 export interface PartUrlsResponse {

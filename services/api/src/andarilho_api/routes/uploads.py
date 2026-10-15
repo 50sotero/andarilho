@@ -164,7 +164,21 @@ def get_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store):
             logger.exception("list_parts failed")
             raise _storage_unavailable() from None
         completed = [{"partNumber": p.part_number, "etag": p.etag, "size": p.size} for p in parts]
-    return {"upload": ser.upload(upload), "completedParts": completed}
+    # By the server's clock, so a client whose clock is off resumes an upload that still
+    # holds the project's quota rather than creating a replacement the quota refuses.
+    return {
+        "upload": ser.upload(upload),
+        "completedParts": completed,
+        "acceptingParts": _accepts_parts(upload),
+    }
+
+
+def _accepts_parts(upload: Upload) -> bool:
+    return (
+        upload.status == "initiated"
+        and upload.multipart_upload_id is not None
+        and upload.expires_at > utcnow()
+    )
 
 
 def _require_open(upload: Upload) -> None:

@@ -374,8 +374,9 @@ export class MultipartUpload {
         if (COMPLETED_STATUSES.has(data.upload.status)) {
           return { completedUpload: data.upload };
         }
-        const open = Date.parse(data.upload.expiresAt) > this.now();
-        if (data.upload.status === "initiated" && open) {
+        // The server decides by its own clock: this device's may be off, and a replacement
+        // could be refused while this upload still holds the project's quota.
+        if (data.acceptingParts) {
           // The server's part listing is authoritative; local ETags fill gaps only.
           const serverParts: CompletedPartRecord[] = data.completedParts.map((p) => ({
             partNumber: p.partNumber,

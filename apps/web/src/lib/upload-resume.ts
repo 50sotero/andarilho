@@ -186,12 +186,16 @@ export function isExpired(record: UploadResumeRecord, now: number = Date.now()):
   return Date.parse(record.expiresAt) - EXPIRY_SAFETY_MARGIN_MS <= now;
 }
 
+/** How far a device clock is allowed to be off before its records are pruned unasked. */
+export const CLOCK_SKEW_ALLOWANCE_MS = 24 * 3600 * 1000;
+
 /**
- * True once the record's expiry has passed. Until then the server may still accept the
- * upload, and the upload holds the project's quota, so a replacement could be refused.
+ * True once the record's expiry has passed even for a device clock that is a day fast.
+ * Until then the server decides: it may still accept the upload, and the upload holds the
+ * project's quota, so a replacement could be refused.
  */
 export function hasLapsed(record: UploadResumeRecord, now: number = Date.now()): boolean {
-  return Date.parse(record.expiresAt) <= now;
+  return Date.parse(record.expiresAt) + CLOCK_SKEW_ALLOWANCE_MS <= now;
 }
 
 export function saveResumeRecord(

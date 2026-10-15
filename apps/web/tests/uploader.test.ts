@@ -287,6 +287,7 @@ describe("MultipartUpload", () => {
             { partNumber: 1, etag: '"e1"', size: PART },
             { partNumber: 2, etag: '"e2"', size: PART },
           ],
+          acceptingParts: true,
         },
         etag: null,
       })),
@@ -322,7 +323,7 @@ describe("MultipartUpload", () => {
         return { data: { upload, partSize: PART, partCount: 2 }, etag: null };
       }),
       getUpload: vi.fn(async (id: string) => ({
-        data: { upload: uploadRecord(id, "initiated"), completedParts: [] },
+        data: { upload: uploadRecord(id, "initiated"), completedParts: [], acceptingParts: true },
         etag: null,
       })),
     });
@@ -402,7 +403,11 @@ describe("MultipartUpload", () => {
     );
     const { api } = fakeApi(size, {
       getUpload: vi.fn(async () => ({
-        data: { upload: uploadRecord("u-done", "uploaded_unverified"), completedParts: [] },
+        data: {
+          upload: uploadRecord("u-done", "uploaded_unverified"),
+          completedParts: [],
+          acceptingParts: false,
+        },
         etag: null,
       })),
     });
@@ -480,7 +485,11 @@ describe("MultipartUpload", () => {
     );
     const { api } = fakeApi(size, {
       getUpload: vi.fn(async () => ({
-        data: { upload: uploadRecord("u-done", "uploaded_unverified"), completedParts: [] },
+        data: {
+          upload: uploadRecord("u-done", "uploaded_unverified"),
+          completedParts: [],
+          acceptingParts: false,
+        },
         etag: null,
       })),
     });
@@ -579,6 +588,7 @@ describe("MultipartUpload", () => {
         data: {
           upload: uploadRecord(uploadId),
           completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
+          acceptingParts: true,
         },
         etag: null,
       })),
@@ -609,6 +619,93 @@ describe("MultipartUpload", () => {
     expect(api.getUpload).toHaveBeenCalledTimes(1);
     expect(api.createUpload).toHaveBeenCalledTimes(1);
     expect(upload.state.phase).toBe("completed");
+  });
+
+  it("resumes an upload the server still accepts when this device's clock is fast", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const file = fakeFile(size);
+    const expiresAt = new Date(Date.now() + 3600 * 1000).toISOString();
+    saveResumeRecord(
+      {
+        version: RESUME_RECORD_VERSION,
+        uploadId: "u-open",
+        projectId: "p1",
+        fingerprint: fileFingerprint(video(file)),
+        sample: (await contentSample(file, PART))!,
+        partSize: PART,
+        partCount: 2,
+        completedParts: [{ partNumber: 1, etag: '"e1"' }],
+        expiresAt,
+      },
+      storage,
+    );
+    const { api } = fakeApi(size, {
+      getUpload: vi.fn(async () => ({
+        data: {
+          upload: { ...uploadRecord("u-open"), expiresAt },
+          completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
+          acceptingParts: true,
+        },
+        etag: null,
+      })),
+    });
+    const uploaded: number[] = [];
+    const upload = new MultipartUpload("p1", file, "video", "video/mp4", {
+      api,
+      putPart: async (url) => {
+        uploaded.push(partOf(url));
+        return `"e${partOf(url)}"`;
+      },
+      storage,
+      // By this device's clock the upload expired a minute ago; the server, which decides,
+      // still accepts it, and it holds the project's quota.
+      now: () => Date.parse(expiresAt) + 60 * 1000,
+    });
+    const result = await upload.start();
+    expect(result.id).toBe("u-open");
+    expect(api.createUpload).not.toHaveBeenCalled();
+    expect(uploaded).toEqual([2]);
+    expect(upload.state.resumed).toBe(true);
+  });
+
+  it("replaces a saved upload the server no longer accepts, whatever this clock says", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const file = fakeFile(size);
+    saveResumeRecord(
+      {
+        version: RESUME_RECORD_VERSION,
+        uploadId: "u-over",
+        projectId: "p1",
+        fingerprint: fileFingerprint(video(file)),
+        sample: (await contentSample(file, PART))!,
+        partSize: PART,
+        partCount: 2,
+        completedParts: [{ partNumber: 1, etag: '"e1"' }],
+        expiresAt: FUTURE,
+      },
+      storage,
+    );
+    // Still "initiated" until the worker marks it expired, but over by the server's clock.
+    const { api } = fakeApi(size, {
+      getUpload: vi.fn(async () => ({
+        data: {
+          upload: uploadRecord("u-over"),
+          completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
+          acceptingParts: false,
+        },
+        etag: null,
+      })),
+    });
+    const upload = new MultipartUpload("p1", file, "video", "video/mp4", {
+      api,
+      putPart: async (url) => `"e${partOf(url)}"`,
+      storage,
+    });
+    expect((await upload.start()).id).toBe("u-new");
+    expect(api.getUpload).toHaveBeenCalledTimes(1);
+    expect(api.createUpload).toHaveBeenCalledTimes(1);
   });
 
   it("aborts an upload whose creation answers after its file was removed", async () => {
