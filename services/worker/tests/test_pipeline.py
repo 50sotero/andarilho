@@ -18,6 +18,7 @@ from pdf_fixtures import classic_pdf, encrypted_pdf, object_stream_pdf, page_tre
 from psycopg.types.json import Jsonb
 
 from andarilho_worker import queue
+from andarilho_worker.artifacts import LocalObjectStore
 from andarilho_worker.geometry.glb import inspect_textured_glb
 from andarilho_worker.runner import ProcessFailed, RunResult
 from andarilho_worker.stages import STAGES
@@ -888,6 +889,94 @@ def test_project_cleanup_waits_for_running_jobs(db, seed, store, sup):
     assert drain(db, sup) == [("project_cleanup", "deferred")]
     assert seed.one("SELECT lifecycle FROM projects")["lifecycle"] == "deleting"
     assert seed.one("SELECT state FROM jobs WHERE id = %s", running.id)["state"] == "running"
+
+
+class _RefusingStore(LocalObjectStore):
+    """Deletes fail, as when the object store refuses them through a long outage."""
+
+    def delete_prefix(self, prefix: str) -> int:
+        raise OSError("delete refused")
+
+
+def _deleting_project(seed, store) -> str:
+    pid = seed.project()
+    store.put_bytes(f"tenants/{pid}/originals/video.mp4", b"x")
+    seed.exec("UPDATE projects SET lifecycle = 'deleting' WHERE id = %s", pid)
+    return pid
+
+
+def _cleanup_jobs(seed, pid) -> list[dict]:
+    return seed.all(
+        "SELECT state, input_manifest, available_at - now() AS wait FROM jobs "
+        "WHERE project_id = %s AND stage = 'project_cleanup' ORDER BY created_at",
+        pid,
+    )
+
+
+def _run_cleanup(db, worker) -> list[str]:
+    """Run the project's cleanup now and through every retry, without waiting out a requeue."""
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET available_at = now() WHERE stage = 'project_cleanup' "
+            "AND state IN ('queued', 'retry_wait')"
+        )
+    outcomes = []
+    while True:
+        queue.promote_retry_wait(db)
+        job = queue.claim(db, "worker-test", "cpu")
+        if job is None:
+            return outcomes
+        outcomes.append(worker.execute(job))
+
+
+def test_a_project_cleanup_that_runs_out_of_retries_is_queued_again(db, seed, store, settings):
+    # A storage outage through every attempt must not leave the project deleting forever.
+    pid = _deleting_project(seed, store)
+    manifest = {"projectId": pid, "prefix": f"tenants/{pid}/", "requestedAt": "2026-10-15T10:00:00"}
+    seed.job(pid, "project_cleanup", manifest, priority=10)
+    outage = Supervisor(db, _RefusingStore(store.root), settings, delay_fn=lambda attempt: 0.0)
+
+    assert _run_cleanup(db, outage) == ["retry_wait", "retry_wait", "failed"]
+    failed, again = _cleanup_jobs(seed, pid)
+    assert failed["state"] == "failed" and again["state"] == "queued"
+    assert again["input_manifest"] == {**manifest, "requeues": 1}  # the request time is kept
+    expected = queue.ARTIFACT_CLEANUP_REQUEUE_SECONDS
+    assert expected - 60 < again["wait"].total_seconds() <= expected
+
+    # Once storage is back, the requeued cleanup deletes the project.
+    sup = Supervisor(db, store, settings, delay_fn=lambda attempt: 0.0)
+    assert _run_cleanup(db, sup) == ["deferred"]  # first pass, then the reconcile horizon
+    assert store.list_keys(f"tenants/{pid}/") == []
+    assert _run_cleanup(db, sup) == ["succeeded"]
+    assert seed.one("SELECT lifecycle FROM projects WHERE id = %s", pid)["lifecycle"] == "deleted"
+
+
+def test_a_requeued_project_cleanup_waits_longer_and_never_gives_up(db, seed, store, settings):
+    pid = _deleting_project(seed, store)
+    seed.job(pid, "project_cleanup", {"projectId": pid, "requeues": 40}, priority=10)
+    outage = Supervisor(db, _RefusingStore(store.root), settings, delay_fn=lambda attempt: 0.0)
+    assert _run_cleanup(db, outage)[-1] == "failed"
+    again = _cleanup_jobs(seed, pid)[-1]
+    assert again["state"] == "queued" and again["input_manifest"]["requeues"] == 41
+    cap = queue.ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS
+    assert cap - 60 < again["wait"].total_seconds() <= cap
+
+
+def test_a_project_cleanup_whose_worker_is_lost_on_its_last_attempt_is_queued_again(
+    db, seed, store
+):
+    pid = _deleting_project(seed, store)
+    seed.job(pid, "project_cleanup", {"projectId": pid}, priority=10)
+    seed.exec("UPDATE jobs SET max_attempts = 1 WHERE stage = 'project_cleanup'")
+    job = queue.claim(db, "lost-worker", "cpu")
+    assert job is not None and job.stage == "project_cleanup"
+    seed.exec(
+        "UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = %s", job.id
+    )
+
+    assert [o.state for o in queue.reap_expired(db)] == ["failed"]
+    assert [j["state"] for j in _cleanup_jobs(seed, pid)] == ["failed", "queued"]
+    assert _cleanup_jobs(seed, pid)[-1]["input_manifest"] == {"projectId": pid, "requeues": 1}
 
 
 def test_worker_loop_processes_synthetic_run(db, seed, store, settings):

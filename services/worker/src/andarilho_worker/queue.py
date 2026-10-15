@@ -35,6 +35,10 @@ ARTIFACT_CLEANUP_DELAY_SECONDS = 300
 ARTIFACT_CLEANUP_REQUEUE_SECONDS = 3600
 ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS = 24 * 3600
 ARTIFACT_CLEANUP_MAX_REQUEUES = 8
+# A project deletion that used up its attempts is queued again on the same schedule, and
+# it never gives up: the owner asked for the data to go, and nothing else would retry it
+# (the web hides the delete control once a project is being deleted).
+PROJECT_CLEANUP_PRIORITY = 10
 
 # README section 6, verbatim CTE plus the run/project liveness predicates.
 CLAIM_SQL = """
@@ -627,6 +631,51 @@ def fail_upload(conn: psycopg.Connection, project_id: str, upload_id: str | None
     )  # fmt: skip
 
 
+def requeue_project_cleanup(
+    conn: psycopg.Connection, project_id: str, manifest: Mapping[str, Any]
+) -> None:
+    """Queue a project's deletion again, later, after it used up its attempts.
+
+    Only the paths that exhaust retries call this (retry_job and the reaper). The wait
+    doubles from ``ARTIFACT_CLEANUP_REQUEUE_SECONDS`` up to a day and the deletion never
+    gives up. The new job keeps the request's manifest (its request time and first pass),
+    so the reconcile horizon does not start again. Nothing is queued once the project is
+    no longer being deleted, or while another cleanup of it is still pending.
+    """
+    project = conn.execute("SELECT lifecycle FROM projects WHERE id = %s", (project_id,)).fetchone()
+    if project is None or project["lifecycle"] != "deleting":
+        return
+    pending = conn.execute(
+        "SELECT 1 FROM jobs WHERE project_id = %s AND stage = 'project_cleanup' "
+        "AND state IN ('queued', 'retry_wait', 'running') LIMIT 1",
+        (project_id,),
+    ).fetchone()
+    if pending is not None:
+        return
+    requeues = int(manifest.get("requeues") or 0)
+    delay = min(
+        ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS,
+        ARTIFACT_CLEANUP_REQUEUE_SECONDS * 2 ** min(requeues, 16),
+    )
+    log.warning("project %s cleanup ran out of attempts; queued again in %ss", project_id, delay)
+    conn.execute(
+        """
+        INSERT INTO jobs (id, project_id, run_id, upload_id, scene_revision_id, capability, stage,
+                          state, priority, attempts, max_attempts, fencing_token, available_at,
+                          input_manifest)
+        VALUES (%s, %s, NULL, NULL, NULL, 'cpu', 'project_cleanup', 'queued', %s, 0, 3, 0,
+                now() + make_interval(secs => %s), %s)
+        """,
+        (
+            str(uuid.uuid4()),
+            project_id,
+            PROJECT_CLEANUP_PRIORITY,
+            float(delay),
+            Jsonb({**manifest, "requeues": requeues + 1}),
+        ),
+    )
+
+
 def fail_subject(conn: psycopg.Connection, job: ClaimedJob) -> None:
     """Finalize what a non-run job was working on once it failed for good."""
     if job.stage == "upload_inspection":
@@ -811,6 +860,8 @@ def retry_job(
                 fail_subject(conn, job)
             if job.stage == "artifact_cleanup":
                 requeue_artifact_cleanup(conn, job.project_id, job.input_manifest)
+            elif job.stage == "project_cleanup":
+                requeue_project_cleanup(conn, job.project_id, locked.row["input_manifest"])
             return "failed"
         conn.execute(
             """
@@ -936,6 +987,8 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                 fail_revision(conn, str(row["scene_revision_id"]))
             elif row["state"] == "failed" and row["stage"] == "artifact_cleanup":
                 requeue_artifact_cleanup(conn, project_id, row["input_manifest"] or {})
+            elif row["state"] == "failed" and row["stage"] == "project_cleanup":
+                requeue_project_cleanup(conn, project_id, row["input_manifest"] or {})
             elif run_id and row["state"] == "cancelled":
                 finalize_run_if_cancelled(conn, run_id)
             outcomes.append(ReapOutcome(job_id, run_id, row["state"]))
