@@ -342,10 +342,10 @@ class Supervisor:
             cancelled = queue.cancel_job(self.db, job, usage_seconds=used(), leftovers=leftovers)
             return "cancelled" if cancelled else "lost"
         except Deferred as deferred:
-            queue.defer_job(
+            deferred_ok = queue.defer_job(
                 self.db, job, delay_seconds=deferred.delay_seconds, patch=deferred.manifest_patch
             )
-            return "deferred"
+            return "deferred" if deferred_ok else "lost"
         except TransientError as exc:
             return self._retry(job, exc.body(), used(), leftovers)
         except StageError as exc:

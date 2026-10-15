@@ -110,6 +110,55 @@ def test_heartbeat_extends_and_stale_fence_rejected(db, seed):
     assert not queue.heartbeat(db, job)
 
 
+def test_an_expired_lease_refuses_every_write_before_the_reaper_runs(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid)
+    job = queue.claim(db, "w1", "cpu")
+    expire(seed, job.id)  # the fence still matches: no reaper has run
+    ran = []
+    with pytest.raises(LeaseLost):
+        queue.fenced_execute(db, job, ran.append)
+    assert ran == []
+    assert not queue.record_event(db, job, "late progress")
+    with pytest.raises(LeaseLost):
+        queue.complete_job(db, job, result_manifest={}, next_job=None)
+    with pytest.raises(LeaseLost):
+        queue.fail_job(db, job, error_body("INVALID_MEDIA"))
+    with pytest.raises(LeaseLost):
+        queue.retry_job(db, job, error_body("TRANSIENT_FAILURE"), delay_seconds=0)
+    assert not queue.defer_job(db, job, delay_seconds=60)
+    assert not queue.cancel_job(db, job)
+    row = seed.one("SELECT state, fencing_token, error FROM jobs WHERE id = %s", job.id)
+    assert row["state"] == "running" and row["fencing_token"] == 1 and row["error"] is None
+    run = seed.one("SELECT status FROM reconstruction_runs WHERE id = %s", run_id)
+    assert run["status"] == "running"
+    # The job is the reaper's to settle.
+    assert [o.state for o in queue.reap_expired(db)] == ["queued"]
+
+
+def test_the_reaper_waits_for_the_run_before_it_locks_the_job(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, max_attempts=1)
+    job = queue.claim(db, "w", "cpu")
+    expire(seed, job.id)
+    reaped = []
+    reaper = threading.Thread(target=lambda: reaped.extend(queue.reap_expired(db)))
+    with db.transaction() as conn:
+        # The API's cancellation: the project, then the run, then the run's jobs.
+        conn.execute("SELECT 1 FROM projects WHERE id = %s FOR UPDATE", (pid,))
+        conn.execute("SELECT 1 FROM reconstruction_runs WHERE id = %s FOR UPDATE", (run_id,))
+        reaper.start()
+        reaper.join(timeout=1.0)
+        assert reaper.is_alive()  # waiting for the run, holding no lock on the job
+        conn.execute(
+            "UPDATE reconstruction_runs SET cancel_requested_at = now() WHERE id = %s", (run_id,)
+        )
+        conn.execute("UPDATE jobs SET cancel_requested_at = now() WHERE id = %s", (job.id,))
+    reaper.join(timeout=10.0)
+    assert [o.state for o in reaped] == ["cancelled"]
+    assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "cancelled"
+
+
 def test_reaper_fails_when_attempts_exhausted(db, seed):
     pid = seed.project()
     run_id, _ = seed.run(pid, max_attempts=1)

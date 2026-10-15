@@ -403,7 +403,7 @@ WHERE j.id = candidate.id
 RETURNING j.*;
 ```
 
-Heartbeat every 20 seconds, conditional on job ID, lease owner, current fencing token, and an unexpired lease. A reaper increments the fencing token on recovery and marks expired work `cancelled` if the run/project is cancelled/deleting, `failed` if attempts are exhausted, or `queued` otherwise. The stale worker must stop when renewal fails. Fence progress/event writes as well as state updates and final artifact attachment. Each write checks cancellation, project lifecycle, and the current run/revision. A late worker may leave an orphan object, but cannot publish it.
+Heartbeat every 20 seconds, conditional on job ID, lease owner, current fencing token, and an unexpired lease. A reaper increments the fencing token on recovery and marks expired work `cancelled` if the run/project is cancelled/deleting, `failed` if attempts are exhausted, or `queued` otherwise. The stale worker must stop when renewal fails. Fence progress/event writes as well as state updates and final artifact attachment. An expired lease rejects them even before the reaper has moved the fence: the reaper settles that job. Each write checks cancellation, project lifecycle, and the current run/revision. Every transition, the reaper's included, locks the project, then the run, then the job, the order the API's cancellation and deletion use. A late worker may leave an orphan object, but cannot publish it.
 
 Cancellation sets a run-level marker and atomically marks its queued/retry-wait jobs cancelled. Active workers receive the same marker and must stop their process groups. Do not insert a next-stage job after cancellation. Release unused budget reservations exactly once after process/provider-job termination is confirmed or an enforced resource deadline has passed. Database fencing alone does not prove GPU execution stopped; retain/account for unresolved consumption until it is bounded. Settle already-consumed usage separately.
 
@@ -868,7 +868,7 @@ Use `/v1`, JSON bodies, UUID resource IDs, explicit authorization, and generated
 | `GET /v1/uploads/{id}` | Owned upload status and resumable part metadata. |
 | `POST /v1/uploads/{id}/parts` | Sign a bounded batch of allowed part numbers. |
 | `POST /v1/uploads/{id}/complete` | Verify/complete storage upload and enqueue inspection. |
-| `DELETE /v1/uploads/{id}` | Abort an incomplete upload and release its reservation, or remove a verified upload no active or succeeded run uses (its bytes are deleted by an `upload_cleanup` job, which then releases the quota). |
+| `DELETE /v1/uploads/{id}` | Abort an incomplete upload and release its reservation, or remove a verified upload no active or succeeded run uses (its bytes are deleted by an `upload_cleanup` job, which then releases the quota; a cleanup that uses up its attempts is queued again by the worker, after an hour that doubles up to a day, and never gives up). |
 | `POST /v1/projects/{id}/capture-sets` | Snapshot a verified input list and optional plan. |
 | `POST /v1/projects/{id}/runs` | Idempotently reserve budget and enqueue a reconstruction. |
 | `GET /v1/jobs/{id}` | State, stage progress, and a bounded event page after a cursor. |

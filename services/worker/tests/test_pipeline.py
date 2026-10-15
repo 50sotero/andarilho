@@ -439,6 +439,32 @@ def test_fence_bump_stops_stale_worker_without_writes(db, seed, store, settings)
     assert row["state"] == "queued" and row["fencing_token"] == 2
 
 
+@pytest.mark.parametrize("ending", ["fails", "retries", "defers"])
+def test_a_stage_that_outlives_its_lease_leaves_the_job_to_the_reaper(
+    db, seed, store, settings, ending
+):
+    from andarilho_worker.errors import Deferred, StageError, TransientError
+
+    def outlives_its_lease(ctx):
+        # Its heartbeats stopped reaching the database, and the reaper has not run yet.
+        seed.exec(
+            "UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = %s",
+            ctx.job_id,
+        )
+        endings = {"fails": StageError("INVALID_MEDIA"), "retries": TransientError(),
+                   "defers": Deferred(60.0)}  # fmt: skip
+        raise endings[ending]
+
+    sup = Supervisor(db, store, settings, stages={**STAGES, "validating": outlives_its_lease})
+    pid = seed.project()
+    seed.run(pid)
+    assert sup.execute(queue.claim(db, "worker-test", "cpu")) == "lost"
+    row = seed.one("SELECT state, fencing_token, error FROM jobs")
+    assert row["state"] == "running" and row["fencing_token"] == 1 and row["error"] is None
+    assert seed.one("SELECT status FROM reconstruction_runs")["status"] == "running"
+    assert [o.state for o in queue.reap_expired(db)] == ["queued"]
+
+
 def _transient_stage(ctx):
     from andarilho_worker.errors import TransientError
 
@@ -977,6 +1003,69 @@ def test_a_project_cleanup_whose_worker_is_lost_on_its_last_attempt_is_queued_ag
     assert [o.state for o in queue.reap_expired(db)] == ["failed"]
     assert [j["state"] for j in _cleanup_jobs(seed, pid)] == ["failed", "queued"]
     assert _cleanup_jobs(seed, pid)[-1]["input_manifest"] == {"projectId": pid, "requeues": 1}
+
+
+def _removed_upload(db, seed, store, sup) -> tuple[str, str]:
+    """A verified upload the user removed, with its cleanup queued: (project, upload)."""
+    pid = seed.project()
+    uid = make_upload(seed, store, pid, JPEG, "photo")
+    assert drain(db, sup) == [("upload_inspection", "succeeded")]
+    seed.exec("UPDATE uploads SET status = 'aborted' WHERE id = %s", uid)  # as the API does
+    seed.job(pid, "upload_cleanup", {"uploadId": uid, "projectId": pid}, upload_id=uid)
+    return pid, uid
+
+
+def _upload_cleanups(seed, uid) -> list[dict]:
+    return seed.all(
+        "SELECT state, input_manifest, available_at - now() AS wait FROM jobs "
+        "WHERE upload_id = %s AND stage = 'upload_cleanup' ORDER BY created_at",
+        uid,
+    )
+
+
+def test_an_upload_cleanup_that_runs_out_of_retries_is_queued_again(db, seed, store, settings, sup):
+    # A storage outage through every attempt must not keep the upload's bytes, and its
+    # quota, for good: nothing in the capture page can ask for the deletion again.
+    pid, uid = _removed_upload(db, seed, store, sup)
+    outage = Supervisor(db, _RefusingStore(store.root), settings, delay_fn=lambda attempt: 0.0)
+    assert [d[1] for d in drain(db, outage)] == ["retry_wait", "retry_wait", "failed"]
+    failed, again = _upload_cleanups(seed, uid)
+    assert failed["state"] == "failed" and again["state"] == "queued"
+    assert again["input_manifest"] == {"uploadId": uid, "projectId": pid, "requeues": 1}
+    expected = queue.ARTIFACT_CLEANUP_REQUEUE_SECONDS
+    assert expected - 60 < again["wait"].total_seconds() <= expected
+
+    # Once storage is back, the requeued cleanup deletes the bytes and releases the quota.
+    seed.exec("UPDATE jobs SET available_at = now() WHERE upload_id = %s AND state = 'queued'",
+              uid)  # fmt: skip
+    assert drain(db, sup) == [("upload_cleanup", "succeeded")]
+    assert store.list_keys(f"tenants/{pid}/originals/") == []
+    assert seed.one("SELECT immutable_key FROM uploads WHERE id = %s", uid)["immutable_key"] is None
+
+
+def test_an_upload_cleanup_whose_worker_is_lost_on_its_last_attempt_is_queued_again(
+    db, seed, store, sup
+):
+    pid, uid = _removed_upload(db, seed, store, sup)
+    seed.exec("UPDATE jobs SET max_attempts = 1 WHERE stage = 'upload_cleanup'")
+    job = queue.claim(db, "lost-worker", "cpu")
+    assert job is not None and job.stage == "upload_cleanup"
+    seed.exec(
+        "UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = %s", job.id
+    )
+    assert [o.state for o in queue.reap_expired(db)] == ["failed"]
+    assert [j["state"] for j in _upload_cleanups(seed, uid)] == ["failed", "queued"]
+
+
+def test_an_upload_cleanup_is_not_queued_again_once_the_project_is_being_deleted(
+    db, seed, store, sup
+):
+    pid, uid = _removed_upload(db, seed, store, sup)
+    seed.exec("DELETE FROM jobs WHERE upload_id = %s AND stage = 'upload_cleanup'", uid)
+    seed.exec("UPDATE projects SET lifecycle = 'deleting' WHERE id = %s", pid)
+    with db.transaction() as conn:
+        queue.requeue_upload_cleanup(conn, pid, uid, {"uploadId": uid, "projectId": pid})
+    assert _upload_cleanups(seed, uid) == []  # the project's deletion removes its bytes
 
 
 def test_worker_loop_processes_synthetic_run(db, seed, store, settings):

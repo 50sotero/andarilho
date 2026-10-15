@@ -2,9 +2,11 @@
 
 Every write made on behalf of a running attempt is *fenced*: it only applies
 while ``(id, lease_owner, fencing_token, state='running')`` still matches and,
-for progress and success, while the job, its run and its project are not
-cancelled/deleting. Terminal transitions lock rows in a fixed order
-(project -> run -> job) so they serialize with API cancellation and deletion.
+for transitions and fenced writes, while the lease has not expired; for progress
+and success, also while the job, its run and its project are not
+cancelled/deleting. Terminal transitions, including the reaper's, lock rows in a
+fixed order (project -> run -> job) so they serialize with API cancellation and
+deletion.
 """
 
 from __future__ import annotations
@@ -239,13 +241,13 @@ def record_event(
     message: str,
     progress: Mapping[str, Any] | None = None,
 ) -> bool:
-    """Insert a progress event only if the fence still holds and nothing is cancelled."""
+    """Insert a progress event only if the fence and lease hold and nothing is cancelled."""
     with db.transaction() as conn:
         cur = conn.execute(
             f"""
             INSERT INTO job_events (job_id, stage, state, message, progress)
             SELECT j.id, j.stage, j.state, %(message)s, %(progress)s
-            FROM jobs j WHERE {FENCE} {LIVE}
+            FROM jobs j WHERE {FENCE} AND j.lease_expires_at > now() {LIVE}
             """,
             {
                 **job.fence_params(),
@@ -272,7 +274,6 @@ def fenced_execute(db: Database, job: ClaimedJob, fn: Callable[[psycopg.Connecti
 class _Locked:
     row: Mapping[str, Any]
     stop_requested: bool
-    lease_valid: bool
 
 
 def _lock(conn: psycopg.Connection, job: ClaimedJob, *, require_live: bool) -> _Locked:
@@ -290,7 +291,9 @@ def _lock(conn: psycopg.Connection, job: ClaimedJob, *, require_live: bool) -> _
         "FOR UPDATE",
         job.fence_params(),
     ).fetchone()
-    if row is None:
+    # An expired lease belongs to the reaper even before it moves the fence: a worker
+    # that could not renew in time writes nothing, and the reaper settles the job.
+    if row is None or not row["lease_valid"]:
         raise LeaseLost(job.id)
     lifecycle_ok = project is not None and (
         project["lifecycle"] == "active"
@@ -301,7 +304,7 @@ def _lock(conn: psycopg.Connection, job: ClaimedJob, *, require_live: bool) -> _
         or (run is not None and run["cancel_requested_at"] is not None)
         or not lifecycle_ok
     )
-    locked = _Locked(row, stop, bool(row["lease_valid"]))
+    locked = _Locked(row, stop)
     if require_live and stop:
         raise Cancelled(job.id)
     return locked
@@ -653,10 +656,7 @@ def requeue_project_cleanup(
     if pending is not None:
         return
     requeues = int(manifest.get("requeues") or 0)
-    delay = min(
-        ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS,
-        ARTIFACT_CLEANUP_REQUEUE_SECONDS * 2 ** min(requeues, 16),
-    )
+    delay = _requeue_delay(requeues)
     log.warning("project %s cleanup ran out of attempts; queued again in %ss", project_id, delay)
     conn.execute(
         """
@@ -673,6 +673,57 @@ def requeue_project_cleanup(
             float(delay),
             Jsonb({**manifest, "requeues": requeues + 1}),
         ),
+    )
+
+
+def requeue_upload_cleanup(
+    conn: psycopg.Connection, project_id: str, upload_id: str | None, manifest: Mapping[str, Any]
+) -> None:
+    """Queue an upload's cleanup again, later, after it used up its attempts.
+
+    The upload keeps its immutable key, and with it its quota, until the cleanup has
+    deleted its bytes, and nothing in the capture page can ask for that again. So, as for
+    a project's deletion, only the paths that exhaust retries call this, the wait doubles
+    up to a day and the cleanup never gives up. Nothing is queued once the project is no
+    longer active (its deletion removes the bytes), when the upload is gone or still
+    uploading, or while another cleanup of it is pending.
+    """
+    if upload_id is None:
+        return
+    upload = conn.execute(
+        "SELECT u.status FROM uploads u JOIN projects p ON p.id = u.project_id "
+        "WHERE u.id = %s AND u.project_id = %s AND p.lifecycle = 'active'",
+        (upload_id, project_id),
+    ).fetchone()
+    if upload is None or upload["status"] == "initiated":
+        return
+    pending = conn.execute(
+        "SELECT 1 FROM jobs WHERE upload_id = %s AND stage = 'upload_cleanup' "
+        "AND state IN ('queued', 'retry_wait', 'running') LIMIT 1",
+        (upload_id,),
+    ).fetchone()
+    if pending is not None:
+        return
+    requeues = int(manifest.get("requeues") or 0)
+    delay = _requeue_delay(requeues)
+    log.warning("upload %s cleanup ran out of attempts; queued again in %ss", upload_id, delay)
+    conn.execute(
+        """
+        INSERT INTO jobs (id, project_id, upload_id, capability, stage, state, priority,
+                          attempts, max_attempts, fencing_token, available_at, input_manifest)
+        VALUES (%s, %s, %s, 'cpu', 'upload_cleanup', 'queued', 5, 0, 3, 0,
+                now() + make_interval(secs => %s), %s)
+        """,
+        (str(uuid.uuid4()), project_id, upload_id, float(delay),
+         Jsonb({**manifest, "requeues": requeues + 1})),
+    )  # fmt: skip
+
+
+def _requeue_delay(requeues: int) -> float:
+    """A requeued cleanup's wait: doubling from an hour, up to a day."""
+    return min(
+        ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS,
+        ARTIFACT_CLEANUP_REQUEUE_SECONDS * 2 ** min(requeues, 16),
     )
 
 
@@ -734,9 +785,7 @@ def complete_job(
     and :class:`LeaseLost` when the fence moved or the lease already expired.
     """
     with db.transaction() as conn:
-        locked = _lock(conn, job, require_live=True)
-        if not locked.lease_valid:
-            raise LeaseLost(job.id)
+        _lock(conn, job, require_live=True)
         if commit is not None:
             commit(conn, job)
         updated = conn.execute(
@@ -862,6 +911,9 @@ def retry_job(
                 requeue_artifact_cleanup(conn, job.project_id, job.input_manifest)
             elif job.stage == "project_cleanup":
                 requeue_project_cleanup(conn, job.project_id, locked.row["input_manifest"])
+            elif job.stage == "upload_cleanup":
+                manifest = locked.row["input_manifest"] or {}
+                requeue_upload_cleanup(conn, job.project_id, job.upload_id, manifest)
             return "failed"
         conn.execute(
             """
@@ -910,91 +962,116 @@ class ReapOutcome:
 
 
 def reap_expired(db: Database) -> list[ReapOutcome]:
-    """Recover expired leases: bump the fence and mark cancelled / failed / queued."""
-    lost = error_body("WORKER_LOST")
+    """Recover expired leases: bump the fence and mark cancelled / failed / queued.
+
+    Each job is reaped in its own transaction, which locks the job's project, then its
+    run, then the job: the order of every other transition and of the API's
+    cancellation, so the reaper never holds a job while it waits for that job's run.
+    """
     with db.transaction() as conn:
-        rows = conn.execute(
-            f"""
-            WITH expired AS (
-              SELECT j.id, j.capability,
-                     CASE WHEN {CANCEL_COND} THEN 'cancelled'
-                          WHEN j.attempts >= j.max_attempts THEN 'failed'
-                          ELSE 'queued' END AS outcome,
-                     -- The lost attempt ran at least until its last heartbeat, which
-                     -- set updated_at (the lease then ran on for up to 90 s with no
-                     -- worker behind it, so that tail is not charged).
-                     GREATEST(1, CEIL(EXTRACT(EPOCH FROM
-                       (LEAST(j.updated_at, j.lease_expires_at)
-                        - COALESCE(j.started_at, j.lease_expires_at)))))
-                       AS charge_seconds
-              FROM jobs j
-              WHERE j.state = 'running' AND j.lease_expires_at < now()
-              FOR UPDATE OF j SKIP LOCKED
-            )
-            UPDATE jobs AS j
-            SET fencing_token = j.fencing_token + 1,
-                state = e.outcome,
-                lease_owner = NULL,
-                lease_expires_at = NULL,
-                available_at = CASE WHEN e.outcome = 'queued' THEN now() ELSE j.available_at END,
-                finished_at = CASE WHEN e.outcome = 'queued' THEN NULL ELSE now() END,
-                error = CASE WHEN e.outcome = 'failed' THEN %(err)s ELSE j.error END,
-                updated_at = now()
-            FROM expired AS e
-            WHERE j.id = e.id
-            RETURNING j.id, j.project_id, j.run_id, j.upload_id, j.scene_revision_id, j.stage,
-                      j.state, j.fencing_token, j.input_manifest,
-                      e.capability, e.charge_seconds
-            """,
-            {"err": Jsonb(lost)},
+        expired = conn.execute(
+            "SELECT id, project_id, run_id FROM jobs "
+            "WHERE state = 'running' AND lease_expires_at < now() ORDER BY lease_expires_at, id"
         ).fetchall()
-        outcomes = []
-        for row in rows:
-            job_id, run_id = str(row["id"]), (str(row["run_id"]) if row["run_id"] else None)
-            project_id = str(row["project_id"])
-            message = {
-                "queued": "Worker lease expired; re-queued.",
-                "failed": "Worker lease expired too many times.",
-                "cancelled": "Cancelled after the worker stopped.",
-            }[row["state"]]
-            _event(conn, job_id, row["stage"], row["state"], message)
-            if run_id and row["scene_revision_id"] is None:
-                # Charge the lost attempt so worker losses cannot multiply the run budget
-                # (the stale worker records nothing once its lease is gone).
-                gpu = row["capability"] == "gpu"
-                column = "actual_gpu_seconds" if gpu else "actual_cpu_seconds"
-                conn.execute(
-                    f"UPDATE usage_ledger SET {column} = {column} + %s WHERE run_id = %s",  # noqa: S608
-                    (int(row["charge_seconds"]), run_id),
-                )
-            if run_id and row["state"] in ("failed", "cancelled"):
-                # The lost attempt wrote its outputs under the fence the bump just
-                # replaced, and its sweep of the earlier fences may have failed. A job
-                # that ended here is never claimed again, so nothing would sweep them. A
-                # re-queued job is swept by its next attempt, or by the cancellation
-                # paths if it is cancelled before that attempt starts.
-                attempts = [
-                    attempt_prefix(project_id, run_id, row["stage"], job_id, fence)
-                    for fence in range(1, int(row["fencing_token"]))
-                ]
-                queue_artifact_cleanup(conn, project_id, attempts, reason="attempt_lost")
-            if run_id and row["state"] == "failed" and row["scene_revision_id"] is None:
-                fail_run(conn, run_id, lost)
-            elif row["state"] == "failed" and row["stage"] == "upload_inspection":
-                upload_id = str(row["upload_id"]) if row["upload_id"] else None
-                fail_upload(conn, str(row["project_id"]), upload_id)
-            elif row["state"] == "failed" and row["scene_revision_id"] is not None:
-                fail_revision(conn, str(row["scene_revision_id"]))
-            elif row["state"] == "failed" and row["stage"] == "artifact_cleanup":
-                requeue_artifact_cleanup(conn, project_id, row["input_manifest"] or {})
-            elif row["state"] == "failed" and row["stage"] == "project_cleanup":
-                requeue_project_cleanup(conn, project_id, row["input_manifest"] or {})
-            elif run_id and row["state"] == "cancelled":
-                finalize_run_if_cancelled(conn, run_id)
-            outcomes.append(ReapOutcome(job_id, run_id, row["state"]))
+    outcomes = []
+    for job in expired:
+        with db.transaction() as conn:
+            outcome = _reap(conn, job)
+        if outcome is not None:
+            outcomes.append(outcome)
     for outcome in outcomes:
         log.warning("reaped job %s -> %s", outcome.job_id, outcome.state)
     return outcomes
+
+
+def _reap(conn: psycopg.Connection, job: Mapping[str, Any]) -> ReapOutcome | None:
+    """Reap one job found expired, or None when it was renewed or settled since."""
+    job_id, project_id = str(job["id"]), str(job["project_id"])
+    run_id = str(job["run_id"]) if job["run_id"] else None
+    conn.execute("SELECT 1 FROM projects WHERE id = %s FOR SHARE", (project_id,))
+    if run_id:
+        conn.execute("SELECT 1 FROM reconstruction_runs WHERE id = %s FOR UPDATE", (run_id,))
+    lost = error_body("WORKER_LOST")
+    row = conn.execute(
+        f"""
+        WITH expired AS (
+          SELECT j.id, j.capability,
+                 CASE WHEN {CANCEL_COND} THEN 'cancelled'
+                      WHEN j.attempts >= j.max_attempts THEN 'failed'
+                      ELSE 'queued' END AS outcome,
+                 -- The lost attempt ran at least until its last heartbeat, which
+                 -- set updated_at (the lease then ran on for up to 90 s with no
+                 -- worker behind it, so that tail is not charged).
+                 GREATEST(1, CEIL(EXTRACT(EPOCH FROM
+                   (LEAST(j.updated_at, j.lease_expires_at)
+                    - COALESCE(j.started_at, j.lease_expires_at)))))
+                   AS charge_seconds
+          FROM jobs j
+          WHERE j.id = %(id)s AND j.state = 'running' AND j.lease_expires_at < now()
+          FOR UPDATE OF j SKIP LOCKED
+        )
+        UPDATE jobs AS j
+        SET fencing_token = j.fencing_token + 1,
+            state = e.outcome,
+            lease_owner = NULL,
+            lease_expires_at = NULL,
+            available_at = CASE WHEN e.outcome = 'queued' THEN now() ELSE j.available_at END,
+            finished_at = CASE WHEN e.outcome = 'queued' THEN NULL ELSE now() END,
+            error = CASE WHEN e.outcome = 'failed' THEN %(err)s ELSE j.error END,
+            updated_at = now()
+        FROM expired AS e
+        WHERE j.id = e.id
+        RETURNING j.id, j.project_id, j.run_id, j.upload_id, j.scene_revision_id, j.stage,
+                  j.state, j.fencing_token, j.input_manifest,
+                  e.capability, e.charge_seconds
+        """,
+        {"err": Jsonb(lost), "id": job_id},
+    ).fetchone()
+    if row is None:
+        return None
+    message = {
+        "queued": "Worker lease expired; re-queued.",
+        "failed": "Worker lease expired too many times.",
+        "cancelled": "Cancelled after the worker stopped.",
+    }[row["state"]]
+    _event(conn, job_id, row["stage"], row["state"], message)
+    if run_id and row["scene_revision_id"] is None:
+        # Charge the lost attempt so worker losses cannot multiply the run budget
+        # (the stale worker records nothing once its lease is gone).
+        gpu = row["capability"] == "gpu"
+        column = "actual_gpu_seconds" if gpu else "actual_cpu_seconds"
+        conn.execute(
+            f"UPDATE usage_ledger SET {column} = {column} + %s WHERE run_id = %s",  # noqa: S608
+            (int(row["charge_seconds"]), run_id),
+        )
+    if run_id and row["state"] in ("failed", "cancelled"):
+        # The lost attempt wrote its outputs under the fence the bump just
+        # replaced, and its sweep of the earlier fences may have failed. A job
+        # that ended here is never claimed again, so nothing would sweep them. A
+        # re-queued job is swept by its next attempt, or by the cancellation
+        # paths if it is cancelled before that attempt starts.
+        attempts = [
+            attempt_prefix(project_id, run_id, row["stage"], job_id, fence)
+            for fence in range(1, int(row["fencing_token"]))
+        ]
+        queue_artifact_cleanup(conn, project_id, attempts, reason="attempt_lost")
+    if run_id and row["state"] == "failed" and row["scene_revision_id"] is None:
+        fail_run(conn, run_id, lost)
+    elif row["state"] == "failed" and row["stage"] == "upload_inspection":
+        upload_id = str(row["upload_id"]) if row["upload_id"] else None
+        fail_upload(conn, str(row["project_id"]), upload_id)
+    elif row["state"] == "failed" and row["scene_revision_id"] is not None:
+        fail_revision(conn, str(row["scene_revision_id"]))
+    elif row["state"] == "failed" and row["stage"] == "artifact_cleanup":
+        requeue_artifact_cleanup(conn, project_id, row["input_manifest"] or {})
+    elif row["state"] == "failed" and row["stage"] == "project_cleanup":
+        requeue_project_cleanup(conn, project_id, row["input_manifest"] or {})
+    elif row["state"] == "failed" and row["stage"] == "upload_cleanup":
+        upload_id = str(row["upload_id"]) if row["upload_id"] else None
+        requeue_upload_cleanup(conn, project_id, upload_id, row["input_manifest"] or {})
+    elif run_id and row["state"] == "cancelled":
+        finalize_run_if_cancelled(conn, run_id)
+    return ReapOutcome(job_id, run_id, row["state"])
 
 
 def promote_retry_wait(db: Database) -> int:
