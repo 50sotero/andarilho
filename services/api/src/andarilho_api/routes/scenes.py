@@ -105,7 +105,7 @@ def get_scene(
 ):
     scene = load_scoped(db, Scene, scene_id, subject, "scene")
     # Draft layouts, findings and history are review material: owners/editors only.
-    load_project(db, scene.project_id, subject, roles=WRITERS)
+    project, _ = load_project(db, scene.project_id, subject, roles=WRITERS)
     revisions = (
         db.execute(
             select(SceneRevision)
@@ -121,8 +121,13 @@ def get_scene(
         "scene": ser.scene(scene),
         "revision": ser.revision(current) if current else None,
         "revisions": [ser.revision_summary(r) for r in revisions],
-        # The original plan is private source material: owners/editors only.
-        "floorPlan": _floor_plan(db, scene, store, config.delivery_url_ttl_seconds),
+        # The original plan is private source material: owners/editors only. Deletion
+        # stops new grants at once, so a deleting project gets no fresh URL to it.
+        "floorPlan": (
+            _floor_plan(db, scene, store, config.delivery_url_ttl_seconds)
+            if project.lifecycle == "active"
+            else None
+        ),
     }
 
 

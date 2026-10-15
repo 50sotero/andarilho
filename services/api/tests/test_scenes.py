@@ -337,6 +337,11 @@ def test_floor_plan_is_private_to_owners_and_editors(client, auth, db, setup):
     )
     # Viewers cannot read draft review material at all (layout, findings, plan).
     assert _get_scene(client, auth, setup["sceneId"], sub="viewer-v").status_code == 403
+    # Once deletion starts no new URL to the plan is issued, though its rows remain.
+    db.get(Project, uuid.UUID(setup["pid"])).lifecycle = "deleting"
+    db.commit()
+    response = _get_scene(client, auth, setup["sceneId"])
+    assert response.status_code == 200 and response.json()["floorPlan"] is None
 
 
 def test_viewers_only_receive_the_live_published_revision(client, auth, db, setup):
