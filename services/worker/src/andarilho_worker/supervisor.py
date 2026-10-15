@@ -30,7 +30,7 @@ from andarilho_worker.errors import (
 )
 from andarilho_worker.metrics import measure
 from andarilho_worker.queue import ClaimedJob, NextJob
-from andarilho_worker.recipes import Recipe, recipe_for
+from andarilho_worker.recipes import Recipe, recipe_for, recipe_for_run
 from andarilho_worker.runner import (
     ProcessRunner,
     ProcessTimeout,
@@ -163,15 +163,8 @@ class Supervisor:
                 (job.run_id,),
             ).fetchone()
         )
-        recipe = recipe_for(run["quality"])
-        declared = (job.input_manifest.get("recipe") or {}).get("stages")
-        pinned = [{"stage": s.stage, "capability": s.capability} for s in recipe.stages]
-        stages_differ = (
-            bool(declared)
-            and [{"stage": d.get("stage"), "capability": d.get("capability")} for d in declared]
-            != pinned
-        )
         if job.scene_revision_id is not None:
+            recipe = recipe_for(run["quality"])
             # Layout revisions of a finished scene run the current layout stages, whatever
             # recipe reconstructed it: refusing would freeze every scene made before a
             # recipe change. The scene keeps the reconstruction's digest as provenance.
@@ -182,14 +175,24 @@ class Supervisor:
                     run["recipe_digest"],
                 )
             return recipe, run["recipe_digest"]
-        if run["recipe_digest"] != recipe.digest or stages_differ:
-            # The run must record exactly the recipe that executes (provenance); a
-            # mismatch means API/worker version skew, so refuse rather than guess.
+        # A run executes the recipe it was submitted with: the current one, or an earlier
+        # version this worker still retains, so a deployment does not fail in-flight runs.
+        recipe = recipe_for_run(run["quality"], run["recipe_digest"])
+        declared = (job.input_manifest.get("recipe") or {}).get("stages")
+        stages_differ = (
+            recipe is not None
+            and bool(declared)
+            and [{"stage": d.get("stage"), "capability": d.get("capability")} for d in declared]
+            != [{"stage": s.stage, "capability": s.capability} for s in recipe.stages]
+        )
+        if recipe is None or stages_differ:
+            # The run must record exactly the recipe that executes (provenance); anything
+            # else is API/worker version skew, so refuse rather than guess.
             log.error(
-                "run %s recipe %s does not match the worker's pinned %s",
+                "run %s recipe %s is not one this worker can execute (current %s)",
                 job.run_id,
                 run["recipe_digest"],
-                recipe.digest,
+                recipe_for(run["quality"]).digest,
             )
             raise RecipeMismatch(run["recipe_digest"])
         return recipe, recipe.digest

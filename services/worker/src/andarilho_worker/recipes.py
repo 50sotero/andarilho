@@ -287,6 +287,24 @@ RECIPES: dict[str, Recipe] = {
     ),
 }
 
+# Earlier versions that runs queued before a deployment may still be pinned to. Each lists
+# only stages this worker still runs, so an in-flight run finishes on the recipe it was
+# submitted with instead of failing on the upgrade. Their digests are computed exactly as
+# they were published (tests pin them); a version whose stages are gone (the
+# Gaussian-splat v1) is not kept, and its runs fail with RECIPE_MISMATCH.
+_V2_STAGES = tuple(s for s in RUN_STAGES if s != "scene_analysis")
+_V2_COMMON = {k: v for k, v in COMMON.items() if k != "analysis"}
+RETAINED_RECIPES: tuple[Recipe, ...] = (
+    Recipe("preview-v2", "preview", _specs(_V2_STAGES), {**_V2_COMMON}),
+    Recipe("standard-v2", "standard", _specs(_V2_STAGES), {**_V2_COMMON}),
+    Recipe(
+        "synthetic-v2",
+        "synthetic",
+        _specs([s for s in _V2_STAGES if s not in GPU_STAGES]),
+        {"fixture": "synthetic-two-room", "texture": COMMON["texture"]},
+    ),
+)
+
 
 @cache
 def recipe_for(quality: str) -> Recipe:
@@ -294,6 +312,14 @@ def recipe_for(quality: str) -> Recipe:
         return RECIPES[quality]
     except KeyError:
         raise KeyError(f"unknown quality tier {quality!r}") from None
+
+
+def recipe_for_run(quality: str, digest: str) -> Recipe | None:
+    """The recipe a run was submitted with: the current one or a retained earlier version."""
+    for recipe in (RECIPES.get(quality), *RETAINED_RECIPES):
+        if recipe is not None and recipe.quality == quality and recipe.digest == digest:
+            return recipe
+    return None
 
 
 def recipe_by_name(name: str) -> Recipe | None:

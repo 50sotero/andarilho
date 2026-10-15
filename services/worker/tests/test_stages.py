@@ -88,6 +88,39 @@ def test_recipes_stage_order_and_capabilities():
         recipe_for("ultra")
 
 
+# The digests the v2 recipes were published with (API recipes.json before scene_analysis).
+V2_DIGESTS = {
+    "preview-v2": "sha256:042a94c2abe77c833744de0a6228da34911fedcf954a89db6b9bd9fa03637e0f",
+    "standard-v2": "sha256:4ec80d83f42a361cce721066e20226cb12c40760f08ceddc9bd4226e745faf4e",
+    "synthetic-v2": "sha256:4a0ce8370b807761da499aace7624d60e833c3b62e1c66b01d0d37189130e7c5",
+}
+
+
+def test_retained_v2_recipes_keep_their_published_digests_and_runnable_stages():
+    from andarilho_worker.recipes import RETAINED_RECIPES
+    from andarilho_worker.stages import STAGES
+
+    # A run queued before the upgrade is pinned to these digests: if a change to tools,
+    # argv, timeouts or parameters alters one, such runs would fail on the next deploy.
+    assert {r.name: r.digest for r in RETAINED_RECIPES} == V2_DIGESTS
+    for recipe in RETAINED_RECIPES:
+        assert "scene_analysis" not in recipe.stage_names()
+        assert all(stage in STAGES for stage in recipe.stage_names())
+        assert recipe.next_stage("normalizing").stage == "geometry_proposal"
+
+
+def test_a_run_resolves_to_the_recipe_its_digest_names():
+    from andarilho_worker.recipes import recipe_for_run
+
+    current = recipe_for("preview")
+    assert recipe_for_run("preview", current.digest) is current
+    assert recipe_for_run("preview", V2_DIGESTS["preview-v2"]).name == "preview-v2"
+    # The digest must belong to the run's own quality tier, and unknown digests resolve
+    # to nothing (the supervisor then fails the run with RECIPE_MISMATCH).
+    assert recipe_for_run("standard", V2_DIGESTS["preview-v2"]) is None
+    assert recipe_for_run("preview", "sha256:unknown") is None
+
+
 def test_recipe_names_and_parameters_after_the_textured_model():
     assert {r.name for r in RECIPES.values()} == {
         "preview-v3", "standard-v3", "synthetic-v3"

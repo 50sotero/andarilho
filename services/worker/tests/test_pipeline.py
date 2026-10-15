@@ -930,6 +930,31 @@ def test_run_with_unknown_recipe_digest_is_rejected(db, seed, sup):
     assert run["status"] == "failed" and run["error"]["code"] == "RECIPE_MISMATCH"
 
 
+def test_a_run_queued_before_an_upgrade_finishes_on_its_retained_recipe(db, seed, sup):
+    from andarilho_worker.recipes import RETAINED_RECIPES
+
+    v2 = next(r for r in RETAINED_RECIPES if r.name == "synthetic-v2")
+    pid = seed.project()
+    run_id, job_id = seed.run(pid, quality="synthetic")
+    # Submitted by the previous release: its run row and first job name the v2 recipe.
+    seed.exec(
+        "UPDATE reconstruction_runs SET recipe_name = %s, recipe_digest = %s WHERE id = %s",
+        v2.name, v2.digest, run_id,
+    )  # fmt: skip
+    seed.exec(
+        "UPDATE jobs SET input_manifest = jsonb_set(input_manifest, '{recipe}', %s) "
+        "WHERE id = %s",
+        Jsonb(v2.manifest_entry()), job_id,
+    )  # fmt: skip
+    done = drain(db, sup)
+    assert [stage for stage, _ in done] == v2.stage_names()
+    assert {state for _, state in done} == {"succeeded"}
+    run = seed.one("SELECT status FROM reconstruction_runs WHERE id = %s", run_id)
+    assert run["status"] == "succeeded"
+    manifest = seed.one("SELECT manifest FROM scene_revisions")["manifest"]
+    assert manifest["provenance"]["recipeDigest"] == v2.digest
+
+
 def test_layout_revision_of_a_scene_built_by_an_older_recipe(db, seed, sup):
     pid = seed.project()
     run_id, _ = seed.run(pid, quality="synthetic")
