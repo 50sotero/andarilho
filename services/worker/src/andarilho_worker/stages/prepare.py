@@ -27,7 +27,7 @@ from typing import Any
 
 import numpy as np
 
-from andarilho_worker.artifacts import MAX_POSTER_BYTES
+from andarilho_worker.artifacts import FRAMES_DIRECTORY, MAX_POSTER_BYTES
 from andarilho_worker.errors import StageError
 from andarilho_worker.keyframes import (
     SCORE_SIZE,
@@ -320,7 +320,7 @@ def run(ctx: StageContext) -> StageResult:
     frames = sorted(p for p in images.rglob("*.jpg"))
     if not frames:
         raise StageError("INVALID_MEDIA", "No frames could be extracted.")
-    prefix = ctx.attempt_key("images/")
+    prefix = ctx.attempt_key(FRAMES_DIRECTORY)
     for frame in frames:
         ctx.cancellation.raise_if_cancelled()
         rel = frame.relative_to(images).as_posix()

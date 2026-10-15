@@ -10,8 +10,9 @@ from helpers import drain
 from psycopg.types.json import Jsonb
 
 from andarilho_worker import queue
-from andarilho_worker.artifacts import LocalObjectStore, attempt_prefix
+from andarilho_worker.artifacts import FRAMES_DIRECTORY, LocalObjectStore, attempt_prefix
 from andarilho_worker.errors import StageError, TransientError
+from andarilho_worker.recipes import RETEXTURE_STAGES, RUN_STAGES
 from andarilho_worker.stages import STAGES
 from andarilho_worker.stages.base import finish
 from andarilho_worker.supervisor import Supervisor
@@ -52,14 +53,16 @@ def scene_of(project_id: str, rev: dict[str, str]) -> str:
     return f"tenants/{project_id}/scenes/{rev['revision']}/"
 
 
-def attempt_of(project_id: str, run_id: str, job_id: str, fence: int = 1) -> str:
-    return f"tenants/{project_id}/runs/{run_id}/attempts/packaging/{job_id}/{fence}/"
+def attempt_of(
+    project_id: str, run_id: str, job_id: str, fence: int = 1, stage: str = "packaging"
+) -> str:
+    return f"tenants/{project_id}/runs/{run_id}/attempts/{stage}/{job_id}/{fence}/"
 
 
-def make_run_job(seed, project_id: str, run_id: str, state: str) -> str:
-    """A packaging job of ``run_id`` that is in ``state`` (a lease is held while running),
+def make_run_job(seed, project_id: str, run_id: str, state: str, stage: str = "packaging") -> str:
+    """A ``stage`` job of ``run_id`` that is in ``state`` (a lease is held while running),
     claimed once, so its only attempt ran at fence 1."""
-    job_id = seed.job(project_id, "packaging", {}, run_id=run_id)
+    job_id = seed.job(project_id, stage, {}, run_id=run_id)
     if state == "running":
         seed.exec(
             "UPDATE jobs SET state = 'running', lease_owner = 'worker-1', fencing_token = 1, "
@@ -269,11 +272,10 @@ def test_a_reference_to_another_revision_does_not_keep_this_one(db, seed, store,
     assert row["result_manifest"]["kept"] == [scene_of(pid, kept)]
 
 
-@pytest.mark.parametrize("run_status", ["running", "succeeded"])
-def test_an_attempt_of_a_succeeded_job_is_kept(db, seed, store, sup, run_status):
-    # A succeeded camera_reconstruction holds the frames that layout re-texturing reads.
+def test_an_attempt_of_a_succeeded_job_is_kept_while_its_run_is_processing(db, seed, store, sup):
+    # A later stage of the run may still read it.
     pid = seed.project()
-    rev = make_revision(seed, pid, run_status=run_status)
+    rev = make_revision(seed, pid, state="pending", run_status="running")
     job_id = make_run_job(seed, pid, rev["run"], "succeeded")
     attempt = attempt_of(pid, rev["run"], job_id)
     store.put_bytes(attempt + "out.bin", b"x")
@@ -282,6 +284,47 @@ def test_an_attempt_of_a_succeeded_job_is_kept(db, seed, store, sup, run_status)
     assert run_due_cleanup(db, sup) == "succeeded"
     assert store.list_keys(attempt) == [attempt + "out.bin"]
     assert cleanup_row(seed, pid)["result_manifest"]["kept"] == [attempt]
+
+
+@pytest.mark.parametrize("stage", RUN_STAGES)
+def test_a_succeeded_run_keeps_only_the_attempts_layout_saves_retexture_from(
+    db, seed, store, sup, stage
+):
+    # Layout saves read the poster, the dataset and the frame transform. Packaging copied
+    # what the scene needs into its own prefix, and the rest only fed the next stage.
+    pid = seed.project()
+    rev = make_revision(seed, pid, state="valid", run_status="succeeded")
+    job_id = make_run_job(seed, pid, rev["run"], "succeeded", stage=stage)
+    attempt = attempt_of(pid, rev["run"], job_id, stage=stage)
+    store.put_bytes(attempt + "out.bin", b"x")
+    enqueue(db, pid, [attempt], reason="run_succeeded")
+
+    assert run_due_cleanup(db, sup) == "succeeded"
+    kept = stage in RETEXTURE_STAGES
+    assert store.list_keys(attempt) == ([attempt + "out.bin"] if kept else [])
+    assert cleanup_row(seed, pid)["result_manifest"]["kept" if kept else "deleted"] == [attempt]
+
+
+@pytest.mark.parametrize(("run_status", "kept"), [("running", True), ("succeeded", False)])
+def test_the_preparing_frames_are_kept_only_while_the_run_is_processing(
+    db, seed, store, sup, run_status, kept
+):
+    # camera_reconstruction reads them, then packs undistorted copies into its dataset;
+    # after the run, layout saves read only the poster beside them.
+    pid = seed.project()
+    state = "valid" if run_status == "succeeded" else "pending"
+    rev = make_revision(seed, pid, state=state, run_status=run_status)
+    job_id = make_run_job(seed, pid, rev["run"], "succeeded", stage="preparing")
+    attempt = attempt_of(pid, rev["run"], job_id, stage="preparing")
+    frames = attempt + FRAMES_DIRECTORY
+    store.put_bytes(frames + "frame_0001.jpg", b"x")
+    store.put_bytes(attempt + "poster.webp", b"x")
+    enqueue(db, pid, [frames], reason="run_succeeded")
+
+    assert run_due_cleanup(db, sup) == "succeeded"
+    left = [frames + "frame_0001.jpg"] if kept else []
+    assert sorted(store.list_keys(attempt)) == sorted([attempt + "poster.webp", *left])
+    assert cleanup_row(seed, pid)["result_manifest"]["kept" if kept else "deleted"] == [frames]
 
 
 @pytest.mark.parametrize("run_status", ["failed", "cancelled"])
@@ -378,6 +421,7 @@ def test_an_attempt_is_deleted_unless_its_job_succeeded(db, seed, store, sup, jo
         "project_root",
         "traversal",
         "unknown_stage",
+        "frames_of_another_stage",
         "manifest_project",
     ],
 )
@@ -405,6 +449,9 @@ def test_the_stage_refuses_foreign_and_malformed_prefixes_before_deleting_anythi
         "project_root": f"tenants/{pid}/",
         "traversal": f"tenants/{pid}/scenes/{rev['revision']}/../../",
         "unknown_stage": f"tenants/{pid}/runs/{rev['run']}/attempts/deleting/{uuid.uuid4()}/1/",
+        # Only preparing stores frames; any other sub-prefix of an attempt is refused.
+        "frames_of_another_stage": attempt_of(pid, rev["run"], str(uuid.uuid4()))
+        + FRAMES_DIRECTORY,
         "manifest_project": own,  # valid itself, but the request names another project
     }[kind]
     claimed_project = other if kind == "manifest_project" else pid
@@ -486,6 +533,7 @@ def test_a_valid_layout_save_leaves_only_its_scene_once_its_cleanup_runs(db, see
     pid = seed.project()
     run_id, _ = seed.run(pid, quality="synthetic")
     drain(db, sup)
+    assert run_all_due_cleanups(db, sup) == ["succeeded"]  # the run's disposable outputs
     run_outputs = sorted(store.list_keys(f"tenants/{pid}/runs/{run_id}/"))
     revision_id = save_layout(
         seed, pid, run_id, seed.one("SELECT layout FROM scene_revisions")["layout"]
@@ -507,6 +555,7 @@ def test_a_layout_save_that_fails_validation_leaves_nothing_behind(db, seed, sto
     pid = seed.project()
     run_id, _ = seed.run(pid, quality="synthetic")
     drain(db, sup)
+    assert run_all_due_cleanups(db, sup) == ["succeeded"]  # the run's disposable outputs
     run_outputs = sorted(store.list_keys(f"tenants/{pid}/runs/{run_id}/"))
     layout = copy.deepcopy(seed.one("SELECT layout FROM scene_revisions")["layout"])
     layout["spawn"]["feet"] = [0.0, 0.0, 1.5]  # inside the divider wall
@@ -541,6 +590,30 @@ def test_an_attempt_of_a_layout_save_is_kept_only_while_its_revision_is_pending(
     enqueue(db, pid, [attempt], reason="layout_settled")
     assert run_due_cleanup(db, sup) == "succeeded"
     assert store.list_keys(attempt) == []
+
+
+def test_a_succeeded_run_leaves_only_what_layout_saves_retexture_from(db, seed, store, sup):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, quality="synthetic")
+    drain(db, sup)
+    run_prefix = f"tenants/{pid}/runs/{run_id}/"
+    revision = seed.one("SELECT id, layout FROM scene_revisions")
+    scene = sorted(store.list_keys(f"tenants/{pid}/scenes/{revision['id']}/"))
+    outputs = sorted(store.list_keys(run_prefix))
+
+    def stage_of(key: str) -> str:
+        return key.removeprefix(run_prefix).split("/")[1]
+
+    assert "texturing" in {stage_of(key) for key in outputs}  # the model packaging copied
+
+    assert run_all_due_cleanups(db, sup) == ["succeeded"]
+    assert [c["reason"] for c in queued_cleanups(seed, pid)] == ["run_succeeded"]
+    left = sorted(store.list_keys(run_prefix))
+    assert left == [key for key in outputs if stage_of(key) in RETEXTURE_STAGES]
+    assert sorted(store.list_keys(f"tenants/{pid}/scenes/{revision['id']}/")) == scene
+    # A layout save still re-textures from what the run kept.
+    save_layout(seed, pid, run_id, revision["layout"])
+    assert [d[1] for d in drain(db, sup)] == ["succeeded"] * 4
 
 
 def test_a_worker_lost_on_its_last_attempt_leaves_nothing_behind(db, seed, store, sup):

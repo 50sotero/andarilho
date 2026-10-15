@@ -31,6 +31,7 @@ from room_dataset import (
 )
 
 from andarilho_worker import queue
+from andarilho_worker.artifacts import FRAMES_DIRECTORY, attempt_prefix
 from andarilho_worker.db import Database
 from andarilho_worker.errors import Cancelled, StageError
 from andarilho_worker.geometry.colmap import quaternion_to_rotation
@@ -306,6 +307,73 @@ def test_layout_save_retextures_from_the_runs_rows_through_the_supervisor(
     assert outputs["coverage"]["registeredViews"] == CAMERAS
     assert inspect_textured_glb(store.get_bytes(outputs["modelKey"]))["unlit"]
     assert seed.one("SELECT stage FROM jobs WHERE stage = 'packaging'")["stage"] == "packaging"
+
+
+def test_a_layout_save_still_retextures_once_the_succeeded_runs_cleanup_has_run(
+    db, seed, store, settings, capture
+):
+    """The run's cleanup keeps exactly what layout saves read: poster, dataset, transform."""
+    pid, run_id = capture["project"], capture["run"]
+    seed.exec("UPDATE jobs SET state = 'succeeded' WHERE state = 'queued'")  # the run's validating
+    for stage in ("preparing", "scene_analysis", "geometry_proposal", "texturing", "packaging",
+                  "scene_validation"):  # fmt: skip
+        _succeeded(seed, pid, run_id, stage, {})
+    # Every stage committed at fence 1, under its own attempt prefix, and the run succeeded.
+    seed.exec("UPDATE jobs SET fencing_token = 1 WHERE run_id = %s", run_id)
+    seed.exec("UPDATE reconstruction_runs SET status = 'succeeded' WHERE id = %s", run_id)
+    attempts = {
+        row["stage"]: attempt_prefix(pid, run_id, row["stage"], str(row["id"]), 1)
+        for row in seed.all("SELECT id, stage FROM jobs WHERE run_id = %s", run_id)
+    }
+    staged = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'camera_reconstruction'")
+    staged_key = staged["result_manifest"]["outputs"]["datasetKey"]
+    dataset = attempts["camera_reconstruction"] + "dataset.tar"
+    store.put_bytes(dataset, store.get_bytes(staged_key))
+    store.delete_prefix(staged_key.rsplit("/", 1)[0] + "/")
+    _set_dataset_key(seed, dataset)
+    poster = attempts["preparing"] + "poster.webp"
+    frames = attempts["preparing"] + FRAMES_DIRECTORY
+    seed.exec(
+        "UPDATE jobs SET result_manifest = %s WHERE run_id = %s AND stage = 'preparing'",
+        Jsonb({"stage": "preparing", "outputs": {"posterKey": poster, "framesPrefix": frames}}),
+        run_id,
+    )
+    evidence = attempts["normalizing"] + "evidence.json"
+    for key in (poster, frames + "frame_0001.jpg", evidence):
+        store.put_bytes(key, b"x")
+    for stage in ("validating", "scene_analysis", "geometry_proposal", "texturing", "packaging",
+                  "scene_validation"):  # fmt: skip
+        store.put_bytes(attempts[stage] + "result.json", b"{}")
+
+    with db.transaction() as conn:
+        queue.queue_run_outputs(conn, run_id, succeeded=True)
+    seed.exec("UPDATE jobs SET available_at = now() WHERE stage = 'artifact_cleanup'")
+    sup = Supervisor(db, store, settings, delay_fn=lambda attempt: 0.0)
+    assert sup.execute(queue.claim(db, "worker-test", "cpu")) == "succeeded"
+    left = sorted(store.list_keys(f"tenants/{pid}/runs/{run_id}/"))
+    assert left == sorted([poster, dataset, evidence])
+
+    layout = copy.deepcopy(capture["layout"])
+    layout["spawn"]["feet"] = [-0.5, 0.0, 0.25]
+    revision, _ = _revision(
+        seed, pid, run_id, layout, number=2, scene_id=capture["scene"], base=capture["revision"]
+    )
+    seed.job(
+        pid,
+        "texturing",
+        {"outputs": {"sceneRevisionId": revision, "layoutSource": "user"}},
+        run_id=run_id,
+        scene_revision_id=revision,
+    )
+    assert sup.execute(queue.claim(db, "worker-test", "cpu")) == "succeeded"
+    job = seed.one(
+        "SELECT result_manifest FROM jobs WHERE stage = 'texturing' AND scene_revision_id = %s",
+        revision,
+    )
+    outputs = job["result_manifest"]["outputs"]
+    assert outputs["coverage"]["registeredViews"] == CAMERAS
+    assert outputs["textureCoverage"]["wall"] > 0.9  # painted from the kept dataset
+    assert outputs["posterKey"] == poster
 
 
 def test_a_synthetic_run_paints_patterns_and_passes_the_poster_through(

@@ -40,6 +40,11 @@ def check_key(key: str) -> str:
     return key
 
 
+# Where ``preparing`` stores its frames inside its attempt prefix. camera_reconstruction
+# packs undistorted copies into its dataset, so they are disposable once the run ends.
+FRAMES_DIRECTORY = "images/"
+
+
 def attempt_prefix(project_id: str, run_id: str, stage: str, job_id: str, fence: int) -> str:
     # The job ID keeps concurrent jobs of one run (e.g. two layout revisions, each
     # starting at fence 1) from sharing mutable intermediate objects.

@@ -40,6 +40,10 @@ GPU_STAGES = frozenset({"camera_reconstruction"})
 # A layout save re-runs these stages on the revision's own layout, reusing the run's frames
 # and poses (see stages/texture.py).
 LAYOUT_STAGES = ("geometry_proposal", "texturing", "packaging", "scene_validation")
+# The run stages a layout save reads once the run has succeeded: the poster (preparing),
+# the undistorted frames and poses (camera_reconstruction), and the frame transform and
+# capture evidence (normalizing). What the other run stages wrote is disposable by then.
+RETEXTURE_STAGES = ("preparing", "camera_reconstruction", "normalizing")
 
 TOOL_VERSIONS = {
     # Must match infra/Dockerfile.worker-gpu; verify each tool's --help in that image.

@@ -6,8 +6,10 @@ kinds of prefix:
 * an attempt prefix ``tenants/{p}/runs/{r}/attempts/{stage}/{job}/{fence}/`` of an
   attempt that was lost or cancelled before it committed (the reaper's view, or a
   job cancelled before a later attempt could sweep what it left), one a worker
-  failed to delete before the job ended, the outputs of a run that ended unfinished,
-  or the outputs of a layout save whose revision is now valid or invalid;
+  failed to delete before the job ended, the outputs of a run that ended (all of them
+  if it ended unfinished, those no layout save reads if it succeeded), or the outputs
+  of a layout save whose revision is now valid or invalid. For ``preparing`` it may
+  name just the frames directory inside the attempt (``.../{fence}/images/``);
 * a scene prefix ``tenants/{p}/scenes/{revision}/`` of a revision that is now invalid,
   because its pipeline failed or was cancelled before validation committed it.
 
@@ -22,9 +24,12 @@ are kept:
   failed layout save usually stays the draft, and moving the pointer on later queues
   no cleanup, so keeping it here would keep its files until the project is deleted.)
 * the attempt prefix a succeeded job committed under (its last fence), while its run
-  has not failed or been cancelled. A succeeded camera_reconstruction holds the frames
-  that layout re-texturing needs. A layout save's job is kept only while its revision
-  is pending. The job's earlier fences are stale and deleted.
+  is still processing. Once the run has succeeded, only the stages that layout saves
+  re-texture from keep theirs (``RETEXTURE_STAGES``: the poster, the dataset of
+  undistorted frames and poses, and the frame transform with the capture evidence),
+  and the preparing frames go too, since the dataset holds them undistorted. A layout
+  save's job is kept only while its revision is pending. The job's earlier fences are
+  stale and deleted.
 
 Every requested prefix is checked before anything is deleted.
 """
@@ -36,8 +41,9 @@ import re
 from functools import partial
 from typing import Any
 
+from andarilho_worker.artifacts import FRAMES_DIRECTORY
 from andarilho_worker.errors import StageError
-from andarilho_worker.recipes import LEGACY_RUN_STAGES, RUN_STAGES
+from andarilho_worker.recipes import LEGACY_RUN_STAGES, RETEXTURE_STAGES, RUN_STAGES
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
 log = logging.getLogger(__name__)
@@ -48,7 +54,7 @@ _UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
 ATTEMPT = re.compile(
     rf"tenants/(?P<project>{_UUID})/runs/(?P<run>{_UUID})/attempts/"
     rf"(?P<stage>{'|'.join(RUN_STAGES + LEGACY_RUN_STAGES)})/(?P<job>{_UUID})/"
-    rf"(?P<fence>[1-9][0-9]*)/"
+    rf"(?P<fence>[1-9][0-9]*)/(?P<frames>{re.escape(FRAMES_DIRECTORY)})?"
 )
 SCENE = re.compile(rf"tenants/(?P<project>{_UUID})/scenes/(?P<revision>{_UUID})/")
 
@@ -80,8 +86,12 @@ def _target(project_id: str, prefix: object) -> tuple[str, str, re.Match[str]]:
     if isinstance(prefix, str):
         for kind, pattern in (("attempt", ATTEMPT), ("scene", SCENE)):
             match = pattern.fullmatch(prefix)
-            if match is not None and match["project"] == project_id:
-                return kind, prefix, match
+            if match is None or match["project"] != project_id:
+                continue
+            # Only preparing stores frames; any other sub-prefix is not an artifact.
+            if kind == "attempt" and match["frames"] and match["stage"] != "preparing":
+                break
+            return kind, prefix, match
     raise _refuse()
 
 
@@ -104,9 +114,11 @@ def _revision_keep_reason(conn: Any, *, project_id: str, revision_id: str) -> st
     return None
 
 
-def _job_keep_reason(conn: Any, *, project_id: str, job_id: str, fence: int) -> str | None:
+def _job_keep_reason(
+    conn: Any, *, project_id: str, job_id: str, fence: int, frames: bool = False
+) -> str | None:
     row = conn.execute(
-        "SELECT j.state, j.fencing_token, j.scene_revision_id, r.status AS run_status, "
+        "SELECT j.state, j.stage, j.fencing_token, j.scene_revision_id, r.status AS run_status, "
         "v.validation_state FROM jobs j "
         "LEFT JOIN reconstruction_runs r ON r.id = j.run_id AND r.project_id = j.project_id "
         "LEFT JOIN scene_revisions v ON v.id = j.scene_revision_id "
@@ -130,6 +142,13 @@ def _job_keep_reason(conn: Any, *, project_id: str, job_id: str, fence: int) -> 
     # a new run, so nothing reads what its stages wrote.
     if row["run_status"] in ("failed", "cancelled"):
         return None
+    if row["run_status"] == "succeeded":
+        # Layout saves re-texture from the poster, the dataset and the frame transform
+        # alone. Packaging copied the rest of what the scene needs into its own prefix,
+        # and the other outputs (the preparing frames among them) only fed the next stage.
+        if frames or row["stage"] not in RETEXTURE_STAGES:
+            return None
+        return "layout saves re-texture from the attempt"
     return "the attempt's job succeeded"
 
 
@@ -158,6 +177,7 @@ def run(ctx: StageContext) -> StageResult:
                     project_id=ctx.project_id,
                     job_id=match["job"],
                     fence=int(match["fence"]),
+                    frames=bool(match["frames"]),
                 )
             )
         if reason is not None:

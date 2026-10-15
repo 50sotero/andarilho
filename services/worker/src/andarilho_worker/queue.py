@@ -22,9 +22,10 @@ from typing import Any
 import psycopg
 from psycopg.types.json import Jsonb
 
-from andarilho_worker.artifacts import attempt_prefix, scene_prefix
+from andarilho_worker.artifacts import FRAMES_DIRECTORY, attempt_prefix, scene_prefix
 from andarilho_worker.db import Database
 from andarilho_worker.errors import Cancelled, LeaseLost, error_body
+from andarilho_worker.recipes import RETEXTURE_STAGES
 
 log = logging.getLogger(__name__)
 # Storage cleanup waits this long so that a worker which lost its lease (but may still
@@ -501,14 +502,18 @@ def fail_run_revision(conn: psycopg.Connection, run_id: str, finding: Mapping[st
         _queue_scene_cleanup(conn, str(row["project_id"]), str(row["id"]))
 
 
-def queue_run_outputs(conn: psycopg.Connection, run_id: str) -> None:
-    """Queue what a run's succeeded stages wrote, once the run has ended unfinished.
+def queue_run_outputs(conn: psycopg.Connection, run_id: str, *, succeeded: bool = False) -> None:
+    """Queue what a run's succeeded stages wrote that nothing will read again.
 
     A failed or cancelled run never had a valid scene (scene_validation succeeds the
-    run in the same transaction), so no layout save can read these outputs, and a retry
-    is a new run with its own prefixes. Without this the frames and datasets the
-    finished stages wrote would stay until the project is deleted. Each job's current
-    fence is the one it committed under; earlier fences were swept or queued already.
+    run in the same transaction), so no layout save can read its outputs, and a retry
+    is a new run with its own prefixes: everything goes. A run that ``succeeded`` keeps
+    only what layout saves re-texture from (``RETEXTURE_STAGES``), less the preparing
+    frames, which its dataset holds undistorted. Packaging copied the textured model,
+    collision and poster into the scene's own prefix, and the other outputs only fed
+    the next stage. Without this they would stay until the project is deleted. Each
+    job's current fence is the one it committed under; earlier fences were swept or
+    queued already.
     """
     rows = conn.execute(
         "SELECT id, project_id, stage, fencing_token FROM jobs "
@@ -519,11 +524,17 @@ def queue_run_outputs(conn: psycopg.Connection, run_id: str) -> None:
     by_project: dict[str, list[str]] = {}
     for row in rows:
         project_id = str(row["project_id"])
-        by_project.setdefault(project_id, []).append(
-            attempt_prefix(project_id, run_id, row["stage"], str(row["id"]), row["fencing_token"])
+        prefix = attempt_prefix(
+            project_id, run_id, row["stage"], str(row["id"]), row["fencing_token"]
         )
+        if succeeded and row["stage"] == "preparing":
+            prefix += FRAMES_DIRECTORY
+        elif succeeded and row["stage"] in RETEXTURE_STAGES:
+            continue
+        by_project.setdefault(project_id, []).append(prefix)
+    reason = "run_succeeded" if succeeded else "run_ended"
     for project_id, prefixes in by_project.items():
-        queue_artifact_cleanup(conn, project_id, prefixes, reason="run_ended")
+        queue_artifact_cleanup(conn, project_id, prefixes, reason=reason)
 
 
 def queue_revision_outputs(conn: psycopg.Connection, scene_revision_id: str) -> None:
@@ -842,6 +853,7 @@ def complete_job(
                 (job.run_id,),
             )
             settle_ledger(conn, job.run_id)  # type: ignore[arg-type]
+            queue_run_outputs(conn, job.run_id, succeeded=True)  # type: ignore[arg-type]
         elif finish_run and job.scene_revision_id is not None:
             # The layout save is done and its revision valid: nothing reads its attempts.
             queue_revision_outputs(conn, job.scene_revision_id)

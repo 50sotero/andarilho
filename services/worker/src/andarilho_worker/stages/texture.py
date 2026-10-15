@@ -36,6 +36,7 @@ from andarilho_worker.geometry.texture import (
     procedural_texture_layout,
     texture_layout,
 )
+from andarilho_worker.recipes import RETEXTURE_STAGES
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
 MODEL_TYPE = "model/gltf-binary"
@@ -51,8 +52,8 @@ def _load(conn: Any, ctx: StageContext, revision_id: str) -> dict[str, Any]:
     rows = conn.execute(
         "SELECT stage, result_manifest FROM jobs WHERE run_id = %s AND project_id = %s "
         "AND scene_revision_id IS NULL AND state = 'succeeded' "
-        "AND stage IN ('preparing', 'camera_reconstruction', 'normalizing')",
-        (ctx.run_id, ctx.project_id),
+        "AND stage = ANY(%s)",
+        (ctx.run_id, ctx.project_id, list(RETEXTURE_STAGES)),
     ).fetchall()
     stages = {row["stage"]: (row["result_manifest"] or {}).get("outputs") or {} for row in rows}
     return {"revision": revision, "stages": stages}
