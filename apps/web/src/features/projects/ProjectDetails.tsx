@@ -43,6 +43,8 @@ export function ProjectDetails({ projectId }: { projectId: string }) {
   const [title, setTitle] = useState("");
   const [actionError, setActionError] = useState<FriendlyError | null>(null);
   const [status, setStatus] = useState("");
+  const [sceneError, setSceneError] = useState<FriendlyError | null>(null);
+  const [sceneAttempt, setSceneAttempt] = useState(0);
   const titleId = useId();
 
   // Draft scene data is review material for owners/editors; viewers never request it.
@@ -52,22 +54,27 @@ export function ProjectDetails({ projectId }: { projectId: string }) {
     if (!sceneId) return null;
     const result = await api.getScene(sceneId);
     setScene(result.data);
+    setSceneError(null);
     return result.etag;
   }, [sceneId]);
 
   useEffect(() => {
     if (!sceneId) return;
     let active = true;
-    api
-      .getScene(sceneId)
-      .then((result) => {
-        if (active) setScene(result.data);
-      })
-      .catch(() => undefined);
+    api.getScene(sceneId).then(
+      (result) => {
+        if (!active) return;
+        setScene(result.data);
+        setSceneError(null);
+      },
+      (err: unknown) => {
+        if (active) setSceneError(toFriendlyError(err));
+      },
+    );
     return () => {
       active = false;
     };
-  }, [sceneId]);
+  }, [sceneId, sceneAttempt]);
 
   async function rename(event: FormEvent) {
     event.preventDefault();
@@ -192,7 +199,9 @@ export function ProjectDetails({ projectId }: { projectId: string }) {
           <Card>
             <SharePanel
               sceneId={detail.scene.id}
-              approvedRevisionId={approvedRevisionId}
+              approvedRevisionId={scene ? approvedRevisionId : undefined}
+              sceneError={sceneError}
+              onRetryScene={() => setSceneAttempt((n) => n + 1)}
               shares={shares}
               getSceneEtag={loadScene}
               onChanged={() => void reload()}

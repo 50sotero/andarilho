@@ -34,13 +34,21 @@ function shareState(share: Share): { label: string; tone: "good" | "bad" | "neut
 export function SharePanel({
   sceneId,
   approvedRevisionId,
+  sceneError = null,
+  onRetryScene,
   shares,
   getSceneEtag,
   onChanged,
 }: {
   sceneId: string;
-  /** Approved revision that would be published, or null when nothing is approved. */
-  approvedRevisionId: string | null;
+  /**
+   * Approved revision that would be published, null when nothing is approved, or
+   * undefined until the scene's revisions have been read.
+   */
+  approvedRevisionId: string | null | undefined;
+  /** Why the scene's revisions could not be read; shown with a retry. */
+  sceneError?: FriendlyError | null;
+  onRetryScene?: () => void;
   shares: Share[];
   /** Fetches the current scene ETag (required by If-Match on publish). */
   getSceneEtag: () => Promise<string | null>;
@@ -193,9 +201,15 @@ export function SharePanel({
             {busy ? "Publishing..." : "Publish and create link"}
           </Button>
         </div>
-      ) : (
+      ) : approvedRevisionId === null ? (
         <p className="text-sm text-stone-700 dark:text-stone-300">
           Approve a scene revision in Review before publishing it.
+        </p>
+      ) : sceneError ? (
+        <ErrorNotice error={sceneError} onRetry={onRetryScene} />
+      ) : (
+        <p aria-live="polite" className="text-sm text-stone-700 dark:text-stone-300">
+          Checking for an approved revision...
         </p>
       )}
 
