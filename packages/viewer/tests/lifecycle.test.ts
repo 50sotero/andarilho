@@ -287,8 +287,12 @@ describe("viewer lifecycle", () => {
     const state = viewer.getState();
     expect(state).toMatchObject({ error: { code: "render-load-failed", recoverable: true } });
     expect(JSON.stringify(state)).not.toContain("secret.example");
+    // The failed engine stops rendering and frees the GPU before the page unmounts it.
+    expect(h.spark.dispose).toHaveBeenCalledTimes(1);
+    expect(h.renderer.dispose).toHaveBeenCalledTimes(1);
+    expect(h.renderer.setAnimationLoop).toHaveBeenLastCalledWith(null);
     viewer.dispose();
-    expect(h.spark.dispose).toHaveBeenCalled();
+    expect(h.spark.dispose).toHaveBeenCalledTimes(1);
   });
 
   it("falls back to inspection when collision is missing or invalid", async () => {
@@ -333,6 +337,13 @@ describe("viewer lifecycle", () => {
       }),
     );
     expect(viewer.enterWalk()).toBe(false);
+    expect(h.renderer.setAnimationLoop).toHaveBeenLastCalledWith(null);
+    expect(h.renderer.dispose).toHaveBeenCalledTimes(1);
+    expect(h.spark.dispose).toHaveBeenCalledTimes(1);
+    expect(container.contains(h.renderer.domElement)).toBe(false);
+    h.renderer.render.mockClear();
+    h.loop.current?.(100);
+    expect(h.renderer.render).not.toHaveBeenCalled();
     viewer.dispose();
   });
 

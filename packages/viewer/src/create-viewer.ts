@@ -279,7 +279,6 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
     options.onStateChange?.(state);
     for (const listener of [...listeners]) listener(state);
   };
-  const fail = (error: ViewerError): void => dispatch({ type: "fail", error });
 
   // Engine state shared by the closures below.
   let deps: ViewerDependencies | null = null;
@@ -303,6 +302,21 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
   let governor: QualityGovernor | null = null;
   const scene = new Scene();
   const camera = new PerspectiveCamera(65, 1, 0.05, 250);
+  /** Removes the canvas and frees the render loop, splat scene, physics and input. */
+  const release = (): void => {
+    resources.disposeAll();
+    world = null;
+    sparkScene = null;
+    overlay = null;
+    input = null;
+    renderer = null;
+  };
+  // Nothing leaves the error state (the page builds a new viewer, e.g. from a fresh
+  // envelope), so a failed engine stops rendering and frees its resources at once.
+  const fail = (error: ViewerError): void => {
+    release();
+    dispatch({ type: "fail", error });
+  };
   const accumulator = new FixedStepAccumulator({
     step: 1 / 60,
     maxFrameDelta: 0.1,
@@ -584,8 +598,6 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
       });
     } catch (error) {
       if (disposed) return;
-      resources.disposeAll();
-      renderer = null;
       fail({
         code: "init-failed",
         message: safeMessage(error, "The viewer could not start."),
@@ -789,12 +801,7 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
       if (disposed) return;
       disposed = true;
       abort.abort();
-      resources.disposeAll();
-      world = null;
-      sparkScene = null;
-      overlay = null;
-      input = null;
-      renderer = null;
+      release();
       dispatch({ type: "dispose" });
       listeners.clear();
     },
