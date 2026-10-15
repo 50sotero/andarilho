@@ -8,6 +8,9 @@ import type { QualityProfileName } from "./render/quality";
  *   context-lost -> loading (render rebuilt after restore)
  *   any -> disposed (terminal)
  *
+ * A context loss during loading keeps no resume mode: the load it interrupted decides
+ * the mode once its collision step settles (see create-viewer.ts).
+ *
  * Walking is only reachable from ready(walkable), which the engine enters only
  * after render loading, collision loading/validation, Rapier initialization and
  * spawn clearance all succeed.
@@ -54,7 +57,12 @@ export type ViewerState =
     }
   | { status: "walking"; quality: QualityProfileName; pointerLocked: boolean }
   | { status: "error"; error: ViewerError }
-  | { status: "context-lost"; resumeMode: ViewerMode; inspectionReason: string | null }
+  | {
+      status: "context-lost";
+      /** The mode to return to; null when the load interrupted by the loss has not settled. */
+      resumeMode: ViewerMode | null;
+      inspectionReason: string | null;
+    }
   | { status: "disposed" };
 
 export type ViewerStatus = ViewerState["status"];
@@ -150,7 +158,8 @@ export function transition(state: ViewerState, event: ViewerEvent): ViewerState 
         return { status: "context-lost", resumeMode: "walkable", inspectionReason: null };
       }
       if (state.status === "loading") {
-        return { status: "context-lost", resumeMode: "inspection", inspectionReason: null };
+        // The collision step of this load may still be running, so no mode is known yet.
+        return { status: "context-lost", resumeMode: null, inspectionReason: null };
       }
       return state;
   }

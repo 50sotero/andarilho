@@ -1,7 +1,9 @@
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import {
+  Line,
   Mesh,
   MeshBasicMaterial,
+  Points,
   SRGBColorSpace,
   Texture,
   type BufferGeometry,
@@ -200,6 +202,8 @@ export function createMeshScene(options: MeshSceneOptions): MeshSceneHandle {
       side: lit.side,
       transparent: lit.transparent,
       opacity: lit.opacity,
+      // The cutoff of a glTF MASK material, which is drawn through this replacement.
+      alphaTest: lit.alphaTest,
     });
     // The source's other textures (normal, roughness, ...) are no longer drawn but
     // still belong to the scene, so they are released with it.
@@ -209,28 +213,36 @@ export function createMeshScene(options: MeshSceneOptions): MeshSceneHandle {
     return track(replacement);
   };
 
+  /** Takes ownership of a node's geometry and materials, so disposal frees them. */
+  const ownNode = (node: Mesh | Points | Line): void => {
+    geometries.add(node.geometry);
+    for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
+      materials.add(material);
+      trackTextures(material);
+    }
+  };
+
   // Node transforms are identity by contract; freezing them skips per-frame work.
   const prepare = (object: Object3D): void => {
     object.traverse((node) => {
       node.updateMatrix();
       node.matrixAutoUpdate = false;
-      if (!(node instanceof Mesh)) return;
-      geometries.add(node.geometry);
-      node.material = Array.isArray(node.material)
-        ? node.material.map(unlit)
-        : unlit(node.material);
+      if (node instanceof Mesh) {
+        geometries.add(node.geometry);
+        node.material = Array.isArray(node.material)
+          ? node.material.map(unlit)
+          : unlit(node.material);
+      } else if (node instanceof Points || node instanceof Line) {
+        // Points and lines are unlit already (PointsMaterial, LineBasicMaterial).
+        ownNode(node);
+      }
     });
   };
 
   /** Takes ownership of a parsed graph that will not be drawn, so disposal still frees it. */
   const adoptGraph = (object: Object3D): void => {
     object.traverse((node) => {
-      if (!(node instanceof Mesh)) return;
-      geometries.add(node.geometry);
-      for (const material of Array.isArray(node.material) ? node.material : [node.material]) {
-        materials.add(material);
-        trackTextures(material);
-      }
+      if (node instanceof Mesh || node instanceof Points || node instanceof Line) ownNode(node);
     });
   };
 

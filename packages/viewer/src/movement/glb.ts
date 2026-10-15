@@ -552,9 +552,27 @@ export interface GlbWriteNode {
 }
 
 /**
- * Writes a minimal single-mesh GLB (one node, float positions, uint32 indices).
- * Used by tests and fixtures; the optional node transform lets tests produce
- * deliberately invalid assets.
+ * Per-axis minimum and maximum of the vertices, which glTF requires on POSITION
+ * accessors (GLTFLoader warns without them). An empty mesh has no bounds to give.
+ */
+function positionBounds(positions: Float32Array): { min?: number[]; max?: number[] } {
+  if (positions.length === 0) return {};
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i < positions.length; i += 3) {
+    for (let k = 0; k < 3; k++) {
+      const v = positions[i + k]!;
+      min[k] = Math.min(min[k]!, v);
+      max[k] = Math.max(max[k]!, v);
+    }
+  }
+  return { min, max };
+}
+
+/**
+ * Writes a minimal single-mesh GLB (one node, float positions with their bounds,
+ * uint32 indices). Used by tests and fixtures; the optional node transform lets tests
+ * produce deliberately invalid assets.
  */
 export function writeCollisionGlb(mesh: CollisionMesh, node: GlbWriteNode = {}): Uint8Array {
   const posBytes = mesh.positions.byteLength;
@@ -567,7 +585,13 @@ export function writeCollisionGlb(mesh: CollisionMesh, node: GlbWriteNode = {}):
     nodes: [{ mesh: 0, ...node }],
     meshes: [{ primitives: [{ attributes: { POSITION: 0 }, indices: 1, mode: 4 }] }],
     accessors: [
-      { bufferView: 0, componentType: 5126, count: mesh.positions.length / 3, type: "VEC3" },
+      {
+        bufferView: 0,
+        componentType: 5126,
+        count: mesh.positions.length / 3,
+        type: "VEC3",
+        ...positionBounds(mesh.positions),
+      },
       { bufferView: 1, componentType: 5125, count: mesh.indices.length, type: "SCALAR" },
     ],
     bufferViews: [

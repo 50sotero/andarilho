@@ -130,6 +130,12 @@ class CollisionFetchError extends Error {
   }
 }
 
+/** The outcome of the collision and navigation step of a load. */
+interface PhysicsLoad {
+  mode: ViewerMode;
+  reason: string | null;
+}
+
 async function defaultFetchBytes(url: string, signal: AbortSignal): Promise<ArrayBuffer> {
   const response = await fetch(url, { signal, credentials: "omit" });
   if (!response.ok) throw new Error(`Collision asset request failed (${response.status})`);
@@ -317,6 +323,12 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
    * rather than attached, and its outcome is not reported.
    */
   let renderEpoch = 0;
+  /**
+   * The collision and navigation step of the first load. Physics is not reloaded by a
+   * context-loss recovery, so a recovery that starts while this step is still running
+   * waits for it and resumes in the mode it settles to.
+   */
+  let physicsLoad: Promise<PhysicsLoad> | null = null;
   let world: CollisionWorldLike | null = null;
   let collisionMesh: CollisionMesh | null = null;
   let collisionStats: CollisionMeshStats | null = null;
@@ -536,7 +548,7 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
     return null;
   };
 
-  const loadPhysics = async (): Promise<{ mode: ViewerMode; reason: string | null }> => {
+  const loadPhysics = async (): Promise<PhysicsLoad> => {
     if (!deps || !source || !player)
       return { mode: "inspection", reason: "Viewer not initialized." };
     const nav = source.manifest.navigation;
@@ -605,6 +617,33 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
     return { mode: "walkable", reason: null };
   };
 
+  /**
+   * Reports a load whose render is attached: ready in the mode its collision step
+   * settled to, or a recoverable error when the collision download failed.
+   */
+  const finishLoad = (physics: PromiseSettledResult<PhysicsLoad>): void => {
+    if (physics.status === "rejected" && physics.reason instanceof CollisionFetchError) {
+      fail({
+        code: "collision-load-failed",
+        message: "The walking geometry could not be downloaded.",
+        recoverable: true,
+      });
+      return;
+    }
+    const outcome: PhysicsLoad =
+      physics.status === "fulfilled"
+        ? physics.value
+        : { mode: "inspection", reason: "Collision setup failed." };
+    inspectionReason = outcome.reason;
+    if (contextLost) return;
+    dispatch({
+      type: "loaded",
+      mode: outcome.mode,
+      inspectionReason: outcome.reason,
+      quality: qualityName,
+    });
+  };
+
   const start = async (): Promise<void> => {
     try {
       deps = resolveDependencies(options.dependencies);
@@ -636,10 +675,9 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
       if (disposed) return;
 
       const epoch = renderEpoch;
-      const [renderResult, physicsResult] = await Promise.allSettled([
-        loadRender(epoch),
-        loadPhysics(),
-      ]);
+      const physics = loadPhysics();
+      physicsLoad = physics;
+      const [renderResult, physicsResult] = await Promise.allSettled([loadRender(epoch), physics]);
       if (disposed) return;
       // A context-loss recovery started while loading and owns the render now; its
       // outcome (including any cancellation seen above) is reported there instead.
@@ -654,29 +692,7 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
         return;
       }
       dispatch({ type: "progress", progress: { render: "done" } });
-      if (
-        physicsResult.status === "rejected" &&
-        physicsResult.reason instanceof CollisionFetchError
-      ) {
-        fail({
-          code: "collision-load-failed",
-          message: "The walking geometry could not be downloaded.",
-          recoverable: true,
-        });
-        return;
-      }
-      const physics =
-        physicsResult.status === "fulfilled"
-          ? physicsResult.value
-          : { mode: "inspection" as const, reason: "Collision setup failed." };
-      inspectionReason = physics.reason;
-      if (contextLost) return;
-      dispatch({
-        type: "loaded",
-        mode: physics.mode,
-        inspectionReason: physics.reason,
-        quality: qualityName,
-      });
+      finishLoad(physicsResult);
     } catch (error) {
       if (disposed) return;
       fail({
@@ -788,8 +804,6 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
 
   const recoverRender = async (): Promise<void> => {
     if (state.status !== "context-lost") return;
-    const resume = state.resumeMode;
-    const reason = state.inspectionReason;
     // Starting a new epoch supersedes any render load still in flight.
     const epoch = ++renderEpoch;
     dispatch({ type: "load-start" });
@@ -799,14 +813,6 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
       meshScene?.dispose();
       meshScene = null;
       await loadRender(epoch);
-      if (isSuperseded(epoch)) return;
-      const mode: ViewerMode = resume === "walkable" && world ? "walkable" : "inspection";
-      dispatch({
-        type: "loaded",
-        mode,
-        inspectionReason: mode === "inspection" ? reason : null,
-        quality: qualityName,
-      });
     } catch {
       if (isSuperseded(epoch)) return;
       fail({
@@ -814,7 +820,13 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
         message: "The graphics context was lost and the scene could not be restored.",
         recoverable: true,
       });
+      return;
     }
+    if (isSuperseded(epoch)) return;
+    // start() sets this synchronously, before any canvas event can be delivered.
+    const [physics] = await Promise.allSettled([physicsLoad!]);
+    if (isSuperseded(epoch)) return;
+    finishLoad(physics);
   };
 
   const handle: ViewerHandle = {

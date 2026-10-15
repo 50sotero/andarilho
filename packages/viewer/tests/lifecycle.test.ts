@@ -1,18 +1,11 @@
 // @vitest-environment jsdom
 import type { DeliveryEnvelope } from "@andarilho/scene-contract";
-import {
-  BoxGeometry,
-  Group,
-  Mesh,
-  MeshStandardMaterial,
-  Quaternion,
-  Scene,
-  type WebGLRenderer,
-} from "three";
+import { BoxGeometry, Group, Matrix4, Mesh, MeshStandardMaterial, type WebGLRenderer } from "three";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createViewer,
   type CollisionWorldLike,
+  type CreateMeshSceneArgs,
   type CreateViewerOptions,
   type RendererLike,
   type ViewerDependencies,
@@ -225,6 +218,56 @@ function envelope(): DeliveryEnvelope {
       },
     },
   };
+}
+
+/** A render path, so one set of scenarios covers both the GLB and the Spark engine. */
+interface RenderPath {
+  name: string;
+  envelope: () => DeliveryEnvelope;
+  /** Installs render loads that stay pending until the test settles them. */
+  fake: (h: Harness) => RenderFake;
+}
+
+interface RenderFake {
+  /** How many render loads have started. */
+  loads: () => number;
+  /** Settles the render load started at `index` (0 is the first). */
+  settle: (index: number) => void;
+}
+
+const RENDER_PATHS: RenderPath[] = [
+  {
+    name: "glb",
+    envelope: () => glbEnvelope(),
+    fake: (h) => ({
+      loads: () => h.createMeshScene.mock.calls.length,
+      settle: (index) => h.meshes[index]!.initialized.resolve(),
+    }),
+  },
+  {
+    name: "spark",
+    envelope: () => envelope(),
+    fake: (h) => {
+      const scenes: SparkFake[] = [];
+      h.deps.createSparkScene = vi.fn(() => {
+        const scene = fakeSparkScene();
+        scenes.push(scene);
+        return scene.handle;
+      });
+      return {
+        loads: () => scenes.length,
+        settle: (index) => scenes[index]!.initialized.resolve(),
+      };
+    },
+  },
+];
+
+function loseContext(h: Harness): void {
+  h.renderer.domElement.dispatchEvent(new Event("webglcontextlost", { cancelable: true }));
+}
+
+function restoreContext(h: Harness): void {
+  h.renderer.domElement.dispatchEvent(new Event("webglcontextrestored"));
 }
 
 let container: HTMLDivElement;
@@ -715,29 +758,33 @@ describe("viewer lifecycle", () => {
     // render transform (for the splat formats) must not move it. The writer contract is
     // not in this repo yet; this pins the viewer side.
     const h = harness();
-    const scene = new Scene();
     const cube = new Group();
     cube.add(new Mesh(new BoxGeometry(), new MeshStandardMaterial()));
-    h.deps.createMeshScene = (args) =>
+    const createMesh = vi.fn((args: CreateMeshSceneArgs) =>
       createMeshScene({
         renderer: args.renderer as WebGLRenderer,
-        scene,
+        scene: args.scene,
         url: args.url,
         maxAnisotropy: args.maxAnisotropy,
         onProgress: args.onProgress,
         fetch: (async () => new Response(new Uint8Array(8))) as unknown as typeof fetch,
         parse: async () => cube,
-      });
+      }),
+    );
+    h.deps.createMeshScene = createMesh;
     const env = glbEnvelope();
     // A 90 degree turn about +Y, plus a 2x scale: valid for splats, wrong for the GLB.
     env.manifest.worldFromDecodedRender = [0, 0, -2, 0, 0, 2, 0, 0, 2, 0, 0, 0, 0, 0, 0, 1];
     const { viewer } = start(h, { source: { kind: "delivery", envelope: env } });
     await vi.waitFor(() => expect(viewer.getState().status).toBe("ready"));
 
-    expect(scene.children).toContain(cube);
-    expect(cube.position.toArray()).toEqual([0, 0, 0]);
-    expect(cube.quaternion.equals(new Quaternion())).toBe(true);
-    expect(cube.scale.toArray()).toEqual([1, 1, 1]);
+    // The scene the viewer renders is the one the mesh was given; the mesh root must
+    // reach the world untransformed, with no transform from the manifest on the way.
+    const rendered = createMesh.mock.calls[0]![0].scene;
+    expect(rendered.children).toContain(cube);
+    expect(cube.parent).toBe(rendered);
+    rendered.updateMatrixWorld(true);
+    expect(cube.matrixWorld.equals(new Matrix4())).toBe(true);
     viewer.dispose();
   });
 
@@ -763,5 +810,98 @@ describe("viewer lifecycle", () => {
     expect(h.createMeshScene).toHaveBeenCalledTimes(3);
     expect(h.meshes[2]!.dispose).not.toHaveBeenCalled();
     viewer.dispose();
+  });
+
+  describe.each(RENDER_PATHS)("a context loss during the first load ($name)", (path) => {
+    it("resumes walkable once collision and navigation have settled", async () => {
+      const h = harness();
+      const render = path.fake(h);
+      const { viewer } = start(h, { source: { kind: "delivery", envelope: path.envelope() } });
+      await vi.waitFor(() => expect(h.world.setSpawn).toHaveBeenCalled());
+      await vi.waitFor(() => expect(render.loads()).toBe(1));
+
+      loseContext(h);
+      expect(viewer.getState()).toMatchObject({ status: "context-lost", resumeMode: null });
+      restoreContext(h);
+      await vi.waitFor(() => expect(render.loads()).toBe(2));
+      render.settle(1);
+
+      await vi.waitFor(() =>
+        expect(viewer.getState()).toMatchObject({ status: "ready", mode: "walkable" }),
+      );
+      expect(viewer.enterWalk()).toBe(true);
+      viewer.dispose();
+    });
+
+    it("waits for a collision step still running when the context is restored", async () => {
+      const h = harness();
+      const rapier = deferred<RapierModule>();
+      h.deps.initRapier = () => rapier.promise;
+      const render = path.fake(h);
+      const { viewer } = start(h, { source: { kind: "delivery", envelope: path.envelope() } });
+      await vi.waitFor(() => expect(render.loads()).toBe(1));
+
+      loseContext(h);
+      restoreContext(h);
+      await vi.waitFor(() => expect(render.loads()).toBe(2));
+      render.settle(1);
+      await new Promise((r) => setTimeout(r, 10));
+      // The render is back, but the interrupted load still decides the mode.
+      expect(viewer.getState().status).toBe("loading");
+
+      rapier.resolve({} as RapierModule);
+      await vi.waitFor(() =>
+        expect(viewer.getState()).toMatchObject({ status: "ready", mode: "walkable" }),
+      );
+      viewer.dispose();
+    });
+
+    it("resumes in inspection when navigation is not approved", async () => {
+      const h = harness();
+      const render = path.fake(h);
+      const env = path.envelope();
+      env.manifest.navigation!.approved = false;
+      const { viewer } = start(h, { source: { kind: "delivery", envelope: env } });
+      await vi.waitFor(() => expect(h.world.setSpawn).toHaveBeenCalled());
+      await vi.waitFor(() => expect(render.loads()).toBe(1));
+
+      loseContext(h);
+      restoreContext(h);
+      await vi.waitFor(() => expect(render.loads()).toBe(2));
+      render.settle(1);
+
+      await vi.waitFor(() =>
+        expect(viewer.getState()).toMatchObject({
+          status: "ready",
+          mode: "inspection",
+          inspectionReason: "Navigation geometry is not approved for walking.",
+        }),
+      );
+      expect(viewer.enterWalk()).toBe(false);
+      viewer.dispose();
+    });
+
+    it("reports a collision download that fails while the render is restored", async () => {
+      const h = harness();
+      const download = deferred<ArrayBuffer>();
+      h.deps.fetchBytes = () => download.promise;
+      const render = path.fake(h);
+      const { viewer } = start(h, { source: { kind: "delivery", envelope: path.envelope() } });
+      await vi.waitFor(() => expect(render.loads()).toBe(1));
+
+      loseContext(h);
+      restoreContext(h);
+      await vi.waitFor(() => expect(render.loads()).toBe(2));
+      download.reject(new Error("Collision asset request failed (403)"));
+      render.settle(1);
+
+      await vi.waitFor(() =>
+        expect(viewer.getState()).toMatchObject({
+          status: "error",
+          error: { code: "collision-load-failed", recoverable: true },
+        }),
+      );
+      viewer.dispose();
+    });
   });
 });

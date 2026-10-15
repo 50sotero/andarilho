@@ -1,11 +1,16 @@
 import {
   BoxGeometry,
+  BufferGeometry,
   DoubleSide,
   Group,
+  LineBasicMaterial,
+  LineSegments,
   Mesh,
   MeshBasicMaterial,
   MeshStandardMaterial,
   NoColorSpace,
+  Points,
+  PointsMaterial,
   Scene,
   SRGBColorSpace,
   Texture,
@@ -133,6 +138,19 @@ describe("mesh scene", () => {
     expect(material.transparent).toBe(true);
     expect(material.opacity).toBe(0.5);
     expect(sourceDispose).toHaveBeenCalledTimes(1);
+    handle.dispose();
+  });
+
+  it("keeps the alpha cutoff of a MASK material, so its cut-outs stay cut out", async () => {
+    const group = new Group();
+    const source = new MeshStandardMaterial({ map: new Texture(), alphaTest: 0.5 });
+    group.add(new Mesh(new BoxGeometry(), source));
+    const handle = createMeshScene(options({ parse: async () => group }));
+    await handle.initialized;
+
+    const material = (group.children[0] as Mesh).material as MeshBasicMaterial;
+    expect(material).toBeInstanceOf(MeshBasicMaterial);
+    expect(material.alphaTest).toBe(0.5);
     handle.dispose();
   });
 
@@ -265,6 +283,28 @@ describe("mesh scene", () => {
     unsized.dispose();
   });
 
+  it("hands the parser the exact bytes of a body read with a correct Content-Length", async () => {
+    const received: number[][] = [];
+    const handle = createMeshScene(
+      options({
+        // Three chunks that together are exactly the declared 9 bytes.
+        fetch: download(() =>
+          streamed([Uint8Array.of(1, 2, 3), Uint8Array.of(4, 5), Uint8Array.of(6, 7, 8, 9)], {
+            "content-length": "9",
+          }),
+        ),
+        parse: async (data) => {
+          received.push(Array.from(new Uint8Array(data)));
+          return new Group();
+        },
+      }),
+    );
+    await handle.initialized;
+
+    expect(received).toEqual([[1, 2, 3, 4, 5, 6, 7, 8, 9]]);
+    handle.dispose();
+  });
+
   it("caps anisotropy at the GPU limit and updates the loaded textures", async () => {
     const cube = texturedCube();
     const handle = createMeshScene(
@@ -303,6 +343,61 @@ describe("mesh scene", () => {
     expect(materialDispose).toHaveBeenCalledTimes(1);
     expect(textureDispose).toHaveBeenCalledTimes(1);
     expect(sourceDispose).toHaveBeenCalledTimes(1);
+  });
+
+  /** A group with one point cloud and one line set, each with its own texture-bearing material. */
+  function pointsAndLines() {
+    const texture = new Texture();
+    const group = new Group();
+    const points = new Points(new BufferGeometry(), new PointsMaterial({ map: texture }));
+    const lines = new LineSegments(new BufferGeometry(), new LineBasicMaterial());
+    group.add(points, lines);
+    return { texture, group, points, lines };
+  }
+
+  it("disposes the points and lines it draws, with their geometry, material and textures", async () => {
+    const { texture, group, points, lines } = pointsAndLines();
+    const scene = new Scene();
+    const handle = createMeshScene(options({ scene, parse: async () => group }));
+    await handle.initialized;
+
+    // Already unlit, so they keep their own materials.
+    expect(points.matrixAutoUpdate).toBe(false);
+    expect(lines.matrixAutoUpdate).toBe(false);
+    const pointsGeometry = vi.spyOn(points.geometry, "dispose");
+    const pointsMaterial = vi.spyOn(points.material as PointsMaterial, "dispose");
+    const linesGeometry = vi.spyOn(lines.geometry, "dispose");
+    const linesMaterial = vi.spyOn(lines.material as LineBasicMaterial, "dispose");
+    const textureDispose = vi.spyOn(texture, "dispose");
+    handle.dispose();
+
+    expect(scene.children).toHaveLength(0);
+    expect(pointsGeometry).toHaveBeenCalledTimes(1);
+    expect(pointsMaterial).toHaveBeenCalledTimes(1);
+    expect(linesGeometry).toHaveBeenCalledTimes(1);
+    expect(linesMaterial).toHaveBeenCalledTimes(1);
+    expect(textureDispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("frees the points and lines of a scene that finishes after disposal", async () => {
+    const scene = new Scene();
+    const { texture, group, points, lines } = pointsAndLines();
+    const parsed = deferred<Object3D>();
+    const parse = vi.fn(() => parsed.promise);
+    const handle = createMeshScene(options({ scene, parse }));
+    await vi.waitFor(() => expect(parse).toHaveBeenCalledTimes(1));
+    const pointsGeometry = vi.spyOn(points.geometry, "dispose");
+    const linesMaterial = vi.spyOn(lines.material as LineBasicMaterial, "dispose");
+    const textureDispose = vi.spyOn(texture, "dispose");
+
+    handle.dispose();
+    parsed.resolve(group);
+
+    await expect(handle.initialized).rejects.toMatchObject({ name: "AbortError" });
+    expect(scene.children).toHaveLength(0);
+    expect(pointsGeometry).toHaveBeenCalledTimes(1);
+    expect(linesMaterial).toHaveBeenCalledTimes(1);
+    expect(textureDispose).toHaveBeenCalledTimes(1);
   });
 
   it("aborts a download disposed early, adds nothing and rejects with AbortError", async () => {
