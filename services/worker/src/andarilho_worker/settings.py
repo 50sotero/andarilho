@@ -2,13 +2,20 @@
 
 from __future__ import annotations
 
+import math
 import os
 import socket
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
+from urllib.parse import urlparse
 
 LOCAL_SECRETS = frozenset({"local-development-only", "local-password", "example"})
+# The OpenAI-compatible gateway the API's AI advice also uses (README section 16).
+DEFAULT_AI_BASE_URL = "https://opencode.ai/inference/openai/v1"
+DEFAULT_AI_MODEL = "deepseek-v4.1-flash"
+TRUE_WORDS = frozenset({"1", "true", "yes"})
+FALSE_WORDS = frozenset({"", "0", "false", "no", "off"})
 
 
 def _int(env: Mapping[str, str], name: str, default: int) -> int:
@@ -19,6 +26,33 @@ def _int(env: Mapping[str, str], name: str, default: int) -> int:
     if value < 0:
         raise ValueError(f"{name} must be non-negative")
     return value
+
+
+def _flag(env: Mapping[str, str], name: str) -> bool:
+    word = (env.get(name) or "").strip().lower()
+    if word in TRUE_WORDS:
+        return True
+    if word in FALSE_WORDS:
+        return False
+    raise ValueError(f"{name} must be true or false")
+
+
+def _seconds(env: Mapping[str, str], name: str, default: float) -> float:
+    raw = (env.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be a positive number of seconds") from None
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(f"{name} must be a positive number of seconds")
+    return value
+
+
+def _text(env: Mapping[str, str], name: str) -> str | None:
+    """A trimmed variable; blank or unset means None."""
+    return (env.get(name) or "").strip() or None
 
 
 @dataclass(frozen=True)
@@ -45,6 +79,13 @@ class Settings:
     retry_base_seconds: float = 30.0
     retry_max_seconds: float = 900.0
     cleanup_reconcile_horizon_seconds: int = 900
+    # Scene analysis (scene_analysis stage), off unless AI_SCENE_ANALYSIS is set. The key is
+    # read from the file OPENCODE_API_KEY_FILE names at each call; it is never logged.
+    ai_scene_analysis: bool = False
+    ai_base_url: str = DEFAULT_AI_BASE_URL
+    ai_model: str = DEFAULT_AI_MODEL
+    opencode_api_key_file: str | None = None
+    ai_timeout_seconds: float = 120.0
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
@@ -75,6 +116,11 @@ class Settings:
             local_store_dir=Path(local_dir) if local_dir else None,
             app_env=env.get("APP_ENV", "development"),
             max_scratch_bytes=_int(env, "WORKER_MAX_SCRATCH_BYTES", 50 * 1024**3),
+            ai_scene_analysis=_flag(env, "AI_SCENE_ANALYSIS"),
+            ai_base_url=_text(env, "AI_BASE_URL") or DEFAULT_AI_BASE_URL,
+            ai_model=_text(env, "AI_MODEL") or DEFAULT_AI_MODEL,
+            opencode_api_key_file=_text(env, "OPENCODE_API_KEY_FILE"),
+            ai_timeout_seconds=_seconds(env, "AI_TIMEOUT_SECONDS", 120.0),
         )
         if settings.app_env == "production":
             secrets = {settings.s3_access_key_id, settings.s3_secret_access_key}
@@ -82,6 +128,10 @@ class Settings:
                 raise ValueError("local/example credentials are not allowed in production")
             if settings.local_store_dir is not None:
                 raise ValueError("the local object store is not allowed in production")
+            if settings.ai_scene_analysis and urlparse(settings.ai_base_url).scheme != "https":
+                raise ValueError(
+                    "AI_BASE_URL must use https in production when AI_SCENE_ANALYSIS is on"
+                )
         return settings
 
     def secrets(self) -> list[str]:
