@@ -357,14 +357,14 @@ def test_a_straight_walk_without_yaw_variation_still_recovers_up():
     world_up = ends[1] - ends[0]
     cosine = world_up @ UP / np.linalg.norm(world_up)
     assert math.degrees(math.acos(min(1.0, cosine))) < 2.0
-    # The walls run along canonical X, and the cameras look along it too: the camera
-    # headings give the wall direction (mod 90 degrees) in the levelled frame.
-    assert est.wall_yaw_source == "cameras"
+    # The walls run along canonical X, and so does the walk: its steps give the wall
+    # direction (mod 90 degrees) in the levelled frame.
+    assert est.wall_yaw_source == "walk"
     level = rotation_to_z(transform[0] @ UP)
     wall = level @ (transform[0] @ np.array([1.0, 0.0, 0.0]))
     expected = math.degrees(math.atan2(wall[1], wall[0])) % 90.0
     assert (est.wall_yaw_degrees - expected + 45.0) % 90.0 - 45.0 == pytest.approx(0.0, abs=2.0)
-    assert est.summary()["wallYawSource"] == "cameras"
+    assert est.summary()["wallYawSource"] == "walk"
 
 
 def test_sixty_sparse_points_give_a_frame_or_a_warning_not_a_crash():
@@ -378,8 +378,9 @@ def test_sixty_sparse_points_give_a_frame_or_a_warning_not_a_crash():
     est = frame_from_sparse(_sparse(room[chosen], transform, rng), images, seed=0)
     assert similarity_matrix_problem(est.matrix) is None
     assert est.method in ("floor_plane", "trainer_up")
-    # Below SPARSE_WALL_MIN_POINTS the points give no wall direction, whatever the cloud.
-    assert est.wall_yaw_source == "cameras"
+    # Below SPARSE_WALL_MIN_POINTS the points give no wall direction, whatever the cloud;
+    # the L-shaped walk runs along the walls.
+    assert est.wall_yaw_source == "walk"
     assert "wallYawSource" in est.summary()
 
 
@@ -402,6 +403,53 @@ def test_a_featureless_scene_with_turning_headings_has_no_wall_direction():
     assert est.wall_yaw_source == "none"
     assert est.wall_yaw_degrees == 0.0
     assert "wallYawSource" not in est.summary()
+
+
+def test_a_corridor_walk_aligns_the_walls_even_when_the_phone_looks_around():
+    # The first real capture: walking down a corridor while the phone sweeps 45 degrees to
+    # one side, then turning on the spot to face a side wall. The headings disagree with
+    # the walls; the walk's steps do not.
+    rng = np.random.default_rng(21)
+    transform = _colmap_transform()
+    n = 24  # frames about a second apart: steps of a third of a metre, swaying a little
+    along = np.concatenate([np.linspace(0, 5, n - 8), np.full(8, 5.0)])
+    centres = np.column_stack(
+        [along + rng.normal(0, 0.03, n), np.full(n, 1.5), rng.normal(0, 0.04, n)]
+    )
+    sweep = np.concatenate([np.linspace(-45, 0, n - 8), np.linspace(0, -90, 8)])
+    pitch = math.radians(15.0)
+    forwards = np.column_stack([
+        np.cos(np.radians(sweep)) * math.cos(pitch),
+        np.full(n, -math.sin(pitch)),
+        np.sin(np.radians(sweep)) * math.cos(pitch),
+    ])  # fmt: skip
+    # Too few points for a wall direction of their own.
+    cloud = _sparse(rng.uniform([-1, 0, -0.6], [6, 2.5, 0.6], (150, 3)), transform, rng)
+
+    est = frame_from_sparse(cloud, _cameras_for(centres, forwards, transform), seed=0)
+
+    assert est.wall_yaw_source == "walk"
+    a, scale, b = transform
+    world = _apply(est.matrix, scale * centres @ a.T + b)
+    steps = np.diff(world[:, [0, 2]], axis=0)
+    angles = np.degrees(np.arctan2(steps[:, 1], steps[:, 0]))
+    moving = np.linalg.norm(steps, axis=1) > 0.05
+    folded = (angles[moving] + 45.0) % 90.0 - 45.0
+    assert abs(float(np.median(folded))) < 2.0  # the corridor runs along a world axis
+
+
+def test_a_few_random_steps_do_not_claim_a_wall_direction():
+    rng = np.random.default_rng(3)
+    transform = _colmap_transform()
+    for seed in range(20):
+        steps = np.random.default_rng(seed).uniform(-np.pi, np.pi, 6)
+        offsets = np.column_stack([np.cos(steps), np.zeros(6), np.sin(steps)]) * 0.5
+        centres = np.vstack([[0.0, 1.5, 0.0], np.cumsum(offsets, axis=0) + [0.0, 1.5, 0.0]])
+        headings = np.radians(np.arange(0.0, 360.0, 360.0 / len(centres)))
+        forwards = np.column_stack([np.cos(headings), np.zeros(len(centres)), np.sin(headings)])
+        cloud = _sparse(rng.uniform([-3, 0, -3], [3, 2.5, 3], (150, 3)), transform, rng)
+        est = frame_from_sparse(cloud, _cameras_for(centres, forwards, transform), seed=0)
+        assert est.wall_yaw_source != "walk", seed
 
 
 def test_untrusted_points_are_left_out_of_the_frame():

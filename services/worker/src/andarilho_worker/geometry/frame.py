@@ -82,6 +82,10 @@ SPARSE_WALL_SAMPLE = 3000
 SPARSE_NEIGHBOURS = 6
 SPARSE_NEIGHBOUR_RADIUS = 3.0  # times the median nearest-neighbour distance
 SPARSE_MIN_PAIRS = 100
+# The walk's steps: the resultant length of their quadrupled directions is near 1 for a
+# walk along one axis (0.77 for steps spread +/- 20 degrees) and near 0 for random steps.
+SPARSE_MIN_WALK_STEPS = 3
+SPARSE_WALK_RESULTANT = 0.5
 HEADING_BINS = 90  # one-degree bins over a 90-degree wall period
 HEADING_SMOOTH = 3  # the histogram peak is smoothed over +/- this many bins
 
@@ -225,7 +229,7 @@ class FrameEstimate:
     camera_heights: list[float]  # min, median, max (meters)
     warnings: list[str] = field(default_factory=list)
     wall_yaw_degrees: float = 0.0  # sparse points only: the wall direction levelled out
-    wall_yaw_source: str = "none"  # "points", "cameras" or "none"
+    wall_yaw_source: str = "none"  # "points", "walk", "cameras" or "none"
 
     def summary(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -353,7 +357,7 @@ def frame_from_sparse(
     up = _up_from_cameras(centres, rights, ups, forwards, extent)
     level = rotation_to_z(up)
     levelled = xyz @ level.T
-    yaw, source = _wall_yaw(levelled, forwards @ level.T, seed)
+    yaw, source = _wall_yaw(levelled, centres @ level.T, forwards @ level.T, seed)
     turn = _rotation_about_z(-yaw)  # walls onto the X and Y axes of the levelled frame
     est = estimate_frame(
         levelled @ turn.T,
@@ -433,12 +437,16 @@ def _rotation_about_z(radians: float) -> np.ndarray:
     return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
 
 
-def _wall_yaw(levelled: np.ndarray, forwards: np.ndarray, seed: int) -> tuple[float, str]:
+def _wall_yaw(
+    levelled: np.ndarray, centres: np.ndarray, forwards: np.ndarray, seed: int
+) -> tuple[float, str]:
     """Dominant wall direction in the levelled frame, mod 90 degrees, and where it came from.
 
     Wall points give it from nearest-neighbour pairs (their XY direction runs along the
-    wall), when there are at least SPARSE_WALL_MIN_POINTS points; a walk along the walls
-    gives it from the camera headings. A flat histogram from either source means no
+    wall), when there are at least SPARSE_WALL_MIN_POINTS points. Otherwise the walk
+    itself does: people walk along corridors and room walls, so the camera path's steps,
+    weighted by length, point along them. A phone looking around while walking spreads
+    its headings, so they come last. A flat histogram from every source means no
     direction, which is zero.
     """
     histogram, pairs = _wall_pair_histogram(levelled, seed)
@@ -447,6 +455,20 @@ def _wall_yaw(levelled: np.ndarray, forwards: np.ndarray, seed: int) -> tuple[fl
         yaw, strength = _histogram_peak(histogram)
         if strength >= SPARSE_WALL_PEAK:
             return yaw, "points"
+    steps = np.diff(centres[:, :2], axis=0)
+    lengths = np.linalg.norm(steps, axis=1)
+    moved = lengths > 1e-9
+    if moved.sum() >= SPARSE_MIN_WALK_STEPS:
+        # A handheld walk wobbles by several degrees, so take the length-weighted circular
+        # mean of the step directions with a 90-degree period (angles quadrupled) rather
+        # than a narrow histogram peak; its resultant length says how consistent it is.
+        # Random steps reach about 2 / sqrt(n) by chance, so few steps need a higher bar.
+        angles = np.arctan2(steps[moved, 1], steps[moved, 0])
+        weights = lengths[moved]
+        resultant = np.sum(weights * np.exp(4j * angles)) / weights.sum()
+        effective = weights.sum() ** 2 / float(np.sum(weights**2))
+        if abs(resultant) >= max(SPARSE_WALK_RESULTANT, 2.0 / math.sqrt(effective)):
+            return float(np.angle(resultant)) / 4.0, "walk"
     # Limitation: the heading gate is weak. Uniform random headings clear SPARSE_WALL_PEAK
     # in all 40 seeds at 1, 3, 10 and 40 cameras (median strengths 0.143, 0.048, 0.043 and
     # 0.025), so "cameras" is a weak hint about the walls, not a confirmed direction.
@@ -534,10 +556,10 @@ def _cell_members(
     return np.concatenate([order[starts[p] : starts[p] + counts[p]] for p in pos])
 
 
-def _mod90_histogram(angles: np.ndarray) -> np.ndarray:
-    """Counts of angles (radians) folded into one 90-degree period, in one-degree bins."""
+def _mod90_histogram(angles: np.ndarray, weights: np.ndarray | None = None) -> np.ndarray:
+    """Counts (or weights) of angles (radians) folded into one 90-degree period, by degree."""
     bins = np.floor(np.mod(np.degrees(angles), 90.0)).astype(np.int64) % HEADING_BINS
-    return np.bincount(bins, minlength=HEADING_BINS).astype(np.float64)
+    return np.bincount(bins, weights=weights, minlength=HEADING_BINS).astype(np.float64)
 
 
 def _histogram_peak(histogram: np.ndarray) -> tuple[float, float]:
