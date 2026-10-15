@@ -5,6 +5,7 @@ import io
 import json
 import math
 import struct
+import tracemalloc
 import warnings
 from pathlib import Path
 
@@ -76,7 +77,7 @@ def _two_quads(pages: list[np.ndarray] | None = None) -> TexturedMesh:
         kind="wall",
         positions=np.array([[0, 0, 0], [0, 2.5, 0], [0, 2.5, 2], [0, 0, 2]], dtype=np.float64),
         normals=np.tile(np.array([1.0, 0.0, 0.0]), (4, 1)),
-        uvs=np.array([[0, 1], [0, 0], [1, 0], [1, 1]], dtype=np.float64),
+        uvs=np.array([[1, 1], [1, 0], [0, 0], [0, 1]], dtype=np.float64),
         indices=np.array([[0, 1, 2], [0, 2, 3]]),
         page=1,
         extras={"wallId": "w0"},
@@ -126,6 +127,68 @@ def _repack(data: bytes, mutate) -> bytes:
     doc, bin_chunk = _split_glb(data)
     mutate(doc)
     return _pack_glb(doc, bin_chunk)
+
+
+def _with_trailing(data: bytes, extra: bytes) -> bytes:
+    """Append bytes after the last chunk and make the header's total length match."""
+    buf = bytearray(data + extra)
+    struct.pack_into("<I", buf, 8, len(buf))
+    return bytes(buf)
+
+
+def _without_bin(data: bytes) -> bytes:
+    """The same GLB with its BIN chunk dropped, so only the header and JSON chunk remain."""
+    json_end = 20 + struct.unpack_from("<I", data, 12)[0]
+    head = bytearray(data[:json_end])
+    struct.pack_into("<I", head, 8, json_end)
+    return bytes(head)
+
+
+def _grid_mesh(side: int) -> tuple[np.ndarray, np.ndarray]:
+    """A flat side x side grid of quads in the plane y=0: 2 * side**2 triangles."""
+    xs, zs = np.meshgrid(np.arange(side + 1.0), np.arange(side + 1.0))
+    positions = np.column_stack([xs.ravel(), np.zeros(xs.size), zs.ravel()])
+    rows, cols = np.meshgrid(np.arange(side), np.arange(side), indexing="ij")
+    a = (rows * (side + 1) + cols).ravel()
+    b, c = a + 1, a + side + 1
+    d = c + 1
+    return positions, np.vstack([np.column_stack([a, b, d]), np.column_stack([a, d, c])])
+
+
+def _instanced_glb(positions: np.ndarray, indices: np.ndarray, copies: int) -> bytes:
+    """A collision GLB whose ``copies`` nodes all reference the one mesh built from the arrays."""
+    data = write_glb([MeshPart(name="shared", kind="wall", positions=positions, indices=indices)])
+
+    def instance(doc):
+        doc["nodes"] = [{"name": f"copy-{i}", "mesh": 0} for i in range(copies)]
+        doc["scenes"] = [{"name": "collision", "nodes": list(range(copies))}]
+
+    return _repack(data, instance)
+
+
+def _sliver_part(count: int, offset: float, seed: int) -> TexturedPart:
+    """``count`` triangles whose three vertices are collinear in the plane y=0 (zero area).
+
+    Their normals are +Y, so the noise float32 rounding leaves in the cross product must not
+    decide the winding.
+    """
+    rng = np.random.default_rng(seed)
+    base = rng.uniform(-3, 3, (count, 3)) * [1, 0, 1] + [offset, 0, offset]
+    direction = rng.uniform(-1, 1, (count, 3)) * [1, 0, 1]
+    steps = rng.uniform(-2, 2, (count, 2))
+    corners = np.stack(
+        [base, base + steps[:, :1] * direction, base + steps[:, 1:] * direction], axis=1
+    )
+    positions = corners.reshape(-1, 3)
+    return TexturedPart(
+        name="sliver-0",
+        kind="floor",
+        positions=positions,
+        normals=np.tile(np.array([0.0, 1.0, 0.0]), (len(positions), 1)),
+        uvs=np.zeros((len(positions), 2)),
+        indices=np.arange(len(positions)).reshape(-1, 3),
+        page=0,
+    )
 
 
 def _patch_float(data: bytes, accessor: int, element: int, component: int, value: float) -> bytes:
@@ -308,6 +371,13 @@ def test_inspect_reports_counts_sizes_bounds_and_unlit():
     }
 
 
+def test_bounds_span_negative_and_positive_coordinates_across_nodes():
+    mesh = _two_quads()
+    mesh.parts[0].positions = mesh.parts[0].positions + np.array([-5.0, 0.0, -4.0])
+    summary = inspect_textured_glb(write_textured_glb(mesh))
+    assert summary["bounds"] == {"min": [-5.0, 0.0, -4.0], "max": [0.0, 2.5, 2.0]}
+
+
 def test_read_glb_still_returns_the_textured_nodes():
     _, nodes = read_glb(write_textured_glb(_two_quads()))
     assert [n.name for n in nodes] == ["floor-0", "wall-0"]
@@ -334,11 +404,48 @@ def test_uv_origin_is_top_left_and_normals_face_the_visible_side():
     data = write_textured_glb(_two_quads())
     floor, wall = (m["primitives"][0]["attributes"] for m in _doc(data)["meshes"])
     # The wall's first vertex is on the floor line (y=0), the bottom edge of the atlas: v=1.
-    assert _float_accessor(data, wall["TEXCOORD_0"])[0].tolist() == [0.0, 1.0]
+    # Seen from +X the viewer's right is -Z, so that z=0 edge is the atlas's right edge: u=1.
+    assert _float_accessor(data, wall["TEXCOORD_0"])[0].tolist() == [1.0, 1.0]
     # Its second vertex is on the top edge (y=2.5): v=0.
-    assert _float_accessor(data, wall["TEXCOORD_0"])[1].tolist() == [0.0, 0.0]
+    assert _float_accessor(data, wall["TEXCOORD_0"])[1].tolist() == [1.0, 0.0]
     assert _float_accessor(data, floor["NORMAL"])[0].tolist() == [0.0, 1.0, 0.0]
     assert _float_accessor(data, wall["NORMAL"])[0].tolist() == [1.0, 0.0, 0.0]
+
+
+def test_wall_u_runs_to_the_viewers_right_and_v_runs_down():
+    data = write_textured_glb(_two_quads())
+    wall = _doc(data)["meshes"][1]["primitives"][0]["attributes"]
+    positions = _float_accessor(data, wall["POSITION"]).astype(np.float64)
+    uvs = _float_accessor(data, wall["TEXCOORD_0"]).astype(np.float64)
+    normal = _float_accessor(data, wall["NORMAL"])[0].astype(np.float64)
+    up = np.array([0.0, 1.0, 0.0])
+    right = np.cross(-normal, up)  # the viewer looks along -normal; forward x up is right
+    assert right.tolist() == [0.0, 0.0, -1.0]
+    for a in range(len(positions)):
+        for b in range(len(positions)):
+            step = positions[a] - positions[b]
+            if step @ right:
+                assert np.sign(uvs[a, 0] - uvs[b, 0]) == np.sign(step @ right)
+            if step @ up:
+                assert np.sign(uvs[a, 1] - uvs[b, 1]) == -np.sign(step @ up)
+
+
+@pytest.mark.parametrize(
+    "value, accepted",
+    [(1 + 5e-7, True), (1 + 1e-5, False), (-5e-7, True), (-1e-5, False)],
+)
+def test_uv_tolerance_edge_is_the_same_in_writer_and_reader(value, accepted):
+    mesh = _two_quads()
+    mesh.parts[0].uvs[2, 0] = value
+    clean = write_textured_glb(_two_quads())
+    if accepted:
+        assert inspect_textured_glb(write_textured_glb(mesh))["triangles"] == 4
+        assert inspect_textured_glb(_patch_float(clean, 2, 2, 0, value))["triangles"] == 4
+    else:
+        with pytest.raises(ValueError, match="uvs must lie in"):
+            write_textured_glb(mesh)
+        with pytest.raises(GlbError, match="must lie in"):
+            inspect_textured_glb(_patch_float(clean, 2, 2, 0, value))
 
 
 def test_two_writes_are_byte_identical():
@@ -412,6 +519,33 @@ def test_rejects_invalid_meshes(mutate, message):
     mutate(mesh)
     with pytest.raises(ValueError, match=message):
         write_textured_glb(mesh)
+
+
+@pytest.mark.parametrize("offset", [0.0, 1000.0])
+def test_collinear_triangles_pass_the_winding_check(offset):
+    mesh = TexturedMesh(parts=[_sliver_part(500, offset, seed=3)], pages=_pages())
+    assert inspect_textured_glb(write_textured_glb(mesh))["triangles"] == 500
+
+
+@pytest.mark.parametrize("order, accepted", [((0, 2, 1), True), ((0, 1, 2), False)])
+def test_winding_is_still_judged_far_from_the_origin(order, accepted):
+    # Edges (2, 0, 0) and (0, 0, 2) cross to -Y, so (0, 1, 2) is the flipped order for +Y.
+    positions = np.array([[1000.0, 0.0, 1000.0], [1002.0, 0.0, 1000.0], [1000.0, 0.0, 1002.0]])
+    part = TexturedPart(
+        name="far-0",
+        kind="floor",
+        positions=positions,
+        normals=np.tile(np.array([0.0, 1.0, 0.0]), (3, 1)),
+        uvs=np.zeros((3, 2)),
+        indices=np.array([order]),
+        page=0,
+    )
+    mesh = TexturedMesh(parts=[part], pages=_pages())
+    if accepted:
+        assert inspect_textured_glb(write_textured_glb(mesh))["triangles"] == 1
+    else:
+        with pytest.raises(ValueError, match="winding disagrees"):
+            write_textured_glb(mesh)
 
 
 def test_positions_beyond_float32_fail_without_numpy_warnings():
@@ -660,6 +794,40 @@ def test_a_glb_without_a_bin_chunk_cannot_supply_accessor_data():
         inspect_textured_glb(data)
 
 
+@pytest.mark.parametrize("extra", [1, 4, 7])
+def test_trailing_bytes_that_do_not_form_a_chunk_are_rejected(extra):
+    data = write_textured_glb(_two_quads())
+    tail = b"\x00" * extra
+    for base in (_without_bin(data), data):
+        bad = _with_trailing(base, tail)
+        with pytest.raises(GlbError, match="trailing bytes"):
+            read_glb(bad)
+        with pytest.raises(GlbError, match="trailing bytes"):
+            inspect_textured_glb(bad)
+
+
+def test_a_complete_chunk_of_unknown_type_after_bin_is_ignored():
+    data = write_textured_glb(_two_quads())
+    unknown = struct.pack("<I", 8) + b"XTRA" + b"\x01" * 8
+    assert [node.name for node in read_glb(_with_trailing(data, unknown))[1]] == [
+        "floor-0",
+        "wall-0",
+    ]
+
+
+@pytest.mark.parametrize("delta, accepted", [(-3, True), (0, True), (-4, False), (1, False)])
+def test_bin_chunk_may_pad_buffer_byte_length_by_up_to_three_bytes(delta, accepted):
+    def shift_length(doc):
+        doc["buffers"][0]["byteLength"] += delta
+
+    data = _repack(write_textured_glb(_two_quads()), shift_length)
+    if accepted:
+        assert inspect_textured_glb(data)["triangles"] == 4
+    else:
+        with pytest.raises(GlbError, match="byteLength"):
+            read_glb(data)
+
+
 def test_a_deeply_nested_json_chunk_is_a_glb_error_not_a_crash():
     body = b"[" * 200_000 + b"]" * 200_000
     framed = _frame(body, _split_glb(write_textured_glb(_two_quads()))[1])
@@ -670,6 +838,46 @@ def test_a_deeply_nested_json_chunk_is_a_glb_error_not_a_crash():
     findings = check_collision_glb(framed, _manifest())
     assert [f.code for f in findings] == ["COLLISION_GLB"]
     assert "nested too deeply" in findings[0].message
+
+
+def test_instanced_nodes_share_one_decode_per_accessor(monkeypatch):
+    positions, indices = _grid_mesh(20)
+    data = _instanced_glb(positions, indices, copies=200)
+    decoded: list[int] = []
+    original = glb_module._read_accessor
+
+    def counting(doc, bin_chunk, index, accessor_type, components):
+        decoded.append(index)
+        return original(doc, bin_chunk, index, accessor_type, components)
+
+    monkeypatch.setattr(glb_module, "_read_accessor", counting)
+    _, nodes = read_glb(data)
+    assert len(nodes) == 200
+    assert sorted(decoded) == [0, 1]  # one POSITION and one index accessor, however many nodes
+    assert all(node.positions is nodes[0].positions for node in nodes)
+    assert all(node.triangles is nodes[0].triangles for node in nodes)
+
+
+def test_triangle_total_is_capped_across_instanced_nodes():
+    # 2 * 142**2 = 40,328 triangles per copy; 60 copies is about 2.4 million, over the cap.
+    data = _instanced_glb(*_grid_mesh(142), copies=60)
+    tracemalloc.start()
+    try:
+        with pytest.raises(GlbError, match="triangles"):
+            read_glb(data)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    # Per-node copies peaked at about 84 MB here; the decode-once reader stays far below.
+    assert peak < 32 * 1024 * 1024
+
+
+def test_vertex_total_is_capped_across_instanced_nodes():
+    count = 40_001  # 101 copies make 4,040,101 vertices, over the cap
+    positions = np.column_stack([np.arange(count, dtype=np.float64), np.zeros((count, 2))])
+    data = _instanced_glb(positions, np.array([[0, 1, 2]]), copies=101)
+    with pytest.raises(GlbError, match="vertices"):
+        read_glb(data)
 
 
 def test_png_images_are_accepted_when_declared_as_png():

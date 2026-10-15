@@ -36,12 +36,19 @@ LINEAR_MIPMAP_LINEAR = 9987
 CLAMP_TO_EDGE = 33071
 IDENTITY = (1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
 MAX_GLB_BYTES = 64 * 1024 * 1024
+# Totals over every node, so instanced meshes count once per node that references them.
+MAX_GLB_TRIANGLES = 2_000_000
+MAX_GLB_VERTICES = 4_000_000
 MAX_TEXTURE_SIDE = 8192
 UV_TOLERANCE = 1e-6
 NORMAL_TOLERANCE = 1e-3
 # A face whose geometric normal has a cosine below this with its vertex normals is wound the
 # wrong way (-0.5 is 120 degrees apart); degenerate faces have no direction and are not judged.
 WINDING_COSINE = -0.5
+# A face is degenerate, and not judged, when |cross| <= DEGENERATE_AREA * L * max(L, C), where L
+# is its longest edge and C its largest absolute coordinate. Float32 rounding of collinear vertices
+# stays within about 4e-7 of that bound, so this margin covers it.
+DEGENERATE_AREA = 1e-6
 F32_MAX = float(np.finfo(np.float32).max)
 JPEG_MIME = "image/jpeg"
 PNG_MIME = "image/png"
@@ -191,13 +198,18 @@ def _check_winding(name: str, pos: np.ndarray, nrm: np.ndarray, idx: np.ndarray)
     """Reject faces whose counter-clockwise side faces away from their vertex normals.
 
     A face wound counter-clockwise seen from its visible side has a geometric normal (the cross
-    product of two edges) that agrees with the normals of its vertices.
+    product of two edges) that agrees with the normals of its vertices. Degenerate faces are not
+    judged: their rounding noise can point either way.
     """
     corners = pos.astype(np.float64)[idx]  # (M, 3, 3)
     face = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    area = np.linalg.norm(face, axis=1)
+    longest = np.linalg.norm(corners[:, [1, 2, 0]] - corners, axis=2).max(axis=1)
+    magnitude = np.abs(pos).max(axis=1)[idx].max(axis=1)  # largest coordinate of each face
+    judged = area > DEGENERATE_AREA * longest * np.maximum(longest, magnitude)
     mean = nrm.astype(np.float64)[idx].sum(axis=1)  # (M, 3)
-    limit = WINDING_COSINE * np.linalg.norm(face, axis=1) * np.linalg.norm(mean, axis=1)
-    if np.any(np.einsum("ij,ij->i", face, mean) < limit):
+    limit = WINDING_COSINE * area * np.linalg.norm(mean, axis=1)
+    if np.any(judged & (np.einsum("ij,ij->i", face, mean) < limit)):
         raise ValueError(f"{name}: triangle winding disagrees with the vertex normals")
 
 
@@ -435,8 +447,19 @@ def _reject_constant(token: str) -> NoReturn:
     raise GlbError(f"non-finite JSON literal {token}")
 
 
+def _chunk_header(data: bytes, offset: int) -> tuple[int, int]:
+    """The (length, type) of the chunk header at ``offset``; fewer than 8 bytes is a GlbError."""
+    if offset + 8 > len(data):
+        raise GlbError("trailing bytes do not form a chunk")
+    return struct.unpack_from("<II", data, offset)
+
+
 def _split_frame(data: bytes) -> tuple[bytes, bytes]:
-    """Check the GLB framing; return the raw JSON chunk and the BIN chunk (empty if absent)."""
+    """Check the GLB framing; return the raw JSON chunk and the BIN chunk (empty if absent).
+
+    Chunks after the BIN chunk have unknown types, which a reader ignores, but each must still be
+    whole: a header and its payload that run past the end of the file are an error.
+    """
     if len(data) < 20 or len(data) > MAX_GLB_BYTES:
         raise GlbError("GLB size out of range")
     magic, version, length = struct.unpack_from("<III", data, 0)
@@ -447,12 +470,28 @@ def _split_frame(data: bytes) -> tuple[bytes, bytes]:
         raise GlbError("missing JSON chunk")
     offset = 20 + json_len
     bin_chunk = b""
-    if offset + 8 <= len(data):
-        bin_len, bin_type = struct.unpack_from("<II", data, offset)
+    if offset < len(data):
+        bin_len, bin_type = _chunk_header(data, offset)
         if bin_type != CHUNK_BIN or offset + 8 + bin_len > len(data):
             raise GlbError("invalid BIN chunk")
         bin_chunk = data[offset + 8 : offset + 8 + bin_len]
+        offset += 8 + bin_len
+    while offset < len(data):
+        chunk_len, _ = _chunk_header(data, offset)
+        if offset + 8 + chunk_len > len(data):
+            raise GlbError("invalid chunk: its length runs past the end of the GLB")
+        offset += 8 + chunk_len
     return data[20 : 20 + json_len], bin_chunk
+
+
+def _check_bin_length(doc: dict[str, Any], bin_chunk: bytes) -> None:
+    """buffers[0] must describe the BIN chunk; the writer pads the chunk to 4 bytes, so up to 3."""
+    buffers = _objects(doc, "buffers")
+    if not buffers:
+        return
+    declared = _uint(buffers[0], "byteLength")
+    if not 0 <= len(bin_chunk) - declared <= 3:
+        raise GlbError(f"BIN chunk is {len(bin_chunk)} bytes; buffers[0].byteLength is {declared}")
 
 
 def _split_glb(data: bytes) -> tuple[dict[str, Any], bytes]:
@@ -466,6 +505,8 @@ def _split_glb(data: bytes) -> tuple[dict[str, Any], bytes]:
         raise GlbError(f"JSON chunk is not valid: {exc}") from exc
     if not isinstance(doc, dict):
         raise GlbError("JSON chunk must be an object")
+    if bin_chunk:
+        _check_bin_length(doc, bin_chunk)
     return doc, bin_chunk
 
 
@@ -577,10 +618,38 @@ def _read_accessor(
     return arr.reshape(-1, comps) if comps > 1 else arr
 
 
+def _accessor_index(index: Any) -> int:
+    """An accessor index as an int, so it can key a cache; anything else is out of range."""
+    if isinstance(index, bool) or not isinstance(index, int):
+        raise GlbError(f"accessor index {index!r} is out of range")
+    return index
+
+
+def _triangles(
+    doc: dict[str, Any], bin_chunk: bytes, pos: np.ndarray, index: int | None
+) -> np.ndarray:
+    """Triangle indices (M, 3) into ``pos``: the index accessor's values, or vertices in order."""
+    if index is None:
+        idx = np.arange(len(pos), dtype=np.int64)
+    else:
+        idx = _read_accessor(doc, bin_chunk, index, "SCALAR", INDEX_COMPONENTS).astype(np.int64)
+    if idx.size % 3 or (idx.size and int(idx.max()) >= len(pos)):
+        raise GlbError("invalid indices")
+    return idx.reshape(-1, 3)
+
+
 def _read_nodes(doc: dict[str, Any], bin_chunk: bytes) -> list[GlbNode]:
-    """Return the world-space triangle meshes of every node that references a mesh."""
+    """Return the world-space triangle meshes of every node that references a mesh.
+
+    Each accessor is decoded once and shared by every node that instances it, so memory follows
+    the distinct data in the file. The triangle and vertex totals count every node, instances
+    included, and stop a small file from asking for an unbounded amount of work.
+    """
     nodes_out: list[GlbNode] = []
     meshes = _objects(doc, "meshes")
+    positions: dict[int, np.ndarray] = {}  # float64 POSITION values by accessor index
+    triangles: dict[tuple[int, int | None], np.ndarray] = {}  # by (POSITION, indices) accessors
+    triangle_total = vertex_total = 0
     for node in _objects(doc, "nodes"):
         name = str(node.get("name", ""))
         if not _node_is_identity(node):
@@ -594,17 +663,24 @@ def _read_nodes(doc: dict[str, Any], bin_chunk: bytes) -> list[GlbNode]:
             attrs = _object(prim, "attributes")
             if "POSITION" not in attrs:
                 raise GlbError("primitive has no POSITION attribute")
-            pos = _read_accessor(doc, bin_chunk, attrs["POSITION"], "VEC3", FLOAT_COMPONENTS)
-            pos = pos.astype(np.float64)
-            if "indices" in prim:
-                idx = _read_accessor(doc, bin_chunk, prim["indices"], "SCALAR", INDEX_COMPONENTS)
-                idx = idx.astype(np.int64)
-            else:
-                idx = np.arange(len(pos), dtype=np.int64)
-            if idx.size % 3 or (idx.size and int(idx.max()) >= len(pos)):
-                raise GlbError("invalid indices")
+            pos_index = _accessor_index(attrs["POSITION"])
+            if pos_index not in positions:
+                values = _read_accessor(doc, bin_chunk, pos_index, "VEC3", FLOAT_COMPONENTS)
+                positions[pos_index] = values.astype(np.float64)
+            pos = positions[pos_index]
+            idx_index = _accessor_index(prim["indices"]) if "indices" in prim else None
+            key = (pos_index, idx_index)
+            if key not in triangles:
+                triangles[key] = _triangles(doc, bin_chunk, pos, idx_index)
+            tris = triangles[key]
+            triangle_total += len(tris)
+            vertex_total += len(pos)
+            if triangle_total > MAX_GLB_TRIANGLES:
+                raise GlbError(f"nodes reference more than {MAX_GLB_TRIANGLES} triangles in total")
+            if vertex_total > MAX_GLB_VERTICES:
+                raise GlbError(f"nodes reference more than {MAX_GLB_VERTICES} vertices in total")
             kind = str(_object(node, "extras").get("kind", "unknown"))
-            nodes_out.append(GlbNode(name, kind, pos, idx.reshape(-1, 3)))
+            nodes_out.append(GlbNode(name, kind, pos, tris))
     return nodes_out
 
 
@@ -691,16 +767,19 @@ def inspect_textured_glb(data: bytes) -> dict[str, Any]:
         sizes.append([width, height])
     if not any(len(node.triangles) for node in nodes):
         raise GlbError("textured GLB has no triangles")
-    positions = np.vstack([node.positions for node in nodes])
+    # Bounds fold in node by node: stacking every node's vertices would copy them all again.
+    low = np.full(3, np.inf)
+    high = np.full(3, -np.inf)
+    for node in nodes:
+        if len(node.positions):
+            low = np.minimum(low, node.positions.min(axis=0))
+            high = np.maximum(high, node.positions.max(axis=0))
     return {
         "triangles": sum(len(node.triangles) for node in nodes),
-        "vertices": len(positions),
+        "vertices": sum(len(node.positions) for node in nodes),
         "images": sizes,
         "materials": len(materials),
-        "bounds": {
-            "min": [float(v) for v in positions.min(axis=0)],
-            "max": [float(v) for v in positions.max(axis=0)],
-        },
+        "bounds": {"min": [float(v) for v in low], "max": [float(v) for v in high]},
         # An empty material list is not "unlit": there is nothing to light or unlight.
         "unlit": bool(materials)
         and all(UNLIT_EXTENSION in _object(m, "extensions") for m in materials),
