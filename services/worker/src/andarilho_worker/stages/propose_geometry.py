@@ -5,10 +5,13 @@ Layout source, in priority order:
 1. a user layout from ``scene_revisions.layout`` when the job carries a
    ``scene_revision_id`` (layout-save pipeline);
 2. the synthetic recipe's bundled two-room layout;
-3. a single-room rectangle around the capture's camera path, with the spawn where the
-   walk started. When the run's capture evidence is readable, each side of that
-   rectangle snaps to the strongest wall-height density of the sparse points near it
-   (``snap_rectangle``). Doors and multi-room outlines are left to review.
+3. the automatic proposal. Its rectangle is the capture's camera path with a margin, and
+   each side snaps to the strongest wall-height density of the sparse points near it
+   (``snap_rectangle``), or else reaches out to the wall beyond it
+   (``extend_unsnapped_sides``). When the run's scene analysis completed, the rooms, doors
+   and furniture it recognised are placed on that layout: rooms are segmented from the walk,
+   doors and furniture are grounded in the posed keyframes. Any failure in that analysis
+   keeps the single room, and the reason is recorded in the diagnostics.
 
 For an initial run the stage idempotently creates the ``scenes`` row (unique
 ``run_id``) and revision 1 through a fenced write, so every later artifact can be
@@ -25,101 +28,28 @@ import numpy as np
 from psycopg.types.json import Jsonb
 
 from andarilho_worker.errors import StageError
+from andarilho_worker.geometry.grounding import (
+    floor_objects,
+    ground_doors,
+    ground_objects,
+    views_from_analysis,
+)
 from andarilho_worker.geometry.layout import collision_glb, rectangle_layout, validate_layout
+from andarilho_worker.geometry.rooms import (
+    attach_doors,
+    extend_unsnapped_sides,
+    place_furniture,
+    rooms_layout,
+    segment_rooms,
+    snap_rectangle,
+)
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 from andarilho_worker.stages.normalize import EVIDENCE_SCHEMA_VERSION, synthetic_layout
 
-# How far a side may move, and what a wall must look like to move it. The points are
-# histogrammed in bins across the window, so a wall shows as a peak above the clutter.
-SNAP_RANGE = 0.75  # metres either side of a side, where its wall is looked for
-SNAP_BIN = 0.05  # metres per histogram bin
-SNAP_MIN_POINTS = 8  # the peak bin holds at least this many points
-SNAP_PEAK_RATIO = 2.0  # ... and at least this many times the median non-empty bin
-SNAP_MIN_SPAN = 1.5  # the rectangle never shrinks below this on either axis, metres
-SNAP_CLEARANCE = 0.3  # every camera keeps at least this distance from a moved side
-# Wall-height evidence: above the floor clutter and below the ceiling.
-WALL_MIN_HEIGHT = 0.3  # metres above the floor
-WALL_MAX_SHARE = 0.85  # of the room height
+ANALYSIS_SCHEMA_VERSION = 1
 
-# (side, coordinate of its normal in (x, y, z): 0 for X or 2 for Z, then 0 for the minimum
-# or 1 for the maximum of that axis).
-SIDES: tuple[tuple[str, int, int], ...] = (
-    ("west", 0, 0),
-    ("east", 0, 1),
-    ("south", 2, 0),
-    ("north", 2, 1),
-)
-
-
-def _density_peak(values: np.ndarray, side: float) -> float | None:
-    """The median of the densest bin of ``values`` near ``side``, when it reads as a wall.
-
-    The bins span SNAP_RANGE either side of ``side``. The peak must hold SNAP_MIN_POINTS
-    points and SNAP_PEAK_RATIO times the median non-empty bin, so a flat scatter of
-    clutter never moves a side.
-    """
-    bins = round(2 * SNAP_RANGE / SNAP_BIN)
-    index = np.floor((values - (side - SNAP_RANGE)) / SNAP_BIN)
-    index = np.clip(index, 0, bins - 1).astype(np.int64)
-    counts = np.bincount(index, minlength=bins)
-    peak = int(np.argmax(counts))
-    if counts[peak] < SNAP_MIN_POINTS:
-        return None
-    if counts[peak] < SNAP_PEAK_RATIO * float(np.median(counts[counts > 0])):
-        return None
-    return float(np.median(values[index == peak]))
-
-
-def snap_rectangle(
-    min_xz: Any,
-    max_xz: Any,
-    *,
-    points: np.ndarray,
-    cameras: np.ndarray,
-    height: float,
-) -> tuple[list[float], list[float], dict[str, float]]:
-    """Move each side of a rectangle onto the wall-height density peak of the points near it.
-
-    ``points`` (x, y, z) are the evidence's sparse points and ``cameras`` its camera
-    centres, both in the canonical world. A side moves only when its peak passes
-    ``_density_peak``, the rectangle stays at least SNAP_MIN_SPAN wide and every camera
-    keeps SNAP_CLEARANCE from the new side. Sides are tried in ``SIDES`` order, each
-    against the rectangle as already snapped. Returns the new corners and the shift in
-    metres of each side that moved.
-    """
-    lo = np.asarray(min_xz, dtype=np.float64).copy()
-    hi = np.asarray(max_xz, dtype=np.float64).copy()
-    moved: dict[str, float] = {}
-    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    cameras = np.asarray(cameras, dtype=np.float64).reshape(-1, 3)
-    if len(points) == 0 or len(cameras) == 0:
-        return lo.tolist(), hi.tolist(), moved
-    band = (points[:, 1] >= WALL_MIN_HEIGHT) & (points[:, 1] <= WALL_MAX_SHARE * height)
-    walls = points[band]
-    for name, axis, which in SIDES:
-        # The rectangle is indexed (x, z) and the points (x, y, z): ``k`` is this side's
-        # rectangle index, ``other`` the other horizontal one, ``along`` the points' one.
-        k, other, along = axis // 2, 1 - axis // 2, 2 - axis
-        side = float((lo if which == 0 else hi)[k])
-        in_extent = (walls[:, along] >= lo[other]) & (walls[:, along] <= hi[other])
-        near = walls[in_extent & (np.abs(walls[:, axis] - side) <= SNAP_RANGE)]
-        new = _density_peak(near[:, axis], side)
-        if new is None:
-            continue
-        candidate_lo, candidate_hi = lo.copy(), hi.copy()
-        if which == 0:
-            candidate_lo[k] = new
-            gap = cameras[:, axis] - new
-        else:
-            candidate_hi[k] = new
-            gap = new - cameras[:, axis]
-        if candidate_hi[k] - candidate_lo[k] < SNAP_MIN_SPAN:
-            continue
-        if gap.min() < SNAP_CLEARANCE:
-            continue
-        lo, hi = candidate_lo, candidate_hi
-        moved[name] = new - side
-    return lo.tolist(), hi.tolist(), moved
+# ``snap_rectangle`` lives with the other rectangle geometry; it stays importable from here.
+__all__ = ["load_evidence", "proposed_layout", "run", "snap_rectangle"]
 
 
 def load_evidence(ctx: StageContext) -> tuple[np.ndarray, np.ndarray] | None:
@@ -143,28 +73,129 @@ def load_evidence(ctx: StageContext) -> tuple[np.ndarray, np.ndarray] | None:
     return points, cameras
 
 
-def proposed_layout(ctx: StageContext) -> tuple[dict[str, Any], dict[str, float]]:
-    """The automatic single-room layout from the run's ``normalizing`` outputs.
+def _load_analysis(ctx: StageContext) -> dict[str, Any] | None:
+    """The run's completed scene analysis, or None when it is absent or unreadable.
 
-    Returns the layout and the shift of each side that snapped to the evidence. Shared
-    with the smoke runner, which has no database.
+    Like ``load_evidence``, a key outside this run's prefix is never read, and an artifact
+    that is missing, not JSON or of another schema is ignored.
+    """
+    key = ctx.outputs().get("analysisKey")
+    if not key or not str(key).startswith(f"tenants/{ctx.project_id}/runs/{ctx.run_id}/"):
+        return None
+    try:
+        analysis = json.loads(ctx.store.get_bytes(str(key)))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(analysis, dict) or analysis.get("schemaVersion") != ANALYSIS_SCHEMA_VERSION:
+        return None
+    if analysis.get("status") != "complete":
+        return None
+    return analysis
+
+
+def _analysed_layout(
+    analysis: dict[str, Any],
+    evidence: tuple[np.ndarray, np.ndarray] | None,
+    bounds: dict[str, Any],
+    spawn: dict[str, Any] | None,
+    plain: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The plain room with the analysis's rooms, doors and furniture, and what was placed.
+
+    Without evidence the keyframes' poses stand in for the camera path, and there are no
+    points to snap to. The result must validate, or the analysis is not used at all.
+    """
+    reply = analysis["reply"]
+    if not isinstance(reply, dict):
+        raise ValueError("the analysis has no reply")
+    keyframes = analysis["keyframes"]
+    views = views_from_analysis(analysis)
+    if evidence is not None:
+        points, cameras = evidence
+    else:
+        points = np.empty((0, 3), dtype=np.float64)
+        cameras = np.array([views[int(kf["frame"])].centre() for kf in keyframes])
+        cameras = cameras.reshape(-1, 3)
+    rooms = segment_rooms(keyframes, reply["frames"], cameras[:, [0, 2]])
+    layout = plain
+    room_count = 1
+    if len(rooms) >= 2:
+        layout = rooms_layout(
+            rooms,
+            points=points,
+            cameras=cameras,
+            height=bounds["height"],
+            floor_y=bounds["floorY"],
+            spawn=spawn,
+        )
+        room_count = len(rooms)
+    layout = attach_doors(layout, ground_doors(analysis, views), [room.id for room in rooms])
+    objects = ground_objects(analysis, views)
+    ungrounded = len(floor_objects(analysis)) - len(objects)
+    layout, dropped = place_furniture(layout, objects, cameras)
+    if validate_layout(layout):
+        raise ValueError("the analysed layout does not validate")
+    counts = {
+        "rooms": room_count,
+        "doors": len(layout["openings"]),
+        "furniture": len(layout["furniture"]),
+        "droppedFurniture": ungrounded + dropped,
+    }
+    return layout, counts
+
+
+def proposed_layout(ctx: StageContext) -> tuple[dict[str, Any], dict[str, Any]]:
+    """The automatic layout from the run's ``normalizing`` and ``scene_analysis`` outputs.
+
+    Returns the layout and its diagnostics: the sides that snapped and that extended, the
+    rooms, doors and furniture placed, the analysis status, and ``analysisError`` (the
+    exception's class name) when the analysis could not be used. Shared with the smoke
+    runner, which has no database.
     """
     bounds = ctx.output("proposalBounds")
     min_xz, max_xz = bounds["minXZ"], bounds["maxXZ"]
+    spawn = ctx.outputs().get("proposalSpawn")
     snapped: dict[str, float] = {}
+    extended: dict[str, float] = {}
     evidence = load_evidence(ctx)
     if evidence is not None:
         min_xz, max_xz, snapped = snap_rectangle(
             min_xz, max_xz, points=evidence[0], cameras=evidence[1], height=bounds["height"]
         )
+        min_xz, max_xz, extended = extend_unsnapped_sides(
+            min_xz,
+            max_xz,
+            points=evidence[0],
+            cameras=evidence[1],
+            height=bounds["height"],
+            snapped=set(snapped),
+        )
     layout = rectangle_layout(
-        min_xz,
-        max_xz,
-        elevation=bounds["floorY"],
-        height=bounds["height"],
-        spawn=ctx.outputs().get("proposalSpawn"),
+        min_xz, max_xz, elevation=bounds["floorY"], height=bounds["height"], spawn=spawn
     )
-    return layout, snapped
+    status = str(ctx.outputs().get("analysisStatus") or "absent")
+    diagnostics: dict[str, Any] = {
+        "snappedSides": snapped,
+        "extendedSides": extended,
+        "rooms": 1,
+        "doors": 0,
+        "furniture": 0,
+        "droppedFurniture": 0,
+        "analysisStatus": status,
+    }
+    if status != "complete":
+        return layout, diagnostics
+    try:
+        analysis = _load_analysis(ctx)
+        if analysis is None:
+            return layout, diagnostics
+        analysed, counts = _analysed_layout(analysis, evidence, bounds, spawn, layout)
+    except Exception as exc:
+        # The room is still a valid proposal: an analysis that cannot be used never fails it.
+        diagnostics["analysisError"] = type(exc).__name__
+        return layout, diagnostics
+    diagnostics.update(counts)
+    return analysed, diagnostics
 
 
 def _load_revision(conn: Any, ctx: StageContext) -> dict[str, Any] | None:
@@ -224,7 +255,7 @@ def _mark_invalid(revision_id: str, findings: list[dict[str, str]]):
 
 def run(ctx: StageContext) -> StageResult:
     revision: dict[str, Any] | None = None
-    snapped: dict[str, float] = {}
+    diagnostics: dict[str, Any] = {}
     if ctx.job.scene_revision_id:
         revision = ctx.query(lambda conn: _load_revision(conn, ctx))
         if revision is None:
@@ -233,7 +264,7 @@ def run(ctx: StageContext) -> StageResult:
     elif ctx.outputs().get("quality") == "synthetic":
         layout, source = synthetic_layout(), "synthetic"
     else:
-        layout, snapped = proposed_layout(ctx)
+        layout, diagnostics = proposed_layout(ctx)
         source = "proposal"
     findings = [f.as_dict() for f in validate_layout(layout)]
     if findings:
@@ -248,7 +279,7 @@ def run(ctx: StageContext) -> StageResult:
     ctx.store.put_bytes(key, glb, "model/gltf-binary")
     return finish(
         ctx,
-        {"layoutSource": source, "collisionBytes": len(glb), "snappedSides": snapped},
+        {"layoutSource": source, "collisionBytes": len(glb), "diagnostics": diagnostics},
         outputs={
             "sceneId": str(revision["scene_id"]),
             "sceneRevisionId": str(revision["id"]),
