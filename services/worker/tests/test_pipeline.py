@@ -360,6 +360,27 @@ def test_failed_attempts_delete_their_objects(db, seed, store, settings):
     assert store.list_keys(f"tenants/{pid}/runs/{run_id}/attempts/") == []
 
 
+def test_completion_that_loses_to_cancellation_deletes_its_outputs(db, seed, store, settings):
+    from andarilho_worker.stages.base import finish
+
+    def finishes_as_cancellation_arrives(ctx):
+        ctx.store.put_bytes(ctx.attempt_key("output.bin"), b"done")
+        # Cancellation lands after the stage's own checks, before completion.
+        seed.exec(
+            "UPDATE reconstruction_runs SET cancel_requested_at = now() WHERE id = %s", ctx.run_id
+        )
+        seed.exec("UPDATE jobs SET cancel_requested_at = now() WHERE id = %s", ctx.job_id)
+        return finish(ctx, {})
+
+    sup = Supervisor(
+        db, store, settings, stages={**STAGES, "validating": finishes_as_cancellation_arrives}
+    )
+    pid = seed.project()
+    run_id, _ = seed.run(pid)
+    assert sup.execute(queue.claim(db, "worker-test", "cpu")) == "cancelled"
+    assert store.list_keys(f"tenants/{pid}/runs/{run_id}/attempts/") == []
+
+
 def test_a_new_attempt_sweeps_what_a_replaced_one_left(db, seed, store, settings):
     sup = Supervisor(db, store, settings, stages={**STAGES, "validating": _writing_sleeping_stage})
     pid = seed.project()

@@ -306,19 +306,26 @@ class Supervisor:
                 if not token.lease_lost:
                     self._discard_attempt(job, job.fencing_token)
                 raise
-            queue.complete_job(
-                self.db,
-                job,
-                result_manifest={
-                    "resultManifestKey": result.result_manifest_key,
-                    "resultSha256": result.result_sha256,
-                    **dict(result.manifest),
-                },
-                next_job=self._next(job, recipe, result),
-                commit=result.commit,
-                usage_seconds=used(),
-                finish_run=result.finish_run,
-            )
+            try:
+                queue.complete_job(
+                    self.db,
+                    job,
+                    result_manifest={
+                        "resultManifestKey": result.result_manifest_key,
+                        "resultSha256": result.result_sha256,
+                        **dict(result.manifest),
+                    },
+                    next_job=self._next(job, recipe, result),
+                    commit=result.commit,
+                    usage_seconds=used(),
+                    finish_run=result.finish_run,
+                )
+            except Cancelled:
+                # Cancellation won the race to completion, which wrote nothing: the
+                # outputs are unreferenced and no retry will sweep them.
+                if not token.lease_lost:
+                    self._discard_attempt(job, job.fencing_token)
+                raise
             return "succeeded"
         except LeaseLost:
             log.warning("job %s lost its lease; stopping without writes", job.id)
