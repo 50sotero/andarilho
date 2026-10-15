@@ -18,6 +18,7 @@ from pathlib import Path
 import numpy as np
 
 from andarilho_worker.errors import StageError, TransientError
+from andarilho_worker.geometry.colmap import read_camera_poses, read_points3d
 from andarilho_worker.recipes import render_argv
 from andarilho_worker.runner import ProcessFailed
 from andarilho_worker.stages.base import StageContext, StageResult, finish
@@ -36,57 +37,6 @@ def read_images_count(path: Path) -> int:
     if len(data) != 8:
         raise ValueError("truncated images.bin")
     return struct.unpack("<Q", data)[0]
-
-
-def read_points3d(path: Path, limit: int = 2_000_000) -> np.ndarray:
-    """XYZ of COLMAP points3D.bin (bounded)."""
-    data = path.read_bytes()
-    (count,) = struct.unpack_from("<Q", data, 0)
-    offset = 8
-    out = []
-    for _ in range(min(count, limit)):
-        _pid, x, y, z = struct.unpack_from("<Qddd", data, offset)
-        offset += 8 + 24 + 3 + 8
-        (track,) = struct.unpack_from("<Q", data, offset)
-        offset += 8 + track * 8
-        out.append((x, y, z))
-    return np.array(out, dtype=np.float64).reshape(-1, 3)
-
-
-def _rotation(qw: float, qx: float, qy: float, qz: float) -> np.ndarray:
-    return np.array([
-        [1 - 2 * qy * qy - 2 * qz * qz, 2 * qx * qy - 2 * qw * qz, 2 * qz * qx + 2 * qw * qy],
-        [2 * qx * qy + 2 * qw * qz, 1 - 2 * qx * qx - 2 * qz * qz, 2 * qy * qz - 2 * qw * qx],
-        [2 * qz * qx - 2 * qw * qy, 2 * qy * qz + 2 * qw * qx, 1 - 2 * qx * qx - 2 * qy * qy],
-    ])  # fmt: skip
-
-
-def read_camera_poses(path: Path) -> list[dict[str, object]]:
-    """Registered cameras of a COLMAP images.bin: name, world centre, viewing direction.
-
-    COLMAP stores world-to-camera ``(q, t)``; the centre is ``-R^T t`` and the camera
-    looks along ``R^T (0, 0, 1)`` (OpenCV convention). Sorted by name, which is the
-    walk order for extracted frames.
-    """
-    data = path.read_bytes()
-    (count,) = struct.unpack_from("<Q", data, 0)
-    offset = 8
-    cameras: list[dict[str, object]] = []
-    for _ in range(count):
-        _image_id, qw, qx, qy, qz, tx, ty, tz, _camera_id = struct.unpack_from(
-            "<I7dI", data, offset
-        )
-        offset += 4 + 7 * 8 + 4
-        end = data.index(b"\x00", offset)
-        name = data[offset:end].decode("utf-8")
-        offset = end + 1
-        (points,) = struct.unpack_from("<Q", data, offset)
-        offset += 8 + points * 24
-        rotation = _rotation(qw, qx, qy, qz)
-        center = -rotation.T @ np.array([tx, ty, tz])
-        forward = rotation.T @ np.array([0.0, 0.0, 1.0])
-        cameras.append({"name": name, "center": center.tolist(), "forward": forward.tolist()})
-    return sorted(cameras, key=lambda c: str(c["name"]))
 
 
 def list_models(sparse: Path) -> list[SparseModel]:

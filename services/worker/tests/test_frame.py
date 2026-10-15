@@ -8,11 +8,16 @@ import struct
 import numpy as np
 import pytest
 
+from andarilho_worker.geometry.colmap import ColmapImage, SparsePoints
 from andarilho_worker.geometry.frame import (
     CAMERA_HEIGHT_METERS,
     CameraPath,
+    _nearest_neighbours,
+    _reliable_points,
+    _up_from_cameras,
     colmap_to_export,
     estimate_frame,
+    frame_from_sparse,
     rotation_to_z,
 )
 from andarilho_worker.stages.reconstruct import read_camera_poses
@@ -143,3 +148,445 @@ def test_read_camera_poses_returns_centres_and_viewing_directions(tmp_path):
     # R = rot_y(90): centre = -R^T t, forward = R^T (0, 0, 1) = (-1, 0, 0).
     assert second["center"] == pytest.approx([3.0, -2.0, -1.0])
     assert second["forward"] == pytest.approx([-1.0, 0, 0], abs=1e-12)
+
+
+# Sparse COLMAP points (frame_from_sparse). The scenes are canonical (+Y up, metres) and
+# are recorded the way COLMAP would store them: a tilted, yawed, shrunken, shifted world.
+
+UP = np.array([0.0, 1.0, 0.0])
+COLMAP_SCALE = 0.37  # one canonical metre is 0.37 COLMAP units
+FLOOR, CEILING = 0, 1  # the kinds from 2 up are the four walls
+
+
+def _colmap_transform() -> tuple[np.ndarray, float, np.ndarray]:
+    rotation = _axis_rotation(np.array([0.0, 1.0, 0.0]), 33.0)
+    rotation = rotation @ _axis_rotation(np.array([1.0, 0.0, 0.0]), 12.0)
+    return rotation, COLMAP_SCALE, np.array([12.0, -4.0, 7.0])
+
+
+def _quaternion(r: np.ndarray) -> tuple[float, float, float, float]:
+    """(w, x, y, z) of a rotation matrix, from the largest of its diagonal terms."""
+    trace = r[0, 0] + r[1, 1] + r[2, 2]
+    if trace > 0:
+        s = math.sqrt(trace + 1.0) * 2
+        return 0.25 * s, (r[2, 1] - r[1, 2]) / s, (r[0, 2] - r[2, 0]) / s, (r[1, 0] - r[0, 1]) / s
+    if r[0, 0] > r[1, 1] and r[0, 0] > r[2, 2]:
+        s = math.sqrt(1.0 + r[0, 0] - r[1, 1] - r[2, 2]) * 2
+        return (r[2, 1] - r[1, 2]) / s, 0.25 * s, (r[0, 1] + r[1, 0]) / s, (r[0, 2] + r[2, 0]) / s
+    if r[1, 1] > r[2, 2]:
+        s = math.sqrt(1.0 + r[1, 1] - r[0, 0] - r[2, 2]) * 2
+        return (r[0, 2] - r[2, 0]) / s, (r[0, 1] + r[1, 0]) / s, 0.25 * s, (r[1, 2] + r[2, 1]) / s
+    s = math.sqrt(1.0 + r[2, 2] - r[0, 0] - r[1, 1]) * 2
+    return (r[1, 0] - r[0, 1]) / s, (r[0, 2] + r[2, 0]) / s, (r[1, 2] + r[2, 1]) / s, 0.25 * s
+
+
+def _camera_in_colmap(
+    image_id: int, centre: np.ndarray, forward: np.ndarray, transform
+) -> ColmapImage:
+    """A canonical camera at ``centre`` looking along ``forward``, as COLMAP records it."""
+    a, scale, b = transform
+    f = forward / np.linalg.norm(forward)
+    right = np.cross(f, UP)
+    right /= np.linalg.norm(right)
+    image_up = np.cross(right, f)
+    # COLMAP's camera axes are x right, y down, z forward: the columns are right, down, forward.
+    world_from_camera = np.column_stack([right, -image_up, f])
+    rotation = world_from_camera.T @ a.T  # world-to-camera, in COLMAP's world
+    translation = -rotation @ (scale * (a @ centre) + b)
+    return ColmapImage(
+        image_id,
+        1,
+        f"{image_id:04d}.jpg",
+        _quaternion(rotation),
+        tuple(float(v) for v in translation),
+    )
+
+
+def _l_walk(rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
+    """Canonical centres and forwards: 25 frames along +X, then 15 along +Z.
+
+    The phone is held 1.5 m up and pitched 15 degrees down; each heading wanders a little.
+    """
+    pitch = math.radians(15.0)
+    centres, forwards = [], []
+    for i in range(40):
+        if i < 25:
+            centre = np.array([0.6 + 3.8 * i / 24, 1.5, 0.6])
+            yaw = rng.normal(0.0, math.radians(8.0))
+        else:
+            centre = np.array([4.4, 1.5, 0.6 + 2.3 * (i - 24) / 15])
+            yaw = math.pi / 2 + rng.normal(0.0, math.radians(8.0))
+        heading = np.array([math.cos(yaw), 0.0, math.sin(yaw)])
+        centres.append(centre)
+        forwards.append(heading * math.cos(pitch) - UP * math.sin(pitch))
+    return np.array(centres), np.array(forwards)
+
+
+def _room(
+    rng: np.random.Generator, length: float = 5.0, width: float = 3.5, height: float = 2.6
+) -> tuple[np.ndarray, np.ndarray]:
+    """A length x width x height m room (X, Z, Y) with 1 cm noise, and the kind of each point."""
+    floor = np.column_stack(
+        [rng.uniform(0, length, 700), np.zeros(700), rng.uniform(0, width, 700)]
+    )
+    ceiling = np.column_stack(
+        [rng.uniform(0, length, 400), np.full(400, height), rng.uniform(0, width, 400)]
+    )
+    walls = [
+        np.column_stack([rng.uniform(0, length, 225), rng.uniform(0, height, 225), np.full(225, z)])
+        for z in (0.0, width)
+    ] + [
+        np.column_stack([np.full(225, x), rng.uniform(0, height, 225), rng.uniform(0, width, 225)])
+        for x in (0.0, length)
+    ]
+    points = np.vstack([floor, ceiling, *walls])
+    kind = np.repeat([FLOOR, CEILING, 2, 3, 4, 5], [700, 400, 225, 225, 225, 225])
+    return points + rng.normal(0, 0.01, points.shape), kind
+
+
+def _sparse(points: np.ndarray, transform, rng: np.random.Generator) -> SparsePoints:
+    a, scale, b = transform
+    n = len(points)
+    return SparsePoints(
+        xyz=scale * points @ a.T + b,
+        rgb=rng.integers(0, 256, (n, 3)).astype(np.uint8),
+        error=rng.uniform(0.2, 1.5, n),
+        track_length=rng.integers(3, 12, n).astype(np.int64),
+    )
+
+
+def _with_trust(points: SparsePoints, error: np.ndarray, track: np.ndarray) -> SparsePoints:
+    """The same points with new reprojection errors (px) and track lengths."""
+    return SparsePoints(
+        points.xyz, points.rgb, np.asarray(error, float), np.asarray(track, np.int64)
+    )
+
+
+def _join(*parts: SparsePoints) -> SparsePoints:
+    return SparsePoints(
+        np.vstack([p.xyz for p in parts]),
+        np.vstack([p.rgb for p in parts]),
+        np.concatenate([p.error for p in parts]),
+        np.concatenate([p.track_length for p in parts]),
+    )
+
+
+def _cameras_for(centres, forwards, transform) -> list[ColmapImage]:
+    return [
+        _camera_in_colmap(i + 1, c, f, transform)
+        for i, (c, f) in enumerate(zip(centres, forwards, strict=True))
+    ]
+
+
+def _axis_residual_degrees(xz: np.ndarray) -> float:
+    """How far the principal direction of an XZ point cloud is from the nearest X or Z axis."""
+    centred = xz - xz.mean(axis=0)
+    _, vectors = np.linalg.eigh(centred.T @ centred)
+    dx, dz = np.abs(vectors[:, -1])
+    angle = math.degrees(math.atan2(dz, dx))
+    return min(angle, 90.0 - angle)
+
+
+def test_an_l_walk_over_sparse_points_levels_scales_and_aligns_the_room():
+    rng = np.random.default_rng(3)
+    transform = _colmap_transform()
+    room, kind = _room(rng)
+    centres, forwards = _l_walk(rng)
+    images = [
+        _camera_in_colmap(i + 1, c, f, transform)
+        for i, (c, f) in enumerate(zip(centres, forwards, strict=True))
+    ]
+    sparse = _sparse(room, transform, rng)
+
+    est = frame_from_sparse(sparse, images, seed=0)
+
+    assert similarity_matrix_problem(est.matrix) is None
+    assert est.method == "floor_plane"
+    assert est.wall_yaw_source == "points"
+    world = _apply(est.matrix, sparse.xyz)
+    # The spec asks for 3 cm on the floor. With 1 cm noise the largest of 700 floor samples
+    # reaches about 4 sigma (4.0 cm in this fixture), so the maximum is held to 4.5 cm, the
+    # 95th percentile to 3 cm and the median to 1 cm.
+    floor_y = np.abs(world[kind == FLOOR, 1])
+    assert floor_y.max() < 0.045
+    assert np.percentile(floor_y, 95) < 0.03
+    assert np.median(floor_y) < 0.01
+    assert est.meters_per_unit == pytest.approx(1 / COLMAP_SCALE, rel=0.03)
+    cameras = _apply(est.matrix, np.array([im.center() for im in images]))
+    assert np.median(cameras[:, 1]) == pytest.approx(CAMERA_HEIGHT_METERS, abs=0.03)
+    for wall in range(2, 6):
+        assert _axis_residual_degrees(world[kind == wall][:, [0, 2]]) < 1.5
+    assert (np.array(est.min_xz) + np.array(est.max_xz)) / 2 == pytest.approx([0.0, 0.0], abs=1e-9)
+    assert est.spawn_feet[1] == 0.0
+    # The spawn faces where the first camera looked.
+    first = images[0]
+    ends = _apply(est.matrix, np.array([first.center(), first.center() + first.forward()]))
+    look = ends[1] - ends[0]
+    look = np.array([look[0], 0.0, look[2]]) / np.linalg.norm([look[0], look[2]])
+    facing = np.array([-math.sin(est.spawn_yaw), 0.0, -math.cos(est.spawn_yaw)])
+    assert facing @ look > 0.999
+    summary = est.summary()
+    assert summary["wallYawSource"] == "points"
+    assert "wallYawDegrees" in summary
+
+
+def test_a_straight_walk_without_yaw_variation_still_recovers_up():
+    rng = np.random.default_rng(9)
+    n = 1200
+    floor = np.column_stack([rng.uniform(-1, 6, n), np.zeros(n), rng.uniform(-1, 1, n)])
+    walls = np.column_stack(
+        [rng.uniform(-1, 6, n), rng.uniform(0, 2.5, n), rng.choice([-1.0, 1.0], n)]
+    )
+    ceiling = np.column_stack([rng.uniform(-1, 6, n), np.full(n, 2.5), rng.uniform(-1, 1, n)])
+    room = np.vstack([floor, walls, ceiling]) + rng.normal(0, 0.01, (3 * n, 3))
+    centres = np.column_stack([np.linspace(0, 5, 30), np.full(30, 1.5), np.zeros(30)])
+    pitch = math.radians(20.0)
+    forwards = np.tile([math.cos(pitch), -math.sin(pitch), 0.0], (30, 1))
+    transform = _colmap_transform()
+    images = [
+        _camera_in_colmap(i + 1, c, f, transform)
+        for i, (c, f) in enumerate(zip(centres, forwards, strict=True))
+    ]
+    sparse = _sparse(room, transform, rng)
+
+    est = frame_from_sparse(sparse, images, seed=0)
+
+    assert similarity_matrix_problem(est.matrix) is None
+    colmap_up = transform[0] @ UP  # the canonical up direction, in COLMAP's world
+    ends = _apply(est.matrix, np.array([[0.0, 0.0, 0.0], colmap_up]))
+    world_up = ends[1] - ends[0]
+    cosine = world_up @ UP / np.linalg.norm(world_up)
+    assert math.degrees(math.acos(min(1.0, cosine))) < 2.0
+    # The walls run along canonical X, and the cameras look along it too: the camera
+    # headings give the wall direction (mod 90 degrees) in the levelled frame.
+    assert est.wall_yaw_source == "cameras"
+    level = rotation_to_z(transform[0] @ UP)
+    wall = level @ (transform[0] @ np.array([1.0, 0.0, 0.0]))
+    expected = math.degrees(math.atan2(wall[1], wall[0])) % 90.0
+    assert (est.wall_yaw_degrees - expected + 45.0) % 90.0 - 45.0 == pytest.approx(0.0, abs=2.0)
+    assert est.summary()["wallYawSource"] == "cameras"
+
+
+def test_sixty_sparse_points_give_a_frame_or_a_warning_not_a_crash():
+    rng = np.random.default_rng(5)
+    transform = _colmap_transform()
+    room, _ = _room(rng)
+    centres, forwards = _l_walk(rng)
+    images = _cameras_for(centres, forwards, transform)
+    # Sixty points drawn across the floor, the walls and the ceiling.
+    chosen = rng.choice(len(room), 60, replace=False)
+    est = frame_from_sparse(_sparse(room[chosen], transform, rng), images, seed=0)
+    assert similarity_matrix_problem(est.matrix) is None
+    assert est.method in ("floor_plane", "trainer_up")
+    # Below SPARSE_WALL_MIN_POINTS the points give no wall direction, whatever the cloud.
+    assert est.wall_yaw_source == "cameras"
+    assert "wallYawSource" in est.summary()
+
+
+def test_a_featureless_scene_with_turning_headings_has_no_wall_direction():
+    rng = np.random.default_rng(13)
+    transform = _colmap_transform()
+    # Unstructured points, and a camera that turns once in place through every heading:
+    # the headings mod 90 degrees are flat, so neither source finds a wall.
+    cloud = _sparse(rng.uniform([0, 0, 0], [5, 2.6, 3.5], (300, 3)), transform, rng)
+    headings = np.radians(np.arange(360.0))
+    pitch = math.radians(15.0)
+    centres = np.tile([2.5, 1.5, 1.75], (360, 1))
+    forwards = np.column_stack([
+        np.cos(headings) * math.cos(pitch),
+        np.full(360, -math.sin(pitch)),
+        np.sin(headings) * math.cos(pitch),
+    ])  # fmt: skip
+    est = frame_from_sparse(cloud, _cameras_for(centres, forwards, transform), seed=0)
+    assert similarity_matrix_problem(est.matrix) is None
+    assert est.wall_yaw_source == "none"
+    assert est.wall_yaw_degrees == 0.0
+    assert "wallYawSource" not in est.summary()
+
+
+def test_untrusted_points_are_left_out_of_the_frame():
+    rng = np.random.default_rng(11)
+    transform = _colmap_transform()
+    room, _ = _room(rng)
+    centres, forwards = _l_walk(rng)
+    images = _cameras_for(centres, forwards, transform)
+    sparse = _sparse(room, transform, rng)
+    # 300 stray points inside the room, in three kinds: a 3 px error (fails the 2 px
+    # limit), a track of one (fails the track test), and a 5 px error on a track of one.
+    stray_xyz = rng.uniform([0, 0, 0], [5, 2.6, 3.5], (300, 3))
+    stray = _with_trust(
+        _sparse(stray_xyz, transform, rng),
+        np.repeat([3.0, 0.5, 5.0], 100),
+        np.repeat([5, 1, 1], 100),
+    )
+    clean = frame_from_sparse(sparse, images, seed=0)
+    with_stray = frame_from_sparse(_join(sparse, stray), images, seed=0)
+    assert with_stray.matrix == pytest.approx(clean.matrix, abs=1e-9)
+    assert with_stray.wall_yaw_source == clean.wall_yaw_source
+    # The same points would move the frame if they were trusted.
+    trusted = _with_trust(stray, np.full(300, 0.5), np.full(300, 5))
+    moved = frame_from_sparse(_join(sparse, trusted), images, seed=0)
+    assert np.abs(np.array(moved.matrix) - np.array(clean.matrix)).max() > 1e-2
+
+
+def test_a_cloud_with_fewer_than_fifty_trusted_points_uses_the_four_pixel_limit():
+    rng = np.random.default_rng(12)
+    transform = _colmap_transform()
+    room, _ = _room(rng)
+    centres, forwards = _l_walk(rng)
+    images = _cameras_for(centres, forwards, transform)
+    sparse = _sparse(room, transform, rng)
+    # Only 30 points pass the 2 px limit; the other 1970 pass 4 px; 200 stray points fail it.
+    error = np.full(len(room), 3.0)
+    error[:30] = 0.5
+    stray_xyz = rng.uniform([0, 0, 0], [5, 2.6, 3.5], (200, 3))
+    stray = _with_trust(_sparse(stray_xyz, transform, rng), np.full(200, 5.0), np.full(200, 5))
+    combined = _join(_with_trust(sparse, error, np.full(len(room), 5)), stray)
+    assert len(_reliable_points(combined)) == len(room)
+    expected = frame_from_sparse(sparse, images, seed=0)
+    got = frame_from_sparse(combined, images, seed=0)
+    assert got.matrix == pytest.approx(expected.matrix, abs=1e-9)
+
+
+def test_a_cloud_with_fewer_than_twenty_trusted_points_uses_every_point():
+    rng = np.random.default_rng(14)
+    transform = _colmap_transform()
+    room, _ = _room(rng)
+    centres, forwards = _l_walk(rng)
+    images = _cameras_for(centres, forwards, transform)
+    sparse = _sparse(room, transform, rng)
+    # Ten points pass the 2 px limit; the other 1990 fail even the 4 px limit, so every point
+    # is used.
+    error = np.full(len(room), 6.0)
+    error[:10] = 0.5
+    weak = _with_trust(sparse, error, np.full(len(room), 5))
+    assert len(_reliable_points(weak)) == len(room)
+    expected = frame_from_sparse(sparse, images, seed=0)
+    assert frame_from_sparse(weak, images, seed=0).matrix == pytest.approx(
+        expected.matrix, abs=1e-9
+    )
+
+
+def test_the_frame_does_not_depend_on_the_order_the_images_are_given_in():
+    rng = np.random.default_rng(15)
+    transform = _colmap_transform()
+    room, _ = _room(rng)
+    centres, forwards = _l_walk(rng)
+    images = _cameras_for(centres, forwards, transform)
+    sparse = _sparse(room, transform, rng)
+    forward = frame_from_sparse(sparse, images, seed=0)
+    backward = frame_from_sparse(sparse, images[::-1], seed=0)
+    assert backward.matrix == pytest.approx(forward.matrix, abs=1e-9)
+    assert backward.spawn_feet == pytest.approx(forward.spawn_feet, abs=1e-9)
+
+
+def test_a_sparse_floor_is_found_with_the_fractional_inlier_minimum():
+    rng = np.random.default_rng(6)
+    floor = np.column_stack(
+        [rng.uniform(0, 5, 150), rng.uniform(0, 3.5, 150), rng.normal(0, 0.005, 150)]
+    )
+    centres = np.column_stack([np.linspace(0.5, 4.5, 20), np.full(20, 1.75), np.full(20, 1.5)])
+    path = CameraPath(centres, np.tile([1.0, 0.0, 0.0], (20, 1)))
+    assert estimate_frame(floor, path, seed=0).method == "trainer_up"
+    fractional = estimate_frame(floor, path, seed=0, min_inliers_fraction=0.05)
+    assert fractional.method == "floor_plane"
+    assert "wallYawSource" not in fractional.summary()
+
+
+def _u_walk(rng: np.random.Generator, length: float, width: float) -> tuple[np.ndarray, np.ndarray]:
+    """A U-shaped walk along three sides of a room: 1.5 m up, pitched 15 degrees down.
+
+    Each leg has 14 frames, and each heading wanders by 8 degrees.
+    """
+    pitch = math.radians(15.0)
+    near, far_x, far_z = 0.6, length - 0.6, width - 0.6
+    legs = [
+        ((near, near), (far_x, near)),
+        ((far_x, near), (far_x, far_z)),
+        ((far_x, far_z), (near, far_z)),
+    ]
+    centres, forwards = [], []
+    for (x0, z0), (x1, z1) in legs:
+        base = math.atan2(z1 - z0, x1 - x0)
+        for t in np.linspace(0.0, 1.0, 14, endpoint=False):
+            centres.append([x0 + (x1 - x0) * t, 1.5, z0 + (z1 - z0) * t])
+            yaw = base + rng.normal(0.0, math.radians(8.0))
+            heading = np.array([math.cos(yaw), 0.0, math.sin(yaw)])
+            forwards.append(heading * math.cos(pitch) - UP * math.sin(pitch))
+    return np.array(centres), np.array(forwards)
+
+
+def test_a_u_shaped_walk_in_a_rectangular_room_aligns_its_walls_too():
+    # Not an L: three legs, a 6 x 4 m room, and walls along X and Z that the walk does not
+    # follow on a single leg.
+    rng = np.random.default_rng(21)
+    transform = _colmap_transform()
+    room, kind = _room(rng, length=6.0, width=4.0, height=2.5)
+    centres, forwards = _u_walk(rng, 6.0, 4.0)
+    images = _cameras_for(centres, forwards, transform)
+    sparse = _sparse(room, transform, rng)
+
+    est = frame_from_sparse(sparse, images, seed=0)
+
+    assert similarity_matrix_problem(est.matrix) is None
+    assert est.method == "floor_plane"
+    assert est.wall_yaw_source == "points"
+    world = _apply(est.matrix, sparse.xyz)
+    floor_y = np.abs(world[kind == FLOOR, 1])
+    assert np.percentile(floor_y, 95) < 0.03
+    assert np.median(floor_y) < 0.01
+    assert est.meters_per_unit == pytest.approx(1 / COLMAP_SCALE, rel=0.03)
+    cameras = _apply(est.matrix, np.array([im.center() for im in images]))
+    assert np.median(cameras[:, 1]) == pytest.approx(CAMERA_HEIGHT_METERS, abs=0.03)
+    for wall in range(2, 6):
+        assert _axis_residual_degrees(world[kind == wall][:, [0, 2]]) < 1.5
+
+
+@pytest.mark.parametrize("jitter", [0.0, 1e-3])
+def test_a_camera_that_barely_moves_takes_the_mean_image_up(jitter):
+    rng = np.random.default_rng(8)
+    # Right vectors that never change, so the spread test sends the search to the walk
+    # branch; the camera hardly moves (1 mm of jitter against a 5 m extent), so the mean
+    # image-up is the answer.
+    centres = np.array([1.0, 1.5, 1.0]) + rng.normal(0.0, jitter, (6, 3))
+    rights = np.tile([1.0, 0.0, 0.0], (6, 1))
+    ups = np.tile([0.05, 0.98, 0.1], (6, 1))
+    forwards = np.tile([0.0, 0.0, 1.0], (6, 1))
+    up = _up_from_cameras(centres, rights, ups, forwards, 5.0)
+    mean = ups.mean(axis=0)
+    np.testing.assert_allclose(up, mean / np.linalg.norm(mean), atol=1e-9)
+
+
+def test_a_straight_walk_takes_up_as_right_crossed_with_the_walk():
+    # Right is +Z and the walk is +X, so right x walk = +Y: the moving branch.
+    centres = np.column_stack([np.linspace(0, 5, 10), np.full(10, 1.5), np.zeros(10)])
+    rights = np.tile([0.0, 0.0, 1.0], (10, 1))
+    ups = np.tile([0.0, 1.0, 0.0], (10, 1))
+    forwards = np.tile([1.0, 0.0, 0.0], (10, 1))
+    up = _up_from_cameras(centres, rights, ups, forwards, 5.0)
+    np.testing.assert_allclose(up, [0.0, 1.0, 0.0], atol=1e-9)
+
+
+@pytest.mark.parametrize("n", [3, 40, 700, 1500])
+def test_nearest_neighbours_match_a_brute_force_search(n):
+    rng = np.random.default_rng(n)
+    # A solid block and a thin sheet, so the grid cells hold very different counts.
+    points = np.vstack([
+        rng.uniform(0, 4, (n // 2, 3)),
+        rng.uniform(0, 4, (n - n // 2, 3)) * [1.0, 1.0, 0.01],
+    ])  # fmt: skip
+    k = min(6, n - 1)
+    indices, dist = _nearest_neighbours(points, np.arange(n), k)
+    full = np.linalg.norm(points[:, None, :] - points[None, :, :], axis=2)
+    np.fill_diagonal(full, np.inf)
+    np.testing.assert_allclose(np.sort(dist, axis=1), np.sort(full, axis=1)[:, :k], atol=1e-12)
+    assert not np.any(indices == np.arange(n)[:, None])  # a point is not its own neighbour
+    np.testing.assert_allclose(
+        np.linalg.norm(points[indices] - points[:, None, :], axis=2), dist, atol=1e-12
+    )
+
+
+def test_nearest_neighbours_of_identical_points_are_all_at_zero_distance():
+    indices, dist = _nearest_neighbours(np.zeros((10, 3)), np.arange(10), 6)
+    assert np.all(dist == 0.0)
+    assert not np.any(indices == np.arange(10)[:, None])
