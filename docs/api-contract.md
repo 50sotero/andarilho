@@ -137,6 +137,55 @@ interface Share {
 }
 ```
 
+### Layout and furniture
+
+`SceneRevision.layout` is the editable layout (`packages/scene-contract`, `schemaVersion`
+`"1.0"`). Its `furniture` list is optional, defaults to `[]` and holds at most 256
+entries. Each entry is drawn as a few primitive parts:
+
+```ts
+interface Furniture {
+  id: string; // unique together with the ids of openings, obstacles and other furniture
+  floorId: string;
+  category: string; // 1 to 40 characters
+  label: string; // up to 120 characters
+  position: [number, number]; // footprint center [x, z], world meters
+  yawRadians: number; // three.js rotation.y
+  size: [number, number, number]; // width, height, depth in meters; all above zero, width and depth at most 6, height at most 4
+  solid: boolean; // default true: a solid object blocks walking
+  parts: FurniturePart[]; // 1 to 32
+  confidence: number; // 0 to 1, default 1
+  provenance: "user" | "floor_plan" | "proposal" | "synthetic"; // default "user"
+}
+
+interface FurniturePart {
+  shape: "box" | "cylinder";
+  min: [number, number, number]; // each 0 to 1; min below max on every axis
+  max: [number, number, number];
+  color: string; // "#rrggbb"
+}
+```
+
+The object frame has its origin at the center of the footprint on its floor, so y is
+the floor's elevation. Local x runs across the width, y is up, and z runs from back to
+front, so the front faces +z. A part fraction `(u, v, w)` is the local point
+`((u - 0.5) * width, v * height, (w - 0.5) * depth)`. With `(px, pz)` the position, `e`
+the floor's elevation and `yaw` the yaw, its world point is:
+
+```text
+x = px + lx * cos(yaw) + lz * sin(yaw)
+y = e + ly
+z = pz - lx * sin(yaw) + lz * cos(yaw)
+```
+
+The footprint is the width by depth rectangle turned by `yaw` about the position, and
+the front direction in (x, z) is `(sin(yaw), cos(yaw))`. A `cylinder` part stands
+upright, inscribed in its part box (elliptic when the box is not square).
+
+The JSON Schemas cannot express the size limits or the rule that `min` is below `max`.
+The API models, the worker's `validate_layout` and the browser's `validateLayout` check
+them, and a layout that breaks one is refused.
+
 ## Routes
 
 | Route                                    | Request                                                                                                            | Response                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -172,7 +221,10 @@ interface Share {
 | `GET /healthz` / `GET /readyz`           |                                                                                                                    | liveness / readiness (DB + storage)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 Viewers may request delivery only for approved revisions (the published one); drafts
-are limited to owners and editors.
+are limited to owners and editors. `GET /v1/scenes/{id}` returns the revision's layout,
+with its `furniture` list, and keeps `floorPlan` and `captureEvidence` as described in
+its row above: short-lived private links for owners and editors only, with
+`captureEvidence` `null` until the run's `normalizing` stage has succeeded.
 
 A scene whose manifest is version 1.0 (the Gaussian-splat render that manifest 2.0
 replaced) cannot be shown. The routes that read its manifest, `POST /v1/scenes/{id}/delivery`
@@ -185,3 +237,41 @@ new scene.
 `packages/scene-contract/scene.ts` (generated). Delivery URLs expire after
 `DELIVERY_URL_TTL_SECONDS` (default 300 s); fetch a fresh envelope for the same
 `sceneRevisionId` when they expire.
+
+## Run stages
+
+A reconstruction run passes through these stages, which `JobSummary.stage` and
+`GET /v1/jobs/{id}` report, in this order:
+
+1. `validating`
+2. `preparing`
+3. `camera_reconstruction` (the only GPU stage)
+4. `normalizing`
+5. `scene_analysis` (optional AI scene analysis; a failure never fails the run)
+6. `geometry_proposal`
+7. `texturing`
+8. `packaging`
+9. `scene_validation`
+
+A layout save (`PUT /v1/scenes/{id}/layout`) queues a job at `geometry_proposal`, which
+runs the last four stages on the saved layout and does not repeat the reconstruction
+stages. Jobs from the retired splat pipeline (`training`) stay readable. The internal
+maintenance jobs (`upload_inspection`, `project_cleanup`, `upload_cleanup` and
+`artifact_cleanup`) are not run stages.
+
+`scene_analysis` has these outputs: `analysisStatus`, one of `complete`, `unavailable`,
+`invalid`, `disabled` or `skipped`; `analysisKey`, present only when an analysis record
+was written under the stage's own attempt prefix; and `analysisWarnings`, user-facing
+strings that may be empty. They are worker outputs in the job's result. The routes
+above do not return them.
+
+## Navigation and approval
+
+Every packaged scene's manifest has `navigation.mode` `approved_collision` and
+`approved` `true`, whatever its geometry source (`proposal`, a saved layout or the
+synthetic fixture). Packaging does not write `inspection_only`, so a scene can be walked
+as soon as it is packaged and validated.
+
+Approval (`POST /v1/scenes/{id}/approve`) only publishes the validated revision. It
+decides which revision viewers and share links receive, and it does not change how the
+revision walks.

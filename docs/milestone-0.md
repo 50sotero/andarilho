@@ -1,10 +1,74 @@
 # Milestone 0: first real reconstruction
 
-Status, 2026-10-15: **not passed.** The pinned pipeline runs end to end on real
-footage and fails honestly where it should, and compression keeps the
-appearance. But the only permitted capture so far does not reconstruct into
-recognizable rooms along its walking path. Following README section 18, the
-application should not expand further until a better capture reconstructs.
+Status, 2026-10-15: **the splat criteria were not met, and the approach changed.**
+The splat pipeline ran end to end on real footage, but the walk did not
+reconstruct into recognizable rooms. The scene is now a textured layout model;
+see the direction change below. The splat findings are kept as history.
+
+## Direction change: textured layout model (2026-10-15)
+
+**Why.** Gaussian splats need dense, well-overlapping captures. The handheld
+walkthrough below did not give them that: the splat runs came out blurry and
+floating, and no room reconstructed along its walk. The owner also asked for a
+three.js-style model that is not made directly from the frames. So the walkable
+scene is now the layout as plain geometry (walls, floors, ceilings, doors and
+furniture), colored with textures projected from the video frames. COLMAP stays,
+for camera poses only. A layout model needs only camera poses and a rough
+outline, which the walk already provides.
+
+**What changed.** The splat training, the SOG compression and the splat viewer
+are gone. The `normalizing` stage derives the frame from the sparse points and
+the camera poses. `texturing` (CPU) paints the layout from the frames and writes
+one GLB with unlit materials; areas that no frame saw stay grey and are reported.
+Wave 3 adds scene analysis, several rooms, doors and 3D furniture. Its live runs
+wait for account credit.
+
+The sections from "Capture" to "Re-capture guidance" record the splat pipeline
+(runs 1 to 10) and are kept as history. The textured model's results follow.
+
+### Textured model on run 9's data
+
+Run 9's stored dataset (30 undistorted frames, 1,443 sparse points) was textured
+on the CPU with the new smoke runner:
+
+```bash
+python -m andarilho_worker.smoke --dataset <run 9 dataset.tar> --out <dir>
+```
+
+| Measure            | Result                                                                                                                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| normalizing        | 0.4 s: floor plane from 259 inliers, tilt 4.8 degrees, 0.3526 m per COLMAP unit, wall yaw 40.7 degrees from the walk direction |
+| Automatic proposal | one room, 5.5 m x 2.0 m x 2.3 m; south side snapped 0.07 m to wall evidence                                                    |
+| texturing          | 5.3 s, one 2048 px atlas page                                                                                                  |
+| model.glb          | 110 KB                                                                                                                         |
+| Coverage           | walls 57 %, floor 68 %, ceiling 66 %, overall 61 %                                                                             |
+| Peak memory        | 263 MB                                                                                                                         |
+| Whole run          | 5.9 s                                                                                                                          |
+
+The bundle validates and walks in the viewer.
+
+### Hallway end to end in the GPU image
+
+The hallway video was run end to end in the new GPU image,
+`andarilho-worker-gpu` (19.4 GB, against 34.8 GB with the splat toolchain):
+
+| Stage                 | Result                                                      |
+| --------------------- | ----------------------------------------------------------- |
+| preparing             | 5.8 s                                                       |
+| camera_reconstruction | 21.6 s: 30 of 34 selected views registered, in 2 components |
+| normalizing           | 0.7 s                                                       |
+| texturing             | 6.1 s                                                       |
+
+Overall coverage was 62 %, and the bundle validates.
+
+### What it looks like
+
+The real colors and details land on the walls and floor. Everything past the
+single rectangle (the rest of the hall and the doorways) is painted flat onto its
+end wall, and furniture is painted onto the walls. Wave 3 (scene analysis,
+multi-room, doors, 3D furniture) addresses this. Live verification of wave 3
+waits for credit on the OpenCode account, which currently answers HTTP 402
+(insufficient account funds).
 
 ## Capture
 
@@ -34,6 +98,10 @@ rooms and a deliberately poor capture. Only this one exists so far.
 | Entrypoint | `python -m andarilho_worker.smoke --video … --out … --quality preview`: the worker's own stage code, recipe and normalization |
 
 ## Toolchain and licenses
+
+This is the splat toolchain, kept as history. The GPU image no longer contains
+PyTorch, nerfstudio, gsplat or splat-transform; it keeps COLMAP, FFmpeg and the
+worker.
 
 | Component       | Version                      | License                                                                      |
 | --------------- | ---------------------------- | ---------------------------------------------------------------------------- |
@@ -134,6 +202,9 @@ the user-facing `INSUFFICIENT_OVERLAP` error and no scene, which is the
 intended behaviour for a disconnected capture.
 
 ## Exit criteria
+
+These are the splat-era criteria, kept as recorded. The textured model's results
+are in the direction change above.
 
 | Criterion                                                           | Status                                                                                         |
 | ------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |

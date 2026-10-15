@@ -2,9 +2,9 @@
 
 **Capture a place. Step inside.**
 
-Andarilho turns a continuous walkthrough video and overlapping photos of a real place into a browser-based, walkable 3D experience. A floor plan is optional and helps establish scale, align rooms, and build the geometry used for walking.
+Andarilho turns a continuous walkthrough video and overlapping photos of a real place into a browser-based, walkable 3D model. The walls, floors, ceilings, doors and furniture are plain 3D geometry, colored with textures projected from the video frames. The layout is proposed automatically, so the result is walkable without manual fixing. A floor plan is optional and gives the AI scene analysis more context about the place.
 
-This document is the application skeleton and implementation blueprint. **The repository now contains the first implementation of this blueprint**: the API, CPU worker, viewer package, web app, Compose stack and CPU-only CI. The GPU reconstruction stages (COLMAP, Splatfacto, SplatTransform) are wired as pinned recipes behind the `gpu` worker capability but have not yet been run on a Linux NVIDIA host. HomeQ/Matterport imports (section 15) and the DeepSeek client (section 16) are not implemented yet. The HTTP shapes are pinned in [docs/api-contract.md](docs/api-contract.md).
+This document is the application skeleton and implementation blueprint. **The repository contains the first implementation of this blueprint**: the API, CPU worker, GPU camera-reconstruction worker, viewer package, web app, Compose stack and CPU-only CI. The splat-based approach first described here was replaced by the textured layout model; [docs/milestone-0.md](docs/milestone-0.md) records why and the measured results. Camera reconstruction (COLMAP, the only GPU stage) and texturing have run end to end on the owner's hallway walkthrough. Scene analysis (section 8), which recognizes rooms, doors and furniture with an AI model (section 16), is part of the pipeline; its live runs wait for account credit with the provider, and it is tested against recorded replies. Matterport tour embeds are the only existing-tour import (section 15); native mesh import is not implemented yet. The HTTP shapes are pinned in [docs/api-contract.md](docs/api-contract.md).
 
 ### Quickstart
 
@@ -46,36 +46,38 @@ The directory tree, application commands, contracts, and code examples below des
 
 ## 1. Recommended approach
 
-Build a hybrid scene with two aligned representations:
+Build one walkable model from plain geometry, textured from the video:
 
-1. **Appearance:** reconstruct the captured place with COLMAP and Nerfstudio Splatfacto, then display compressed Gaussian splats through Spark in Three.js.
-2. **Movement:** build a separate, simplified collision model from confirmed room boundaries, floor-plan tracing, and optionally reconstructed geometry. Use a Rapier kinematic capsule for the visitor.
+1. **Camera poses:** COLMAP recovers where the camera was for each registered frame, plus a sparse point cloud. It supplies poses only; no splats or other appearance model are trained.
+2. **Layout:** the walls, floors, ceilings, doors and obstacles are simple planar geometry. The worker proposes the rooms and doors automatically from the camera path and the wall evidence in the points. The owner may correct the proposal, but the scene does not wait for that.
+3. **Appearance:** each surface is colored with textures projected from the video frames. Every texel is blended from the frames that see it, with depth testing and exposure matching. The model is unlit, so it shows the footage as it was filmed.
+4. **Furniture:** an AI model looks at keyframes, the floor plan and photos, and draws each object by hand as a few colored box and cylinder parts. The worker places each object on the floor using the posed frames. Objects are rendered as 3D geometry, and the solid ones block walking.
 
-Keep the reconstruction worker outside the web application. Run the application API and job coordination on ordinary CPU infrastructure; run reconstruction in a pinned Linux GPU container. Store media and scene artifacts in private object storage.
+Collision uses the same layout and furniture geometry that is drawn, so the visitor cannot walk through a wall or a solid object. Keep the reconstruction worker outside the web application. Run the application API and job coordination on ordinary CPU infrastructure; run camera reconstruction, the only GPU stage, in a pinned Linux GPU container. Store media and scene artifacts in private object storage.
 
-The first release should support one connected, single-floor apartment or similarly sized indoor place. Make a good capture reliably explorable before attempting arbitrary buildings, automatic stairs, editable furniture, or generative completion.
+Areas the video never saw are a flat neutral grey and are reported in the quality warnings; they are never invented. Furniture parts that no frame shows take the color the agent drew them with, rather than grey.
+
+The first release should support one connected, single-floor apartment or similarly sized indoor place. Make a good capture reliably explorable before attempting arbitrary buildings, automatic stairs, moving or resizing furniture, or generative completion.
 
 ### What the product can promise
 
 - Upload video and/or overlapping photos, with continuous video as the recommended input.
-- Receive a capture-quality assessment before expensive training starts.
-- Reconstruct areas supported by the uploaded views.
-- Review orientation, scale, floors, boundaries, obstacles, and a safe spawn point.
-- Walk through approved areas on desktop and supported mobile devices.
+- Receive a capture-quality assessment, with the reason when a capture cannot be used.
+- Reconstruct and texture areas supported by the uploaded views.
+- Receive an automatic layout of rooms, doors, walls and furniture, with a safe spawn point. The owner can correct it, but it works without any correction.
+- Walk through the captured areas on desktop and supported mobile devices.
 - Share a revocable, read-only scene link.
 - Delete the original capture and generated scene according to an explicit retention policy.
 
 ### What it cannot reliably infer
 
-Unrelated listing photos do not necessarily describe a connected 3D space. Missing surfaces, hidden rooms, mirrors, glass, moving people, textureless walls, and repeated corridors can make reconstruction ambiguous. A floor plan supplies layout constraints, but does not reveal missing textures or prove the present arrangement of a room.
+Unrelated listing photos do not necessarily describe a connected 3D space. Missing surfaces, hidden rooms, mirrors, glass, moving people, textureless walls, and repeated corridors can make reconstruction ambiguous. A floor plan is context for the AI scene analysis, not a measurement: it does not reveal missing textures or prove the present arrangement of a room.
 
 Do not silently invent unseen rooms or present estimated measurements as surveyed dimensions. If reconstruction separates into disconnected components, show that result and request a connecting capture. A guided collection of separate room views is an honest fallback; fabricating a corridor is not.
 
 ### Why this combination
 
-Gaussian splats preserve a captured place's visual character without requiring a clean textured architectural mesh. They are appearance primitives rather than reliable physical surfaces. Separating the two representations lets the visitor move through a stable simplified model while viewing the photorealistic reconstruction.
-
-Nerfstudio documents Splatfacto's COLMAP initialization and PLY export, but explicitly does not provide a general mesh export for this method. Treat collision generation as its own pipeline stage. See [Splatfacto](https://docs.nerf.studio/nerfology/methods/splat.html).
+A layout model is what a visitor walks on and bumps into, so it is built as plain geometry rather than as the captured appearance. Gaussian splats were the first approach (see [docs/milestone-0.md](docs/milestone-0.md)). They need dense, well-overlapping captures, and on a handheld walkthrough they came out blurry and floaty, so they were replaced. A layout needs only camera poses and a rough outline. COLMAP supplies the poses, the walk supplies the rooms, and the frames supply the colors. The same geometry drives drawing and collision, so what is drawn is what stops the visitor.
 
 ## 2. Product scope and user flow
 
@@ -87,7 +89,7 @@ Nerfstudio documents Splatfacto's COLMAP initialization and PLY export, but expl
 | Capture | Guidance for a slow continuous walkthrough with open doors and overlapping views. |
 | Upload | Resumable direct uploads, verified completion, optional floor-plan image/PDF. |
 | Processing | Durable jobs, stage progress, useful failure messages, cancellation. |
-| Review | Set up direction, scale, origin, floor, room boundaries, obstacles, and spawn. |
+| Review (optional) | Correct the automatic layout (rooms, doors, walls, furniture) and enter a measured distance for scale. Walking does not wait for review. |
 | Viewer | First-person movement, collision, mouse/touch look, reset position, quality setting. |
 | Sharing | Explicit publish, read-only token, expiry and revocation. |
 | Operations | Resource limits, tenant isolation, job recovery, private storage, deletion. |
@@ -99,8 +101,8 @@ Nerfstudio documents Splatfacto's COLMAP initialization and PLY export, but expl
 3. Upload one continuous video, supplementary photos, and optionally a floor plan.
 4. Confirm the input list and submit a reconstruction run.
 5. Review quality findings: blurry sections, missing overlap, disconnected rooms, and estimated processing tier.
-6. Reconstruct and receive a visual preview.
-7. Confirm scale and orientation; trace or correct the walkable floor and blocking geometry.
+6. Reconstruct, texture and check the model automatically.
+7. Optionally enter a measured distance to fix the scale, or correct the automatic layout.
 8. Walk the scene privately and inspect the collision overlay.
 9. Publish a specific scene revision and copy its share link.
 10. Revoke access, rebuild a revision, or delete the project when needed.
@@ -115,7 +117,7 @@ A project can have several reconstruction runs and scene revisions. Publishing p
 - Look into corners and revisit the start to help connect the camera trajectory.
 - Capture furniture from several sides and add photos for poorly covered details.
 - Avoid people moving through the frame, rapid turns, and long views into mirrors.
-- Include at least one user-confirmed physical distance if metric scale matters.
+- Include a physical distance you can measure, such as a door width, if metric scale matters. Enter it after processing; until then the scale is estimated.
 - Capture only spaces and material the uploader has permission to process and share.
 
 Suggested beta intake limits: one video up to 5 minutes, at most 300 supplementary photos, at most 2 GiB total, and a floor plan up to 20 MiB. These are configurable starting limits, not reconstruction guarantees. Larger captures need a separate tier after benchmarking.
@@ -131,19 +133,22 @@ Suggested beta intake limits: one video up to 5 minutes, at most 300 supplementa
 | Object storage | AWS S3 in production; MinIO for local development | Direct multipart uploads and private immutable artifacts. Test compatibility rather than assuming every S3-like provider behaves identically. |
 | Job execution | Dedicated Python worker using a PostgreSQL job table | Atomic submission, few moving parts, CPU/GPU worker separation through job capabilities. |
 | Video preparation | FFmpeg / FFprobe | Decode metadata, rotation, frames, and thumbnails in a bounded subprocess. |
-| Camera reconstruction | COLMAP | Recover camera poses and a sparse point cloud from overlapping views. |
-| Visual training | Nerfstudio Splatfacto with gsplat | Established capture-to-splat baseline with exportable results. |
-| Asset preparation | PlayCanvas SplatTransform | Filtering, compression, and optional voxel/collision proposals. |
-| Browser rendering | Three.js + `@sparkjsdev/spark` | Gaussian splats and regular Three.js geometry in a WebGL2 viewer. |
+| Camera reconstruction | COLMAP, built with CUDA in the GPU image | Recover camera poses and a sparse point cloud from overlapping views. The only GPU stage. |
+| Scene analysis | DeepSeek V4.1 Flash (`deepseek-v4.1-flash`) through OpenCode's OpenAI-compatible API | Reads keyframes, the floor plan and photos, and returns rooms, doors and furniture drawn as primitive parts. Optional: a failure keeps the geometric proposal. |
+| Layout proposal | NumPy and mapbox-earcut | Snaps rooms to the wall evidence, grounds doors and furniture on the floor, and triangulates floors. |
+| Textured model | Planar layout surfaces, a NumPy depth rasterizer and JPEG atlas pages | The layout colored from the video frames, unlit. No splat training. |
+| Image handling | Pillow | Decodes and encodes the atlas pages, the keyframes sent for analysis and the poster. |
+| Scene files | glTF 2.0 binary (GLB) with `KHR_materials_unlit` | One textured model and one collision GLB per revision, with identity node transforms. |
+| Browser rendering | Three.js 0.180.0 with `GLTFLoader` | Draws the GLB with unlit materials in a WebGL2 viewer. |
 | Movement | `@dimforge/rapier3d-compat` | Kinematic capsule collision, slopes, and ground handling. |
 | Optional routing | Recast Navigation JS, later | Add when click-to-move or route planning is actually required. |
 | Checks | pytest, Ruff, TypeScript, ESLint, Vitest, Playwright | Focused API/worker checks, scene-contract checks, and browser acceptance. |
 
-Use compatible stable releases, commit both JavaScript and Python lockfiles, and pin GPU container images by digest. Spark's current getting-started example pairs Spark 2.3.1 with Three.js 0.180.0; use that as a compatibility starting point, then verify and lock the chosen pair. See [Spark setup](https://sparkjs.dev/docs/).
+Use compatible stable releases, commit both JavaScript and Python lockfiles, and pin GPU container images by digest. The viewer pins Three.js 0.180.0 and loads its `GLTFLoader` from that package.
 
-Keep GPU dependencies in the worker image. Do not install CUDA/PyTorch into the ordinary API image. The web app must not require a GPU to build or serve.
+Keep the CUDA dependency in the GPU worker image only. Do not install CUDA into the ordinary API or CPU worker images. The web app must not require a GPU to build or serve.
 
-Do not introduce Kubernetes, a second queue, a vector database, or an agent framework in the first release. They do not solve the initial reconstruction and navigation risks. A managed job runner can replace the polling worker later while preserving the job and artifact contracts.
+Do not introduce Kubernetes, a second queue, a vector database, or an agent framework in the first release. They do not solve the initial reconstruction and navigation risks. A managed job runner can replace the polling worker later while preserving the job and artifact contracts. Scene analysis is a single bounded HTTP request per run, not an agent framework.
 
 ## 4. System architecture
 
@@ -176,9 +181,9 @@ flowchart LR
 
 The Next.js proxy forwards authenticated application requests and does not duplicate business rules. Large media moves directly between the browser and object storage. The API issues scoped upload grants, verifies completed objects, and inserts jobs. Workers claim durable work, write immutable artifacts, and update progress.
 
-For a first deployment, signed S3 asset URLs are sufficient. Introduce private CDN delivery once traffic justifies it. A public share token grants access to an approved derivative scene, never to the original video, photos, floor plan, or checkpoints.
+For a first deployment, signed S3 asset URLs are sufficient. Introduce private CDN delivery once traffic justifies it. A public share token grants access to an approved derivative scene, never to the original video, photos, floor plan, or dataset archive.
 
-The API should remain responsive while a model trains. FastAPI's built-in background tasks are not the durable GPU job runner. See [FastAPI background-task guidance](https://fastapi.tiangolo.com/tutorial/background-tasks/).
+The API should remain responsive while a worker stage runs. FastAPI's built-in background tasks are not the durable GPU job runner. See [FastAPI background-task guidance](https://fastapi.tiangolo.com/tutorial/background-tasks/).
 
 ## 5. Proposed repository skeleton
 
@@ -232,7 +237,8 @@ andarilho/
     viewer/
       src/
         create-viewer.ts               # renderer lifecycle
-        render/spark-scene.ts
+        manifest.ts                    # manifest and delivery checks
+        render/mesh-scene.ts           # GLTFLoader for the textured model
         render/quality.ts
         movement/player.ts
         movement/input.ts
@@ -267,22 +273,36 @@ andarilho/
         runner.py                      # subprocess/resource supervision
         recipes.py                     # pinned pipeline configuration
         stages/
-          validate.py
-          prepare.py
-          reconstruct.py
-          train.py
-          normalize.py
-          propose_geometry.py
-          package_scene.py
-          validate_scene.py
+          validate.py                  # validating
+          prepare.py                   # preparing
+          reconstruct.py               # camera_reconstruction (COLMAP, GPU)
+          normalize.py                 # normalizing: worldFromColmap, evidence
+          analyze_scene.py             # scene_analysis (AI, optional)
+          propose_geometry.py          # geometry_proposal
+          texture.py                   # texturing
+          package_scene.py             # packaging
+          validate_scene.py            # scene_validation
+        geometry/
+          colmap.py                    # COLMAP binary readers
+          frame.py                     # frame from sparse points
+          layout.py                    # layout validation, collision GLB
+          surfaces.py                  # layout to UV-mapped surfaces and atlas
+          raster.py                    # depth rasterizer
+          texture.py                   # frame blending, procedural textures
+          textured.py                  # textured mesh records
+          glb.py                       # GLB writer and reader
+          collide.py                   # capsule clearance
+          polygon.py                   # polygon triangulation
         artifacts.py
         metrics.py
+        validation.py                  # scene and render asset checks
       tests/
   infra/
     compose.yaml                       # API, web behind a Caddy edge, Postgres, MinIO, CPU worker
     Dockerfile.api
-    Dockerfile.worker-gpu
     Dockerfile.web
+    Dockerfile.worker              # CPU worker
+    Dockerfile.worker-gpu          # camera reconstruction only
     storage-cors.json
   scripts/
     generate-contracts.py
@@ -297,7 +317,7 @@ andarilho/
     gpu-smoke.yml                      # manual/secured GPU runner only
 ```
 
-The API owns database migrations and Pydantic scene models. Generate JSON Schema and TypeScript types from that source; do not maintain three independent definitions. The worker validates manifests against the generated versioned JSON Schema, bundled in its image. It does not import the API service as a package. Keep trained assets out of Git; obtain licensed fixtures through a checksum-pinned download or private storage.
+The API owns database migrations and Pydantic scene models. Generate JSON Schema and TypeScript types from that source; do not maintain three independent definitions. The worker validates manifests against the generated versioned JSON Schema, bundled in its image. It does not import the API service as a package. Keep media, generated scenes and keys out of Git; obtain licensed fixtures through a checksum-pinned download or private storage.
 
 ## 6. Domain model and database
 
@@ -353,11 +373,11 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-User-visible stages are `validating`, `preparing`, `camera_reconstruction`, `training`, `normalizing`, `geometry_proposal`, `packaging`, and `scene_validation`. Completion of processing creates a draft awaiting review. It does not automatically authorize public sharing.
+User-visible stages are `validating`, `preparing`, `camera_reconstruction`, `normalizing`, `scene_analysis`, `geometry_proposal`, `texturing`, `packaging`, and `scene_validation`. Completion of processing creates a walkable draft. It does not automatically authorize public sharing; publishing is a separate, explicit step.
 
 ### PostgreSQL queue claim
 
-This SQL fragment assumes the fields above exist. Bind parameters through the database driver. Use one short transaction; do not hold a database lock for the duration of training.
+This SQL fragment assumes the fields above exist. Bind parameters through the database driver. Use one short transaction; do not hold a database lock for the duration of a stage.
 
 ```sql
 WITH candidate AS (
@@ -401,14 +421,22 @@ Use an allowlisted same-origin Next.js proxy for application requests, preserve 
 
 ```text
 tenants/{project_id}/captures/{capture_set_id}/originals/{upload_id}
-tenants/{project_id}/runs/{run_id}/attempts/{stage}/{fence}/...
+tenants/{project_id}/runs/{run_id}/attempts/{stage}/{job_id}/{fence}/
+    dataset.tar        camera_reconstruction: undistorted frames and COLMAP poses
+    evidence.json      normalizing: sparse points and camera centers for the editor
+    analysis.json      scene_analysis: keyframe poses and the AI reply
+    collision.glb      geometry_proposal: the walkable geometry
+    model.glb          texturing: the textured model
+    poster.webp        preparing: the viewer's fallback still
 tenants/{project_id}/scenes/{scene_revision_id}/manifest.json
-tenants/{project_id}/scenes/{scene_revision_id}/scene.sog
+tenants/{project_id}/scenes/{scene_revision_id}/model.glb
 tenants/{project_id}/scenes/{scene_revision_id}/collision.glb
 tenants/{project_id}/scenes/{scene_revision_id}/poster.webp
 ```
 
-The API chooses keys; user filenames are display metadata only. Buckets are private, encryption is enabled, and object access is scoped to authorized project prefixes. Separate raw inputs/checkpoints from viewer derivatives through storage prefixes and roles. Enable multipart-abort lifecycle cleanup and orphan-attempt cleanup. Do not expose source paths in public error messages.
+Packaging copies the textured model and collision into each revision's own prefix, so every revision keeps its own files. A run's attempt files stay while the project exists, so a layout save can texture again from the run's `dataset.tar`. Deleting the project removes everything under `tenants/{project_id}/`.
+
+The API chooses keys; user filenames are display metadata only. Buckets are private, encryption is enabled, and object access is scoped to authorized project prefixes. Separate raw inputs and the dataset archive from viewer derivatives through storage prefixes and roles. Enable multipart-abort lifecycle cleanup and orphan-attempt cleanup. Do not expose source paths in public error messages.
 
 ### Multipart upload protocol
 
@@ -450,7 +478,7 @@ Baseline masks can be manually specified for sensitive regions. Automated people
 3. Register a bounded set of supplementary photos against that model; permit a small exhaustive match set for early fixtures, then use retrieval-based matching when necessary.
 4. Run incremental structure from motion and bundle adjustment.
 5. Save calibrated cameras, sparse points, registered image IDs, and disconnected components.
-6. Produce a coverage preview before starting visual training.
+6. Report the coverage as the run's quality findings before texturing starts.
 
 Suggested initial gates: at least 30 useful registered views, at least 80% of selected views registered in the intended main component, and explicit connectivity across every room transition the app claims. These thresholds are product heuristics and must be calibrated on a fixture set. A high registration ratio alone does not prove correct geometry: inspect doorway coverage, continuous tracks, spatially distributed reprojection residuals, implausible jumps, folded trajectories, duplicated walls/rooms, and room coverage.
 
@@ -479,53 +507,73 @@ VGGT now provides a specific gated `VGGT-1B-Commercial` checkpoint; its ordinary
 
 Give every learned-model experiment its own frame/resolution/VRAM limits. For example, Omega reports 35.71 GB on its A100 400-frame benchmark at 624x416; that number is evidence about Omega, not about COLMAP or VGGT Commercial. A 400-frame SfM input cap is not permission to run a 400-frame learned-model batch on a 24 GiB GPU. See [the benchmark conditions](https://github.com/facebookresearch/vggt-omega#runtime-and-gpu-memory).
 
-### Stage C: train the visual representation
+### Stage C: texture the layout (texturing)
 
-Use the registered cameras, undistorted images, and sparse points to initialize Splatfacto. Start with a bounded preview recipe; train a higher-quality revision only after its capture quality is acceptable. Limit iterations, wall time, image count, resolution, and Gaussian count through the recipe. Record a recipe digest, tool versions, CUDA/PyTorch versions, random seed, input hashes, and actual resource use.
+Texturing runs on the CPU. It takes the layout from geometry_proposal, or the owner's saved layout, and paints its surfaces from the registered frames. Each frame is a camera with known intrinsics and a pose in the canonical world (`worldFromColmap`, section 9). For every surface texel, the worker finds the frames that see it and:
 
-Persist checkpoints at bounded intervals. A retry can reuse a verified checkpoint only when input hashes and recipe compatibility match. Treat an exported training configuration as provenance, not as untrusted executable configuration to load from the internet.
+- depth-tests the texel against a software z-buffer of the layout, so a wall hides what is behind it;
+- weights each frame by how square and close its view is, with a falloff at the image edges;
+- blends the weighted colors, favoring the best head-on views, without keeping every view in memory;
+- matches exposure: each frame gets a gain, the median ratio to a first-pass blend clamped to 0.6 to 1.6, before the final blend.
 
-Keep a held-out set of views for visual checks. Record PSNR/SSIM where appropriate, but use rendered inspection and coverage checks as well. A high training-image score does not establish that an unseen corner or an entire room is correct.
+Surfaces are laid out in charts at a 1 cm texel, coarser when the atlas would otherwise need more than eight pages of 2048 px. Small holes are filled from their neighbors, and each chart is dilated so that mipmaps stay on it. The atlas pages are JPEG. The model is one GLB with unlit materials, so the footage shows as filmed and nothing needs lighting.
 
-The practical starting worker is a Linux container with a 16-24 GiB NVIDIA GPU, enough CPU for feature extraction, and approximately 32 GiB RAM. This is a planning choice, not a measured requirement. Nerfstudio lists roughly 6 GB for standard Splatfacto and 12 GB for its larger variant; real memory use also depends on inputs and settings. See [upstream model figures](https://docs.nerf.studio/nerfology/methods/splat.html).
+Texels that no frame sees stay a flat neutral grey, and they are counted. Coverage is reported for each kind of surface and overall. When less than 99 % of the architectural surfaces were seen, the package warns that the rest are shown in plain grey. Furniture is the one exception: its unseen parts take the color the agent drew them with, under fixed face shading, rather than grey.
 
-### Stage D: normalize, clean, and package
+Texturing reports progress once per frame, so deadlines and cancellation apply. A synthetic recipe has no frames. It gets deterministic procedural textures on the same surfaces, so the same GLB path runs without a capture.
 
-Export a full-precision PLY archive. Remove invalid values and inspect outliers without deleting legitimate thin structures. Recenter the scene close to the origin and produce a compressed `.sog` runtime asset. Compare several fixed renders before and after compression and preserve the original archive privately.
+### Stage D: normalize (normalizing)
 
-Generate a lower-detail mobile derivative when profiling shows that the full asset exceeds the target device's budget. Do not infer GPU memory from compressed download bytes. Multiple render quality profiles must share the same canonical coordinates and navigation geometry.
+The frame comes from the sparse points and the camera poses, not from a trained model. The worker:
 
-SplatTransform supports conversion and asset inspection; see its [overview and command examples](https://developer.playcanvas.com/user-manual/splat-transform/). GPU-backed operations have separate runtime requirements, including WebGPU/Vulkan setup on some backend configurations. Validate this inside the worker image using the [Docker backend guide](https://developer.playcanvas.com/user-manual/splat-transform/docker/).
+1. levels the points with an up direction taken from the camera poses. A phone's right vectors stay level while it pans and pitches, so their least-varied direction is up. A straight walk with little yaw uses the cross product of the right vector and the walking direction instead;
+2. finds the wall direction from pairs of nearby points, else from the walk's steps, else from the camera headings, and turns the walls onto the X and Z axes;
+3. fits the floor as the dominant plane under the camera path (RANSAC, tilted at most 30 degrees), and puts it at y = 0;
+4. scales the scene so the median camera height above the floor is 1.5 m, a walking person's height. This scale is an estimate (`scaleStatus: estimated`) until the owner measures a distance;
+5. puts the spawn where the walk started, facing the way the first camera faced, and proposes bounds 0.75 m beyond the camera path.
 
-### Stage E: propose and approve movement geometry
+Points with a reprojection error under 2 px and a track of at least three views are trusted. The fallback relaxes both when too few remain. The result, `worldFromColmap`, is one proper rotation, one positive scale and a translation, stored column-major. The stage also writes `evidence.json`: the trusted points and the camera centers in the canonical world, which the review editor draws under the walls. A walk whose camera height varies by more than 1.5 m is flagged as possibly bent.
 
-If a plan exists, let the user trace its floor polygons, walls, doors, and obstacles after confirming its scale. If no plan exists, show a top-down reconstruction preview and let the user draw the same simplified shapes directly. This keeps the floor plan genuinely optional.
+### Stage E: analyze the scene and propose the layout (scene_analysis, geometry_proposal)
 
-An optional SplatTransform voxel/collision pass can suggest geometry. Normalize its input into the confirmed canonical metric frame first: voxel size, capsule clearance, seed positions, and morphological filling are all unit-sensitive. Treat it as a proposal that needs inspection, especially at doors, thin walls, glass, stair edges, and furniture. Dense COLMAP stereo can be evaluated later for difficult captures; it should not be an additional mandatory heavy stage in the first release. See [collision-generation tooling](https://developer.playcanvas.com/user-manual/splat-transform/collision/).
+**Scene analysis** (`scene_analysis`, CPU) asks an AI model to read the capture. The stage picks 12 keyframes spread over the walk, the registered photos (up to six) and the floor plan. Keyframes are downscaled to a 1024 px long edge and the floor plan to 1600 px. Everything is re-encoded as JPEG at quality 80 without its metadata. The model is asked once for:
 
-Generate an invisible collision GLB and an explicit list of approved floor regions. Confirm a valid spawn capsule, blocking walls, room transitions, and bounds. Also inspect the actual walking path at the intended eye height: a physically valid position can still reveal missing visual surfaces. Approve only the intersection of credible captured views and supported, clear movement geometry. Keep a debug view that overlays these objects on the splats. Save edits in a new geometry revision, rebuild derived collision artifacts, and revalidate before publication.
+- the room label of each keyframe;
+- the boxes of the door openings in each keyframe, with whether each door is open or closed and which room it leads to;
+- the boxes of the objects visible in each keyframe, with identities that stay consistent across frames;
+- for each object, its category, an estimated size, whether it is solid, where it is mounted, and a hand-drawn shape made of box and cylinder parts with colors.
 
-### Reference CLI experiment
+The reply is validated and normalized before anything uses it. The stage writes `analysis.json` under its own attempt prefix: the keyframes' camera poses, intrinsics and original image sizes, and the reply. Its `analysisStatus` is `complete`; `unavailable` when the provider fails, with a reason of `no_key`, `no_credit`, `auth`, `rate_limited`, `timeout`, `server`, `network`, `bad_status` or `bad_reply`; or `disabled` when no provider is configured. A failure never fails the run. The geometric proposal goes ahead without the analysis, and the stage's warnings say what happened.
 
-These are upstream command patterns for a research spike in a prepared Linux GPU environment. They are not implemented repository commands and were not executed while writing this blueprint. Pin the toolchain and inspect its help output before automating it.
+**Layout proposal** (`geometry_proposal`, CPU) turns the walk and the analysis into rooms, doors and furniture.
+
+- *Rooms.* The camera path is split into rooms by the agent's room labels. Each room extends from the walked path to the wall evidence beyond it: a side snaps outward to the wall-height point density, and no side moves to within 0.3 m of a camera. Adjoining rooms share a wall, and the open door where the walk crossed between them joins them.
+- *Doors.* Each door is grounded by casting rays from its bottom edge onto the floor, using the poses of the keyframes that show it, and is then attached to the nearest wall. A door that leads to a space the walk never reached is `closed`: a textured panel that blocks walking.
+- *Furniture.* Each object is grounded the same way, with rays from its box bottom onto the floor. Its detections are fused across frames, turned to face away from the nearest wall, pushed flush against it, and clamped inside its room.
+
+Without an analysis the proposal is the single room around the walk, as before: its sides snap to the wall evidence, and the spawn is where the walk started.
+
+### Stage F: package and validate (packaging, scene_validation)
+
+Packaging writes each revision under its own prefix: `model.glb` (the textured model), `collision.glb` (the walls, floors, openings, obstacles and solid furniture boxes, in world coordinates), `poster.webp`, and `manifest.json` (manifest 2.0, section 10). Every packaged scene is `approved_collision`, so it can be walked as soon as it is valid, whatever its geometry source.
+
+Scene validation checks the manifest against the JSON Schema, the asset prefixes, the spawn and bounds, and each asset's bytes and hash. It checks the textured model: a binary glTF with unlit materials, at most 200,000 triangles, textures no larger than 4096 px a side, and inside the scene bounds plus a margin. It also checks the collision: identity node transforms, finite vertices inside the bounds, and a spawn with the player's capsule clearance and floor support. A failure marks the revision invalid with its findings. A pass makes it the valid draft.
+
+### Reference smoke run
+
+The worker's own stage code runs locally through `andarilho_worker.smoke`, with the pinned recipe, subprocess supervision and output checks, and without a database. On a GPU host, a video runs `preparing`, `camera_reconstruction` and `normalizing`:
 
 ```bash
-ns-process-data video --data /data/input/walkthrough.mp4 --output-dir /data/prepared
+python -m andarilho_worker.smoke --video /data/capture.mp4 --out /out --quality preview
 ```
+
+From a stored `dataset.tar`, it runs `normalizing` only, so it needs no GPU:
 
 ```bash
-ns-train splatfacto --data /data/prepared
+python -m andarilho_worker.smoke --dataset /data/dataset.tar --out /out
 ```
 
-```bash
-ns-export gaussian-splat --load-config /data/outputs/run/config.yml --output-dir /data/export
-```
-
-```bash
-splat-transform /data/export/splat.ply /data/export/scene.sog
-```
-
-The training command is the basic interactive upstream workflow. A production worker must configure a finite recipe, disable unnecessary interactive services using the pinned version's supported options, find the actual generated config/output paths, supervise exit and cancellation, and validate the resulting files. Do not assume the example path exists. For mixed video/photos, prepare a combined calibrated dataset explicitly rather than running the video-only convenience command and ignoring the photos. See [custom datasets](https://docs.nerf.studio/quickstart/custom_dataset.html).
+Either way it then proposes the layout and textures the model on the CPU, and writes a bundle to `--out/bundle`: the proposal, the textured model, its collision GLB, the poster and a manifest. The scene validator checks the bundle, and the process exits non-zero when a stage or the bundle fails. The viewer's dev page opens the bundle with `?bundle=`. The `--dataset` run does not rerun frame selection, and it records that as a warning.
 
 ### Worker orchestration contract
 
@@ -579,43 +627,41 @@ Use a right-handed coordinate system with meters as the nominal unit, +Y up, XZ 
 Maintain the transform chain explicitly:
 
 ```text
-source camera/reconstruction frame
-  -> exported splat frame, including trainer normalization
-  -> format decoder's documented frame
-  -> canonical Andarilho world frame
+COLMAP world (arbitrary up and scale; undistorted PINHOLE cameras)
+  -> worldFromColmap (normalizing): leveled up, walls on X and Z, floor at y = 0, meters
+  -> canonical Andarilho world, scaled about the origin by calibration.renderScale
 ```
 
-Record Nerfstudio's dataparser normalization/scale and the exported asset frame. Do not apply a COLMAP transform to an already-normalized export without accounting for that chain. Each importer adapter must be tested using known landmarks and axis markers. PLY, SPZ, SOG, and voxel outputs can have different conventions; do not paste a 180-degree flip from a sample viewer into every loader.
+`worldFromColmap` is stored as a column-major 4x4 matrix compatible with `THREE.Matrix4.fromArray`. It is a proper rotation, one positive uniform scale and a translation. The points and camera poses are never rewritten: texturing applies the matrix when it needs them in the canonical world. For each registered frame, the pose is mapped through the matrix and then through the calibration, which gives the camera's rotation and translation in canonical meters. A pixel projects to the same place either way, because projection divides by depth.
 
-Store `worldFromDecodedRender` as a column-major 4x4 matrix compatible with `THREE.Matrix4.fromArray`. It includes only a proper rotation, translation, and positive uniform scale. Bake reflections or required format corrections in the importer, and update Gaussian orientation/covariance and directional color coefficients correctly when baking. Spark's ordinary transform path averages non-uniform scaling; newer covariance/extended modes offer additional capabilities. Andarilho's uniform-scale rule is a product geometry contract: do not distort a capture anisotropically to force it into a plan. See [SplatMesh behavior](https://sparkjs.dev/docs/splat-mesh/) and [current implementation](https://github.com/sparkjsdev/spark/blob/main/src/SplatMesh.ts).
+The scale is `estimated`, from the 1.5 m camera height, until the owner measures a distance. A measurement becomes `renderScale`, the cumulative uniform scale about the world origin. It is absolute rather than relative to the previous revision, so saving a layout again never compounds it. The scale is always uniform: a capture is never stretched to fit a plan.
 
-In the first implementation, render data may remain in its decoded frame and receive this one runtime transform. Collision vertex positions are baked in canonical world coordinates and all collision GLB node transforms must be identity. Floor polygons, landmarks, bounds, and spawn points also use canonical world coordinates. The scene validator rejects non-identity collision node transforms; importer adapters must flatten them before packaging. **Do not apply the render transform to these world-space assets a second time.**
+The textured model, the collision GLB, the floor polygons, the furniture, the landmarks, the bounds and the spawn all use canonical world coordinates. Every collision node transform is identity. The scene validator rejects any other, so no transform is applied twice to the packaged geometry.
 
-### User-assisted alignment
+### Automatic frame and optional calibration
 
-1. Set the up direction and confirm the floor plane.
-2. Enter a known physical distance or calibrate a dimensioned plan.
-3. Select at least three non-collinear recognizable floor landmarks in the plan and reconstruction when possible.
-4. Solve a 2D similarity fit on the horizontal plane: uniform scale, yaw rotation, and translation. Use additional anchors to detect disagreement.
-5. Set the floor's elevation separately and record anchor residuals in meters.
-6. Show the overlay and ask the user to confirm it before generating collision geometry.
+The frame is estimated from the capture (section 8, stage D), and the layout is proposed in it. The walk therefore needs no user step before it can be walked. The owner can improve the scale:
 
-Two well-chosen anchors can initialize a horizontal fit after the up direction is known, but they provide little independent error checking. Full 3D similarity alignment needs sufficient 3D correspondences. An undimensioned image is a diagram until a distance is supplied. A scanned or distorted plan may disagree with the capture; flag the mismatch instead of warping the scene non-uniformly.
+1. Enter a known physical distance, such as a door width, for the layout.
+2. The calibration scales the run's frame about the origin, and `scaleStatus` becomes `user_measured`. Saving the layout again reuses the same absolute scale.
+
+A floor plan is context for the scene analysis. Room polygons are not yet extracted from it or aligned to the walk. A scanned or distorted plan may disagree with the capture, and the design never warps the scene non-uniformly to make the two agree.
 
 ### Editable layout representation
 
-Keep the original plan private and store the confirmed layout as structured JSON:
+Keep the original plan private and store the layout as structured JSON:
 
-- Floors: ID, elevation, approved floor polygons, optional holes.
+- Floors: ID, elevation, floor polygons, optional holes.
 - Walls: endpoints, thickness, height, confidence, provenance.
 - Openings: wall reference, offset, width, bottom/top height, captured open/closed state.
 - Obstacles: simple boxes or polygons with height.
+- Furniture: category, label, footprint center and yaw, size in meters, a solid flag, and a few parts, each a box or an upright cylinder with a color. A piece of furniture is drawn in its own frame: the origin is the center of its footprint on the floor, x runs across its width, y is up, and z runs from back to front, so the front faces +z. Each part is given in fractions of that box, and the piece turns by its yaw about +Y, as three.js `rotation.y` does. The exact fields are in [docs/api-contract.md](docs/api-contract.md).
 - Landmarks: plan point, corresponding capture/world point, uncertainty.
 - Spawn: foot position, yaw, floor ID, and validated clearance.
 
 Use a small SVG-based editor initially: select anchors, trace polygons, drag corners, edit dimensions, and toggle the collision overlay. Generate wall segments on either side of a door opening plus a lintel where needed; do not extrude a solid wall across the opening. Triangulate floor polygons with holes, extrude obstacles, and produce static colliders. Reject self-intersections, degenerate polygons, negative thickness, and impossible heights.
 
-A floor plan is evidence that needs confirmation against the captured state. Neither automatically extracted walls nor an old plan are universally authoritative. Label inferred elements and keep the approved review revision as the source for movement geometry.
+A floor plan is evidence, not a measurement, and it may disagree with the captured state. Neither automatically extracted walls nor an old plan are universally authoritative. Label inferred elements with their provenance (`proposal`, `floor_plan`, `user` or `synthetic`). The layout revision that the owner saved is the source for the next packaging.
 
 ## 10. Scene artifact and delivery contracts
 
@@ -625,31 +671,25 @@ The following persistent manifest is an illustrative, valid JSON shape. IDs and 
 
 ```json
 {
-  "schemaVersion": "1.0",
+  "schemaVersion": "2.0",
   "sceneId": "scene-example",
   "sceneRevisionId": "scene-revision-example",
   "revision": 1,
   "runId": "run-example",
-  "renderMode": "gaussian",
+  "renderMode": "mesh",
   "units": "m",
   "upAxis": "+Y",
   "cameraForward": "-Z",
-  "scaleStatus": "user_measured",
-  "worldFromDecodedRender": [
-    1, 0, 0, 0,
-    0, 1, 0, 0,
-    0, 0, 1, 0,
-    0, 0, 0, 1
-  ],
+  "scaleStatus": "estimated",
   "geometrySpace": "world",
   "bounds": { "min": [-5, 0, -4], "max": [5, 3, 4] },
   "spawn": { "feet": [0, 0.02, 0], "yawRadians": 0, "floorId": "floor-0" },
   "floors": [{ "id": "floor-0", "elevation": 0 }],
   "assets": {
     "render": {
-      "key": "tenants/project-example/scenes/scene-revision-example/scene.sog",
-      "format": "sog",
-      "bytes": 24000000,
+      "key": "tenants/project-example/scenes/scene-revision-example/model.glb",
+      "format": "glb",
+      "bytes": 110000,
       "sha256": "0000000000000000000000000000000000000000000000000000000000000000"
     },
     "collision": {
@@ -682,7 +722,7 @@ The following persistent manifest is an illustrative, valid JSON shape. IDs and 
   "provenance": {
     "recipeDigest": "recipe-example",
     "captureSetId": "capture-example",
-    "geometrySource": "user_confirmed_trace"
+    "geometrySource": "proposal"
   }
 }
 ```
@@ -693,9 +733,9 @@ The delivery envelope adds `sceneRevisionId`, `manifestSha256`, `expiresAt`, and
 
 Fetch a fresh envelope when a URL expires. Retrying an asset must preserve the same revision; silently switching geometry while someone is walking would be unsafe. For later paged assets, authorize every referenced chunk and refresh authorization without changing the scene revision. A top-level manifest grant must not accidentally authorize unrelated bucket prefixes.
 
-Keep PLY/checkpoints as private archive artifacts. Use bundled SOG for normal initial scenes. Evaluate Spark RAD paging for larger places after the basic viewer works; PlayCanvas Streamed SOG directories and Spark RAD paging are different contracts. Do not assume a streaming format is supported merely because a loader accepts a single file with a similar extension.
+Every packaged scene has `navigation.mode` `approved_collision` and `approved` `true`, whatever its geometry source (a proposal, a saved layout or the synthetic fixture), so it can be walked as soon as it is valid. Approval only publishes: it marks the validated revision as the one that viewers and share links receive, and it does not change how the scene walks.
 
-SOG is lossy even though its component images use lossless WebP. Compare the source export and delivered asset at identical camera poses, checking fine edges, readable text, near-wall motion, reflective objects, and view-dependent color. Preserve available spherical-harmonic data unless a measured quality profile deliberately reduces it. See the [SOG specification](https://developer.playcanvas.com/user-manual/gaussian-splatting/formats/sog/).
+Keep `dataset.tar` as a private archive: it holds the frames and poses that texturing and layout saves use. The viewer receives only each revision's `model.glb`, `collision.glb` and poster. A larger scene may later need paged geometry or compressed textures (KTX2); that is later work, and a loader accepting a file does not make a format a supported contract.
 
 ## 11. Three.js viewer implementation
 
@@ -720,11 +760,11 @@ See [Next.js lazy loading](https://nextjs.org/docs/app/guides/lazy-loading). The
 
 ### Rendering bridge
 
-This excerpt shows the verified Three.js/Spark integration surface. It is the rendering portion, not a complete walking controller. Validate the manifest, authorize the delivery envelope, and load collision geometry before enabling movement.
+This excerpt shows how the textured model is drawn. It is the rendering portion, not a complete walking controller. Validate the manifest, authorize the delivery envelope, and load collision geometry before enabling movement.
 
 ```ts
 import * as THREE from "three";
-import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(65, 1, 0.05, 250);
@@ -734,16 +774,10 @@ const renderer = new THREE.WebGLRenderer({
 });
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, quality.maxDpr));
 
-const spark = new SparkRenderer({ renderer });
-scene.add(spark);
-
-const splats = new SplatMesh({ url: delivery.assetUrls.render });
-const transform = new THREE.Matrix4().fromArray(
-  manifest.worldFromDecodedRender,
-);
-transform.decompose(splats.position, splats.quaternion, splats.scale);
-scene.add(splats);
-await splats.initialized;
+// The GLB holds the textured model in canonical world coordinates, so it needs no transform.
+const response = await fetch(delivery.assetUrls.render.url);
+const gltf = await new GLTFLoader().parseAsync(await response.arrayBuffer(), "");
+scene.add(gltf.scene);
 
 camera.position.set(
   manifest.spawn.feet[0],
@@ -754,9 +788,11 @@ camera.rotation.set(0, manifest.spawn.yawRadians, 0, "YXZ");
 renderer.render(scene, camera);
 ```
 
-`delivery`, `manifest`, and `quality` are validated application inputs, not globals. `quality.maxDpr` comes from the selected device profile. Add a `ResizeObserver` to set canvas dimensions, camera aspect, and projection matrix. Awaiting splats is asynchronous: an unmounted viewer must ignore the completed load and release its resources. An initialization failure must also dispose partially created objects.
+`delivery`, `manifest`, and `quality` are validated application inputs, not globals. `quality.maxDpr` comes from the selected device profile. Add a `ResizeObserver` to set canvas dimensions, camera aspect, and projection matrix. Downloading the model is asynchronous and reports its progress: an unmounted viewer must ignore the completed load and release its resources. An initialization failure must also dispose partially created objects.
 
-Use one `renderer.setAnimationLoop` callback. The production engine manages a fixed physics step independently of rendering, then updates the camera and renders. On disposal, stop the loop, remove input/context listeners, disconnect observers, release Rapier objects, call `splats.dispose()`, `spark.dispose()`, and `renderer.dispose()`, and remove the canvas. Handle WebGL context loss with a useful recovery state. See [Spark renderer lifecycle](https://sparkjs.dev/docs/spark-renderer/).
+The scene has no lights, so every material is unlit. Materials that `GLTFLoader` already maps to unlit ones are kept, and any other material is replaced by one that keeps its color map. Textures are sRGB, and their anisotropy comes from the quality tier.
+
+Use one `renderer.setAnimationLoop` callback. The production engine manages a fixed physics step independently of rendering, then updates the camera and renders. On disposal, stop the loop, remove input/context listeners, disconnect observers, release Rapier objects, dispose the model's geometries, materials and textures, call `renderer.dispose()`, and remove the canvas. Handle WebGL context loss with a useful recovery state.
 
 ### Player and collision
 
@@ -765,7 +801,7 @@ Use a vertical, position-based kinematic capsule. Initial settings: radius 0.25 
 For a capsule, the cylinder half-height is `(totalHeight - 2 * radius) / 2`; its center is `feetY + totalHeight / 2`. Mixing foot coordinates, eye coordinates, and body center coordinates is a common source of floor penetration.
 
 1. Initialize Rapier asynchronously; use Three.js `GLTFLoader` to load `delivery.assetUrls.collision` and await both initialization paths.
-2. Validate finite world-space vertices, indices, bounds, and identity collision-node transforms, then build static triangle colliders from those vertices. Reject a mixed/local-space collision asset instead of guessing or applying the splat transform.
+2. Validate finite world-space vertices, indices, bounds, and identity collision-node transforms, then build static triangle colliders from those vertices. Reject a collision asset whose node transforms are not identity, instead of guessing its frame.
 3. Validate the spawn with a downward support query and capsule clearance test.
 4. Convert input into a normalized XZ direction using camera yaw. Diagonal input must not move faster.
 5. Add application-managed vertical velocity/gravity to the requested translation.
@@ -777,7 +813,7 @@ Enable the Walk button only after render loading, collision loading/validation, 
 
 Start with collision-aware free walking and local wall sliding. A navmesh is unnecessary for that behavior. Rapier's built-in controller translates rather than rotates the body; camera yaw/pitch remain separate. See [Rapier's controller guide](https://rapier.rs/docs/user_guides/javascript/character_controller/).
 
-Set an explicit initial slope limit around 40 degrees and a small ground snap around 0.08 m, then verify them against the fixture. Keep autostep disabled for the first single-floor release or tightly bounded for confirmed thresholds. Do not substitute Spark's synchronous ray-splat queries for per-frame collision.
+Set an explicit initial slope limit around 40 degrees and a small ground snap around 0.08 m, then verify them against the fixture. Keep autostep disabled for the first single-floor release or tightly bounded for confirmed thresholds.
 
 Use a maximum accumulated frame delta of 0.1 seconds and a bounded number of fixed substeps. Pause when the page is hidden or input loses focus. Do not let a long background-tab pause produce one huge movement step. The worker's validation and the browser's controller must use compatible capsule settings.
 
@@ -791,21 +827,21 @@ Use a maximum accumulated frame delta of 0.1 seconds and a bounded number of fix
 
 ### Doors, stairs, and unknown areas
 
-Capture traversable doors open. A closed door in the visual splat stays a blocked boundary in the first release. Toggling only a hidden collider would let a user walk through a visibly closed door; do not ship that illusion as an interactive door. Animated doors require removing/replacing the captured door with a mesh and validating the edited scene later.
+An open door is a walkable opening, and the collision leaves it clear. A door to a space the walk never reached is closed: it is a textured panel that blocks walking, and the viewer does not offer to open it. Animated doors are later work. They would need each door to be a separate part of the model that the scene can change, validated again after the change.
 
 The first release is single-floor. Later, simplify noisy stairs into a confirmed ramp/stair collider with landing support and clearance checks. Store floor elevations and explicit connections. Automatic step height must not allow the player to climb furniture or low walls. Add routing/navmesh only when implementing click-to-move, accessible route selection, or room-to-room guidance.
 
-Unobserved regions remain blocked or clearly unavailable. An editor-only inspection mode may fly through geometry, but a published walking mode cannot silently switch to noclip when it encounters an obstacle.
+Areas that the walk never reached have no room in the layout. An editor-only inspection mode may fly through geometry, but a published walking mode cannot silently switch to noclip when it encounters an obstacle.
 
 ### Device budgets and fallback
 
-Initial target budgets: roughly 0.5-1 million visible splats for a mobile derivative and 1-2 million for a typical desktop profile; DPR capped at 1.0 and 1.5 respectively. Measure overdraw, frame time, CPU sorting, texture allocation, decode memory, and thermal behavior. Gaussian count alone does not determine performance. Spark recommends avoiding multisample antialiasing and gives device-dependent budgets in its [performance notes](https://sparkjs.dev/docs/performance/).
+The worker caps the render model at 200,000 triangles and 4096 px per texture side, and scene validation enforces both. The viewer starts from a quality profile chosen for the device and steps down when frames run long: `low` (device pixel ratio capped at 0.75, anisotropy 1), `mobile` (1.0, anisotropy 4, 30 FPS budget) and `desktop` (1.5, anisotropy 8, 60 FPS budget). Measure frame time, texture memory and thermal behavior on the named devices. The atlas pages, decoded on the GPU, are the main memory cost.
 
 Target 30 FPS on the selected mobile test devices and 60 FPS on the selected desktop fixture machine, with a lower-quality recovery path. These are acceptance targets for named fixtures/devices, not public promises for every apartment or browser. Reduce DPR/detail when sustained frame time exceeds budget; avoid repeated quality oscillation.
 
-Profile expanded runtime memory as well as transfer size. Spark's packed base data uses 16 bytes per splat before optional directional-color data; extended data uses 32 bytes with higher-precision centers before that additional data. Decode buffers, sorting textures, and upload copies add more. Evaluate an optional extended-data quality profile if a fixture shows precision jitter, rather than enabling it for every device. See [PackedSplats](https://sparkjs.dev/docs/packed-splats/) and [ExtSplats](https://sparkjs.dev/docs/ext-splats/).
+Profile the GPU memory of a scene as well as its download size. The GLB is compressed JPEG, so its download size says little about the memory the pages use once decoded. Check the highest anisotropy profile on a device with a small GPU before enabling it for every device.
 
-Use WebGL2 as the initial requirement. On missing support, context failure, or memory exhaustion, show the poster, permitted stills, and an optional plan with an explanation. Do not make WebGPU mandatory. Three.js's native GaussianSplat uses the `WebGPURenderer` class, including its `forceWebGL` fallback; it does not require a WebGPU-capable device, but ordinary `WebGLRenderer` is unsupported by that addon. Spark remains the chosen integration with the established `WebGLRenderer` pipeline. See [Three.js GaussianSplat](https://threejs.org/docs/pages/GaussianSplat.html).
+Use WebGL2 as the initial requirement. On missing support, context failure, or memory exhaustion, show the poster and an explanation, and offer the floor plan when there is one. Do not make WebGPU mandatory: the viewer uses the ordinary `WebGLRenderer`.
 
 ## 12. API contracts
 
@@ -830,7 +866,7 @@ Use `/v1`, JSON bodies, UUID resource IDs, explicit authorization, and generated
 | `POST /v1/runs/{id}/retry` | Create a retry/new run under explicit compatible inputs and quota. |
 | `GET /v1/scenes/{id}` | Owner/editor draft metadata and review findings. |
 | `PUT /v1/scenes/{id}/layout` | Save a new layout revision and queue geometry validation. |
-| `POST /v1/scenes/{id}/approve` | Approve the current validated immutable revision. |
+| `POST /v1/scenes/{id}/approve` | Publish the current validated immutable revision. Approval does not change how the scene walks. |
 | `POST /v1/scenes/{id}/delivery` | Issue an authorized short-lived viewer envelope. |
 | `POST /v1/scenes/{id}/shares` | Publish/link an approved revision; generate a random capability. |
 | `DELETE /v1/shares/{id}` | Revoke an owned share capability. |
@@ -890,7 +926,9 @@ These are implementation requirements because a house capture can reveal private
 - **Untrusted files:** file-signature validation, bounded image/PDF decoding, frame/page/pixel limits, and no execution of uploaded content.
 - **Cost control:** per-account/project upload limits, job reservations, concurrency caps, rate limits, timeouts, and maximum attempts.
 - **Share capabilities:** generate at least 32 random bytes, store a hash, support expiry/revocation, use HTTPS, redact tokens from logs/analytics, and apply a strict referrer policy on share pages.
-- **Private assets:** derive posters/thumbnails under the same privacy rules; originals and checkpoints are not part of a public share.
+- **Private assets:** derive posters/thumbnails under the same privacy rules; originals and the dataset archive are not part of a public share.
+- **AI scene analysis:** when it is enabled (an AI provider is configured), the worker sends the configured provider up to 12 keyframes spread over the walk, up to six registered photos and the floor plan. Keyframes and photos are downscaled (1024 px on the long edge, the floor plan 1600 px) and re-encoded as JPEG without metadata. Nothing is sent when it is off. The capture page tells the owner when it is enabled. The key is read from the file `OPENCODE_API_KEY_FILE` names, and it never reaches a log, an artifact or the browser.
+- **Retention:** frames and poses are kept while the project exists, so a layout edit can be textured again. Deleting the project deletes them with everything else under its prefix.
 - **Credential handling:** secret manager or server environment; no signing credentials in `NEXT_PUBLIC_*`; workload identity where available.
 - **Auditability:** record publication, revocation, deletion, and approval events with resource/revision identifiers and a verified actor.
 
@@ -901,17 +939,17 @@ Opening an unlisted share URL grants anyone possessing it access. Explain this c
 1. Atomically mark the project `deleting`, revoke shares, and reject new grants/mutations.
 2. Mark all queued/running jobs cancelled and invalidate their lease/fencing state.
 3. Confirm worker/provider-job termination and stop/revoke its attempt-scoped storage write grants. Lease expiry alone is not proof that processing or an upload stopped.
-4. Delete project inputs, derivatives, checkpoints, scratch, multipart uploads, and all object versions when versioning is enabled.
+4. Delete project inputs, derivatives, the dataset archive, scratch, multipart uploads, and all object versions when versioning is enabled.
 5. Keep tombstoned-prefix reconciliation retryable until all outstanding write grants have expired/revoked and all in-flight writes have completed/aborted. Reconcile again after that horizon before declaring deletion complete; two fixed cleanup passes are insufficient for a disconnected worker.
 6. Remove or anonymize database metadata according to the published policy and record a cleanup tombstone.
 
-Production workers should receive short-lived, attempt/prefix-scoped storage grants rather than durable unrestricted bucket write credentials. If their execution/write termination cannot be established, keep the project in `deleting` and retry cleanup; do not report successful erasure prematurely. Normal raw-media retention might start at 30 days after processing, with a shorter scratch/checkpoint policy and explicit owner controls. This is a proposed product policy that must be set before launch. Database backups and provider retention need their own declared expiry; do not claim instantaneous erasure from backups. Workers must not recreate a deleted project's artifacts after a retry.
+Production workers should receive short-lived, attempt/prefix-scoped storage grants rather than durable unrestricted bucket write credentials. If their execution/write termination cannot be established, keep the project in `deleting` and retry cleanup; do not report successful erasure prematurely. The current policy keeps raw media, frames and poses while the project exists, so a layout edit can be textured again. A shorter raw-media retention, such as 30 days after processing, would end re-texturing for that capture. It is a product choice to make with explicit owner controls before launch. Database backups and the AI provider's retention need their own declared expiry; do not claim instantaneous erasure from backups. Workers must not recreate a deleted project's artifacts after a retry.
 
 ## 14. Development and deployment
 
 ### Development modes
 
-1. **Viewer mode:** a tiny permitted fixture with a splat, collision asset, and manifest. No GPU or cloud credential is needed to develop movement and scene loading.
+1. **Viewer mode:** a tiny fixture with a textured model (`model.glb`), a collision asset and a manifest. No GPU or cloud credential is needed to develop movement and scene loading.
 2. **Application mode:** web/API, PostgreSQL, MinIO, and CPU worker through Compose; use a separate development Supabase project or local Supabase Auth instance.
 3. **Reconstruction mode:** the same application plus a Linux NVIDIA worker with the pinned reconstruction image.
 
@@ -985,9 +1023,9 @@ Keep API liveness separate from readiness. Readiness verifies required DB/storag
 
 ### GPU container requirements
 
-Pin Python, PyTorch, CUDA, Nerfstudio, gsplat, COLMAP, FFmpeg, and export/conversion tools together. Precompile required CUDA extensions during image creation or a controlled warmup. Test training, export, and conversion in the exact image rather than assuming that successful `nvidia-smi` proves the whole toolchain works.
+The GPU image (`infra/Dockerfile.worker-gpu`) holds only what camera reconstruction needs: COLMAP built with CUDA from a pinned tag, FFmpeg and the worker. It is 19.4 GB, against 34.8 GB for the former splat toolchain. Pin CUDA, COLMAP, FFmpeg and the worker's Python environment together. The build runs `toolcheck`, but a working `nvidia-smi` alone does not prove that COLMAP was built with CUDA. Test a COLMAP run in the exact image.
 
-CUDA compute support and WebGPU/Vulkan support are separate capabilities. SOG conversion can use a CPU fallback, while SplatTransform voxel/collision operations require its GPU graphics path. If the host supports CUDA but lacks Vulkan, continue with the confirmed-layout collision path and CPU compression instead of blocking the whole application.
+Only `camera_reconstruction` needs the GPU. Texturing, scene analysis, packaging and scene validation run on the CPU worker (`infra/Dockerfile.worker`, which holds FFmpeg and the worker and no CUDA), and the API image has no GPU or CUDA dependency.
 
 ## 15. Existing property tours: HomeQ and Matterport
 
@@ -1034,28 +1072,28 @@ Use `POST /v1/projects/{id}/imports/resolve` to inspect an allowlisted listing/t
 
 Never inject provider-supplied oEmbed HTML into the page. Construct the iframe from the validated provider/model ID. Apply a restricted CSP and the provider's necessary iframe permissions; gracefully handle unavailable/revoked tours. SDK configuration is separate from owner-only Model API credentials, which remain server-side.
 
-For a native MatterPak import, accept its archive only through a dedicated verified import type. Extract in an isolated worker with path-traversal protection, no symlinks, bounded entry count and decompressed bytes, and no remote texture/material references. Convert OBJ/MTL/textures through a pinned conversion tool, normalize units/up direction, preserve texture/material associations, flatten collision node transforms, and generate the normal scene-revision contract. A permitted GLB import follows the same validation and review gate.
+For a native MatterPak import, accept its archive only through a dedicated verified import type. Extract in an isolated worker with path-traversal protection, no symlinks, bounded entry count and decompressed bytes, and no remote texture/material references. Convert OBJ/MTL/textures through a pinned conversion tool, normalize units/up direction, preserve texture/material associations, flatten collision node transforms, and generate the normal scene-revision contract. A permitted GLB import follows the same validation as the other native scenes.
 
-Add a discriminated scene schema: `renderMode: gaussian` uses Spark; `renderMode: mesh` uses `GLTFLoader` and ordinary Three.js materials. Mesh imports need a render asset with `format: glb` and may use a simplified separate collider derived from the same mesh. An `external_embed` or `matterport_bundle` is a provider presentation/source record, not a native scene manifest. Add a separate panorama schema only when a real authorized panorama fixture is available.
+Every native scene manifest has `renderMode: mesh`, whether it holds the textured layout model or an imported mesh. An imported mesh needs a render asset with `format: glb`. It is drawn with `GLTFLoader` and unlit materials, as the textured model is, and it may use a simplified separate collider derived from the same mesh. A provider embed or Bundle SDK source is a presentation record, not a native scene manifest. Add a separate panorama schema only when a real authorized panorama fixture is available.
 
-Preserve acquisition provenance and attribution. A mesh export may give a strong geometric starting point while looking less photorealistic than the provider's panorama projection. Benchmark the owner-authorized export before promising visual equivalence or skipping collision review.
+Preserve acquisition provenance and attribution. A mesh export may give a strong geometric starting point while looking less photorealistic than the provider's panorama projection. Benchmark the owner-authorized export before promising visual equivalence or skipping the collision check.
 
 ## 16. DeepSeek V4.1 Flash through OpenCode
 
-The requested runtime preference is **DeepSeek V4.1 Flash using the OpenCode credential stored locally at `C:\Users\victo\Downloads\opencode`**. The file was inspected only to establish that it contains a single API-key-shaped value; its contents were not printed or copied into this repository.
+The AI model is **DeepSeek V4.1 Flash, reached through OpenCode**. It is the default for both the scene analysis (section 8) and the failed-run advice that the API offers. The key is a local file that `OPENCODE_API_KEY_FILE` names. It is never committed.
 
-OpenCode's live catalog at `https://opencode.ai/inference/v1/models` listed `deepseek-v4.1-flash` on 14 October 2026. Its documentation also lists that model. This verifies catalog availability, not that a paid inference request succeeds for this particular key/account. No paid completion or property-media upload was performed for this blueprint. See [OpenCode models](https://opencode.ai/v2/docs/console/models/) and [inference API](https://opencode.ai/v2/docs/console/api/inference/).
+OpenCode's catalog listed `deepseek-v4.1-flash` on 14 October 2026. That verifies the model's availability and nothing more. On 15 October 2026 the account answered HTTP 402 (insufficient account funds), so no live scene analysis has run yet. Until the account has credit, the analysis is tested against recorded replies. See [OpenCode models](https://opencode.ai/v2/docs/console/models/) and [inference API](https://opencode.ai/v2/docs/console/api/inference/).
 
 Use provider-specific identifiers: OpenCode uses `deepseek-v4.1-flash`; DeepSeek's own API currently serves V4.1 Flash as `deepseek-flash`. Those identifiers and credentials are not interchangeable. DeepSeek documents native image input, but image transport through the chosen OpenCode endpoint must also pass a capability smoke test before the app relies on it. See [DeepSeek release details](https://api-docs.deepseek.com/news/news260910/) and [vision input](https://api-docs.deepseek.com/guides/vision/).
 
 ### Where the model helps
 
-- Suggest room labels and describe capture-quality problems from sampled images.
-- Extract candidate dimensions, walls, doors, and room labels from a floor plan when gateway image support is verified.
-- Return structured suggestions for the review editor, including confidence and source-image references.
-- Explain pipeline failures in plain language using bounded, sanitized diagnostic data.
+- Label the rooms along the walk, and find each door and whether it is open or closed, from keyframes.
+- Find the objects in each keyframe, keep their identities consistent across frames, and draw each one by hand as a few colored box and cylinder parts with an estimated size.
+- Read the floor plan and the registered photos as context for the two points above.
+- Explain a failed run in plain language, from bounded and sanitized diagnostic data (the failed-run advice).
 
-The model does not replace camera reconstruction, splat training, mesh conversion, collision validation, or measured scale. Every proposed dimension/connection remains unconfirmed until the review process accepts it. Keep AI enrichment optional so a provider outage cannot prevent a valid reconstruction from completing.
+The model does not measure. Its sizes are estimates. The geometry proposal grounds its detections in the posed frames, and the owner can correct the result, but walking does not wait for that. A failure of the model never blocks a run: scene analysis reports `unavailable`, and the geometric proposal goes ahead. Keep AI enrichment optional so that a provider outage cannot prevent a valid reconstruction from completing.
 
 ### Credential and model configuration
 
@@ -1063,7 +1101,7 @@ The model does not replace camera reconstruction, splat training, mesh conversio
 AI_PROVIDER=opencode
 AI_BASE_URL=https://opencode.ai/inference/openai/v1
 AI_MODEL=deepseek-v4.1-flash
-OPENCODE_API_KEY_FILE=C:/Users/victo/Downloads/opencode
+OPENCODE_API_KEY_FILE=/path/outside/the/repository/opencode-key
 AI_MAX_OUTPUT_TOKENS=2048
 AI_TIMEOUT_SECONDS=60
 AI_MAX_CONCURRENCY=2
@@ -1073,7 +1111,7 @@ The configured inference path follows OpenCode's current API-family documentatio
 
 For local containers, mount the host file read-only at `/run/secrets/opencode_api_key` and set `OPENCODE_API_KEY_FILE` to that container path. For production, inject `OPENCODE_API_KEY` through a secret manager or use an equivalent secret mount. Read the key server-side, trim surrounding whitespace, fail clearly when missing, and never log its value. Do not include it in a browser bundle, model prompt, artifact, exception body, subprocess argument, or committed environment file.
 
-Implement `services/api/src/andarilho_api/ai/client.py` using an ordinary bounded HTTP client and explicit typed task functions. The request shape is:
+The failed-run advice (`services/api/src/andarilho_api/ai/client.py`) and the worker's scene analysis use the same chat request shape, sent with an ordinary bounded HTTP client through explicit typed task functions. The request shape is:
 
 ```json
 {
@@ -1094,11 +1132,11 @@ Implement `services/api/src/andarilho_api/ai/client.py` using an ordinary bounde
 
 Send `Authorization: Bearer` from the server's secret reader. Validate the response against the task's schema, bound retries/output size, record provider/model/usage, and treat rate limits and authentication errors distinctly. Do not assume JSON mode or a parameter is supported by a gateway without testing it. Uploaded floor-plan text and images must not become instructions to run tools or access other projects.
 
-Add an `ai` worker capability with network access restricted to the configured provider when asynchronous image enrichment is introduced. Decoder/reconstruction subprocesses do not need the key. The product must explain when selected images are sent to an external model provider and apply the relevant privacy/retention configuration. Send the minimum useful downscaled images, not the full private capture by default.
+Scene analysis is a CPU stage, and it is the only stage that talks to the provider. Decoding, COLMAP and the other subprocesses never receive the key. The capture page explains when images are sent to the provider (section 13). Only the downscaled keyframes, the registered photos and the floor plan are sent, never the full private capture.
 
 ## 17. Resource budgets and operating cost
 
-Measure per-stage CPU/GPU time, peak memory, scratch bytes, input/output bytes, AI tokens, retry rate, and delivery traffic. An inexpensive model request does not make image reconstruction inexpensive: GPU training, repeated registration, and scene delivery are separate costs.
+Measure per-stage CPU/GPU time, peak memory, scratch bytes, input/output bytes, AI tokens, retry rate, and delivery traffic. An inexpensive model request does not make reconstruction inexpensive. GPU camera reconstruction, repeated registration, CPU texturing and scene delivery are separate costs, and only the first one needs a GPU.
 
 Use this calculation rather than advertising a fixed per-apartment price before measurement:
 
@@ -1121,9 +1159,9 @@ Before choosing a GPU host, benchmark one room, a two-room apartment, and a refl
 
 ### Milestone 0: prove the reconstruction and export path
 
-Acquire three permitted fixture captures with known dimensions. Run the pinned camera/training/export/compression pipeline manually. Render its result in Spark, confirm axis/scale landmarks, and inspect output size and VRAM use.
+Acquire three permitted fixture captures with known dimensions. Run the pinned camera reconstruction and texturing pipeline manually, with the smoke runner. Render the textured model in the viewer, confirm the axis and scale landmarks against the known dimensions, and inspect the model size, the GPU use of camera reconstruction and the memory of texturing. The first measured results on the owner's hallway walkthrough are in [docs/milestone-0.md](docs/milestone-0.md).
 
-**Exit:** a single room and a connected two-room capture are recognizable along their intended walking paths, a deliberately poor/disconnected capture fails honestly, compression preserves acceptable appearance, and the toolchain/licenses/resource use are recorded. Stop expanding the application if the core capture cannot be reconstructed.
+**Exit:** a single room and a connected two-room capture are recognizable along their intended walking paths in the textured model, a deliberately poor or disconnected capture fails honestly with no published scene, the model validates with its coverage reported, and the toolchain, licenses and resource use are recorded. Stop expanding the application if the core capture cannot be reconstructed.
 
 ### Milestone 1: build the native viewer and review geometry
 
@@ -1145,7 +1183,7 @@ Implement worker claims, heartbeats, fencing, stage supervision, progress pollin
 
 ### Milestone 4: alignment, approval, and publishing
 
-Implement optional floor-plan tracing, known-distance calibration, landmark alignment, generated collision geometry, spawn validation, revision checks, approval, derivative delivery, share expiry/revocation, and deletion reconciliation.
+Implement known-distance calibration, the layout editor's corrections, generated collision geometry, spawn validation, revision checks, approval, derivative delivery, share expiry/revocation, and deletion reconciliation.
 
 **Exit:** the owner can upload, reconstruct, correct, walk, publish, revoke, and delete a scene without manual database/storage edits. Changes to a draft do not alter an older published scene.
 
@@ -1161,7 +1199,7 @@ Add deployment automation, operational dashboards, secured GPU smoke checks, fai
 
 **Exit:** the acceptance checks below pass for the named device/capture set, resource budgets are known, and the complete user lifecycle is operable. Schedule estimates should follow the first two milestones; reconstruction quality is the main uncertainty.
 
-Later work can add automatic plan vectorization, native pose/depth capture, multi-floor navigation, larger-scene paging, panorama imports, interactive mesh doors, and automated geometry proposals. Keep generative redesign/imagined rooms a separately labeled feature if it is introduced.
+Later work can add automatic plan vectorization, native pose/depth capture, multi-floor navigation, larger-scene paging, panorama imports and interactive doors. Keep generative redesign/imagined rooms a separately labeled feature if it is introduced.
 
 ## 19. Verification and acceptance
 
@@ -1170,34 +1208,37 @@ Later work can add automatic plan vectorization, native pose/depth capture, mult
 - API: membership/tenant boundaries, idempotent replay, immutable upload references, quota settlement, review conflicts, expired/revoked shares, and deletion lifecycle.
 - Queue: competing workers, lease expiry, stale progress/commit rejection, cancellation in every state, retry exhaustion, and next-stage insertion races.
 - Contracts: Python/JSON Schema/TypeScript agreement, unknown schema versions, NaN/Inf rejection, malformed matrices, asset-prefix ownership, and revision consistency.
-- Geometry: known-distance alignment, axis-marker imports, door gaps, floor holes, capsule clearance, identity collision-node transforms, and render/collider agreement.
+- Geometry: known-distance calibration, door gaps, floor holes, capsule clearance, identity collision-node transforms, and render/collider agreement.
+- Worker texturing: a synthetic checker room rendered from known cameras, occlusion by an interior wall, unseen texels counted as grey, deterministic output, and a GLB that reads back and validates.
+- Worker grounding: the sparse frame of a synthetic tilted room, room splitting by the agent's room labels, and door and furniture placement from known rays.
+- AI replies: scene analysis is tested against recorded provider replies, including valid and invalid replies and each unavailable reason. No test calls the network.
 - Web: upload resume state, error mapping, viewer initialization failure, disposal, keyboard controls, and access to published derivatives only.
 
-Keep routine CI CPU-only. Use synthetic geometry and tiny permitted scene fixtures. Put a short real GPU training/export smoke check on a protected manual or scheduled runner, with cost/time limits; do not expose GPU credentials or execute untrusted pull-request code on that runner.
+Keep routine CI CPU-only. Use synthetic geometry and tiny permitted scene fixtures. Put a short real GPU smoke check (camera reconstruction in the exact GPU image) on a protected manual or scheduled runner, with cost/time limits; do not expose GPU credentials or execute untrusted pull-request code on that runner.
 
 ### End-to-end fixture acceptance
 
 | Scenario | Required result |
 | --- | --- |
-| Good single room, no plan | Reconstruct, calibrate/confirm approximate or measured scale, trace movement geometry, walk, publish. |
+| Good single room, no plan | Reconstruct, texture, propose the room automatically, walk it at once, publish. The scale is estimated unless a distance is measured. |
 | Connected two-room apartment with photos | Supplementary photos register; doorway connectivity and coverage are verified. |
 | Disconnected rooms | Block a claimed continuous walk and identify the missing connecting capture. |
 | Dimensioned floor plan | Landmark overlay agrees within a documented project tolerance; mismatch is reported. |
 | Reflective/textureless/blurred capture | Return a quality finding or incomplete draft without inventing geometry. |
 | Interrupted multipart upload | Resume the same bytes safely, verify the immutable object, and avoid quota leakage. |
-| Worker killed during training | Lease recovery resumes/retries safely; stale output cannot replace the accepted revision. |
+| Worker killed during texturing | Lease recovery resumes/retries safely; stale output cannot replace the accepted revision. |
 | Cancellation/deletion during export | No new scene grant/publication; active work stops; orphan data is reconciled. |
 | Expired or revoked share | Stop issuing derivative delivery grants; document the remaining signed-URL lifetime. |
 | Imported Matterport public URL | Resolve/embed with attribution; do not claim owner-only export access. |
 | Authorized MatterPak/GLB | Render natively; confirm scale, texture association, collider validity, and safe walking. |
-| DeepSeek unavailable/invalid output | Preserve reconstruction/review flow and display bounded enrichment failure. |
+| DeepSeek unavailable/invalid output | Keep the walk and the geometric proposal; report the bounded analysis status, never a failed run. |
 | Unsupported browser or GPU context loss | Show a useful poster/plan/image fallback and a recoverable error. |
 
 For named benchmark devices, target 60 FPS desktop and 30 FPS mobile after load. Measure usable first-view latency under defined network conditions; a 24 MB asset cannot instantly load on a slow connection. An initial target is a usable desktop fixture within 10 seconds at at least 50 Mbps, with a smaller mobile derivative and a separately measured target. Record cold-cache results, peak memory, thermal degradation, and sustained movement frame times.
 
 ### Launch gate
 
-Ship when a real permitted place completes the full upload-to-revocable-walkthrough flow, unknown areas stay unavailable, the no-floor-plan path works, failures are understandable, source privacy is enforced, and the named capture/device acceptance set passes. A loading demo or a visually impressive splat without correct movement does not satisfy this gate.
+Ship when a real permitted place completes the full upload-to-revocable-walkthrough flow, areas the video never saw stay grey and are reported, the no-floor-plan path works, failures are understandable, source privacy is enforced, and the named capture/device acceptance set passes. A loading demo or a visually impressive model without correct movement does not satisfy this gate.
 
 ## 20. Licensing and source references
 
@@ -1206,16 +1247,16 @@ Before pinning a release, record exact package/model/container versions and thir
 | Component | Current license/source to verify when pinning |
 | --- | --- |
 | COLMAP | [BSD license and dependency notes](https://colmap.github.io/license.html). |
-| Nerfstudio / gsplat | Apache-2.0; [Nerfstudio](https://github.com/nerfstudio-project/nerfstudio) and [gsplat](https://github.com/nerfstudio-project/gsplat). |
-| Three.js / Spark | MIT; [Three.js](https://github.com/mrdoob/three.js) and [Spark](https://github.com/sparkjsdev/spark). |
-| SplatTransform | MIT; [source](https://github.com/playcanvas/splat-transform). |
+| Three.js and `GLTFLoader` | MIT; [Three.js](https://github.com/mrdoob/three.js), including its `GLTFLoader` addon. |
+| Pillow | MIT-CMU; [Pillow](https://github.com/python-pillow/Pillow). |
+| httpx | BSD-3-Clause; [httpx](https://github.com/encode/httpx). |
 | Rapier | Apache-2.0; [JavaScript bindings](https://github.com/dimforge/rapier.js). |
 | FFmpeg | Build-dependent LGPL/GPL and codec considerations; [official licensing](https://ffmpeg.org/legal.html). |
 | Matterport imports/SDK | Account/model access, export entitlements, and applicable SDK/content terms; a public viewing URL is not an export grant. |
 | OpenCode / DeepSeek service | API access/usage/privacy terms; verify capabilities and account permissions for the configured route. |
 
-The original GraphDECO Gaussian Splatting repository has research/non-commercial restrictions in its [license](https://github.com/graphdeco-inria/gaussian-splatting/blob/main/LICENSE.md). Do not substitute it for the chosen gsplat path without checking commercial permission. Likewise, do not add a promising reconstruction model solely because its code is downloadable; model/checkpoint terms must also fit the intended application.
+Do not add a promising reconstruction or analysis model solely because its code is downloadable; model and checkpoint terms must also fit the intended application.
 
 Choose Andarilho's own repository license before distributing the application; this blueprint does not assign one. Use only permitted captures/exports as fixtures, and keep original media and account secrets out of the public repository.
 
-The implementation priorities are: prove real reconstruction, prove physically correct walking, make processing durable, make review simple, then automate more of the difficult geometry. The existing-tour path and the DeepSeek assistant plug into those same validated scene and permission contracts.
+The implementation priorities are: prove real reconstruction, prove physically correct walking, make processing durable, make the automatic result walkable at once, then add optional editing and automate more of the difficult geometry. The existing-tour path and the AI analysis plug into those same validated scene and permission contracts.
