@@ -552,19 +552,31 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   // 3D preview of the current packaged revision (with collision overlay toggle).
   const revisionId =
     revision?.manifest && revision.validationState === "valid" ? revision.id : null;
+  // Bumped to fetch a fresh envelope for the same revision (a retry, or expired links).
+  const [previewAttempt, setPreviewAttempt] = useState(0);
+  const [previewFailure, setPreviewFailure] = useState<{
+    revisionId: string;
+    error: FriendlyError;
+  } | null>(null);
   useEffect(() => {
     if (!sceneId || !revisionId) return;
     let active = true;
-    api
-      .getDelivery(sceneId, revisionId)
-      .then(({ data }) => {
-        if (active) setEnvelope(data);
-      })
-      .catch(() => undefined);
+    api.getDelivery(sceneId, revisionId).then(
+      ({ data }) => {
+        if (!active) return;
+        setEnvelope(data);
+        setPreviewFailure(null);
+      },
+      (err: unknown) => {
+        if (active) setPreviewFailure({ revisionId, error: toFriendlyError(err) });
+      },
+    );
     return () => {
       active = false;
     };
-  }, [sceneId, revisionId]);
+  }, [sceneId, revisionId, previewAttempt]);
+  const retryPreview = useCallback(() => setPreviewAttempt((n) => n + 1), []);
+  const previewError = previewFailure?.revisionId === revisionId ? previewFailure.error : null;
   // Never show an envelope from an earlier revision: while a new save is pending
   // or after it fails validation there is no current preview.
   const preview =
@@ -876,13 +888,19 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
           Walk the current saved revision and turn on the collision overlay to confirm walls, doors
           and obstacles line up with the captured scene.
         </p>
-        <div className="mt-3">
+        <div className="mt-3 space-y-3">
+          <ErrorNotice error={previewError} onRetry={retryPreview} />
           {preview ? (
             <ViewerClient
               envelope={preview}
               title={detail?.project.title ?? "this place"}
               allowCollisionOverlay
+              onRecoverableError={retryPreview}
             />
+          ) : previewError ? null : revisionId ? (
+            <p aria-live="polite" className="text-sm">
+              Preparing a viewing link for the 3D preview...
+            </p>
           ) : (
             <p className="text-sm">
               The 3D preview is available once this revision has been packaged and validated.
