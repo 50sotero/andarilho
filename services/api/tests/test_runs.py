@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from factories import active_run, capture_set, create_project, layout
@@ -237,6 +238,127 @@ def test_cancel_finished_run_is_conflict(client, auth, db, project):
     response = client.post(f"/v1/runs/{info['runId']}/cancel", headers=auth())
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "INVALID_STATE"
+
+
+def _cleanup_jobs(db, project_id: str) -> list[Job]:
+    return (
+        db.execute(
+            select(Job).where(
+                Job.project_id == uuid.UUID(project_id), Job.stage == "artifact_cleanup"
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+@pytest.mark.parametrize("state", ["queued", "retry_wait"])
+def test_cancelling_a_requeued_job_queues_cleanup_for_every_fence_it_may_have_written(
+    client, auth, db, project, state
+):
+    info = active_run(db, project["id"], job_states=("succeeded", state))
+    preparing = db.get(Job, uuid.UUID(info["jobIds"][1]))
+    preparing.fencing_token = 2  # a lost fence-1 attempt, re-queued by the reaper
+    db.commit()
+    response = client.post(f"/v1/runs/{info['runId']}/cancel", headers=auth())
+    assert response.status_code == 202
+
+    [cleanup] = _cleanup_jobs(db, project["id"])
+    pid, rid, jid = project["id"], info["runId"], info["jobIds"][1]
+    assert (cleanup.state, cleanup.run_id, cleanup.scene_revision_id) == ("queued", None, None)
+    assert cleanup.input_manifest == {
+        "projectId": pid,
+        "prefixes": [
+            f"tenants/{pid}/runs/{rid}/attempts/preparing/{jid}/1/",
+            f"tenants/{pid}/runs/{rid}/attempts/preparing/{jid}/2/",
+        ],
+        "reason": "cancelled_before_claim",
+    }
+    delay = cleanup.available_at - datetime.now(UTC)
+    assert timedelta(seconds=290) < delay <= timedelta(seconds=300)
+
+
+def test_cancelling_a_run_whose_scene_is_pending_queues_the_scene_cleanup(
+    client, auth, db, project
+):
+    info = active_run(db, project["id"], job_states=("succeeded", "succeeded"))
+    pid, rid = uuid.UUID(project["id"]), uuid.UUID(info["runId"])
+    rev_id = _first_revision(db, project["id"], info["runId"])
+    # The packaging stage has written the scene's files; scene_validation is still queued.
+    db.add(
+        Job(
+            id=uuid.uuid4(),
+            project_id=pid,
+            run_id=rid,
+            scene_revision_id=rev_id,
+            capability="cpu",
+            stage="scene_validation",
+            state="queued",
+            fencing_token=0,
+            input_manifest={},
+        )
+    )
+    db.commit()
+    response = client.post(f"/v1/runs/{info['runId']}/cancel", headers=auth())
+    assert response.status_code == 202
+
+    [cleanup] = _cleanup_jobs(db, project["id"])
+    assert cleanup.input_manifest == {
+        "projectId": project["id"],
+        "prefixes": [f"tenants/{project['id']}/scenes/{rev_id}/"],
+        "reason": "revision_invalid",
+        "sceneRevisionId": str(rev_id),
+    }
+    db.expire_all()
+    assert db.get(SceneRevision, rev_id).validation_state == "invalid"
+
+
+def test_cancelling_a_run_that_wrote_nothing_queues_no_cleanup(client, auth, db, project):
+    info = active_run(db, project["id"], job_states=("succeeded", "queued"))
+    response = client.post(f"/v1/runs/{info['runId']}/cancel", headers=auth())
+    assert response.status_code == 202
+    assert _cleanup_jobs(db, project["id"]) == []
+
+
+def test_repeated_cancellation_queues_cleanup_once(client, auth, db, project):
+    info = active_run(db, project["id"], job_states=("succeeded", "queued"))
+    preparing = db.get(Job, uuid.UUID(info["jobIds"][1]))
+    preparing.fencing_token = 1
+    db.commit()
+    for _ in range(2):
+        response = client.post(f"/v1/runs/{info['runId']}/cancel", headers=auth())
+        assert response.status_code == 202 and response.json()["status"] == "cancelled"
+    assert len(_cleanup_jobs(db, project["id"])) == 1
+
+
+def test_cancelling_does_not_queue_a_request_that_is_already_queued(client, auth, db, project):
+    info = active_run(db, project["id"], job_states=("succeeded", "queued"))
+    preparing = db.get(Job, uuid.UUID(info["jobIds"][1]))
+    preparing.fencing_token = 1
+    pid, rid, jid = project["id"], info["runId"], info["jobIds"][1]
+    db.add(
+        Job(
+            id=uuid.uuid4(),
+            project_id=uuid.UUID(pid),
+            capability="cpu",
+            stage="artifact_cleanup",
+            state="retry_wait",
+            priority=5,
+            attempts=1,
+            max_attempts=3,
+            fencing_token=0,
+            input_manifest={
+                "projectId": pid,
+                "prefixes": [f"tenants/{pid}/runs/{rid}/attempts/preparing/{jid}/1/"],
+                "reason": "attempt_lost",
+            },
+        )
+    )
+    db.commit()
+    response = client.post(f"/v1/runs/{rid}/cancel", headers=auth())
+    assert response.status_code == 202
+    [only] = _cleanup_jobs(db, pid)
+    assert only.state == "retry_wait"  # the earlier request stands
 
 
 def test_retry(client, auth, db, project):

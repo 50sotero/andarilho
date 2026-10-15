@@ -1,6 +1,7 @@
 """``artifact_cleanup``: delete storage prefixes that no pipeline will complete.
 
-The queue enqueues this job, after a delay, for two kinds of prefix:
+The queue, and the API when it cancels a run, enqueues this job, after a delay, for two
+kinds of prefix:
 
 * an attempt prefix ``tenants/{p}/runs/{r}/attempts/{stage}/{job}/{fence}/`` of an
   attempt that was lost or cancelled before it committed (the reaper's view, or a

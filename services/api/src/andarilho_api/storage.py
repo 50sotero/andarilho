@@ -46,7 +46,16 @@ def tenant_prefix(project_id: uuid.UUID) -> str:
     return f"tenants/{project_id}/"
 
 
+def attempt_prefix(
+    project_id: uuid.UUID, run_id: uuid.UUID, stage: str, job_id: uuid.UUID, fence: int
+) -> str:
+    """One attempt's outputs. Matches the worker's ``artifacts.attempt_prefix``; the API cannot
+    import the worker package, so the two are kept in step by hand."""
+    return f"tenants/{project_id}/runs/{run_id}/attempts/{stage}/{job_id}/{fence}/"
+
+
 def scene_prefix(project_id: uuid.UUID, scene_revision_id: uuid.UUID) -> str:
+    """A revision's viewer derivatives. Matches the worker's ``artifacts.scene_prefix``."""
     return f"tenants/{project_id}/scenes/{scene_revision_id}/"
 
 

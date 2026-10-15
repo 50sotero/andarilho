@@ -478,11 +478,15 @@ def fail_run(conn: psycopg.Connection, run_id: str, error: Mapping[str, Any]) ->
     ).fetchone()
     if row is None:
         return False
-    conn.execute(
+    # A sibling claimed before may have written under an earlier fence, and it is never
+    # claimed again, so its attempts are queued for deletion as sweep_cancelled does.
+    siblings = conn.execute(
         "UPDATE jobs SET state = 'cancelled', finished_at = now(), updated_at = now() "
-        "WHERE run_id = %s AND scene_revision_id IS NULL AND state IN ('queued', 'retry_wait')",
+        "WHERE run_id = %s AND scene_revision_id IS NULL AND state IN ('queued', 'retry_wait') "
+        "RETURNING id, project_id, run_id, stage, fencing_token",
         (run_id,),
-    )
+    ).fetchall()
+    _queue_unclaimed_attempts(conn, siblings)
     fail_run_revision(conn, run_id, RUN_FAILED_FINDING)
     release_ledger(conn, run_id)
     return True

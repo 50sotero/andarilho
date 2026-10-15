@@ -427,6 +427,31 @@ def test_failing_a_layout_revision_queues_its_scene_prefix(db, seed):
     assert cleanup["input_manifest"]["prefixes"] == [f"tenants/{pid}/scenes/{revision_id}/"]
 
 
+def test_failing_a_run_queues_the_attempts_of_its_cancelled_siblings(db, seed):
+    pid = seed.project()
+    run_id, _ = seed.run(pid, max_attempts=1)
+    job = queue.claim(db, "w", "cpu")  # validating, fence 1
+    requeued = seed.job(pid, "preparing", {}, run_id=run_id)  # claimed twice, then re-queued
+    seed.exec("UPDATE jobs SET fencing_token = 2 WHERE id = %s", requeued)
+    retrying = seed.job(pid, "camera_reconstruction", {}, run_id=run_id)
+    seed.exec("UPDATE jobs SET state = 'retry_wait', fencing_token = 1 WHERE id = %s", retrying)
+    never_claimed = seed.job(pid, "training", {}, run_id=run_id)
+
+    assert queue.fail_job(db, job, error_body("INVALID_MEDIA")) == "failed"
+    for sibling in (requeued, retrying, never_claimed):
+        assert seed.one("SELECT state FROM jobs WHERE id = %s", sibling)["state"] == "cancelled"
+    [cleanup] = cleanup_jobs(seed, pid)
+    assert cleanup["input_manifest"] == {
+        "projectId": pid,
+        "prefixes": [
+            f"tenants/{pid}/runs/{run_id}/attempts/camera_reconstruction/{retrying}/1/",
+            f"tenants/{pid}/runs/{run_id}/attempts/preparing/{requeued}/1/",
+            f"tenants/{pid}/runs/{run_id}/attempts/preparing/{requeued}/2/",
+        ],
+        "reason": "cancelled_before_claim",
+    }
+
+
 def test_identical_cleanup_requests_are_queued_once(db, seed):
     pid = seed.project()
     scenes = f"tenants/{pid}/scenes/{uuid.uuid4()}/"
