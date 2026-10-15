@@ -1,10 +1,11 @@
 """Worker entry point: ``python -m andarilho_worker``.
 
-Loop: run maintenance (reaper, cancellation sweep, retry promotion), claim jobs
-for the advertised capability and supervise up to ``WORKER_MAX_CONCURRENCY`` of
-them in threads. SIGTERM/SIGINT stop claiming; running jobs get a short grace
-period, then their process groups are terminated and the jobs are abandoned
-without further writes, left recoverable through their leases.
+Loop: run maintenance (reaper, cancellation sweep, retry promotion, checks of
+aborted multipart uploads), claim jobs for the advertised capability and
+supervise up to ``WORKER_MAX_CONCURRENCY`` of them in threads. SIGTERM/SIGINT
+stop claiming; running jobs get a short grace period, then their process groups
+are terminated and the jobs are abandoned without further writes, left
+recoverable through their leases.
 
 How GPU stages are gated (infra notes)
 --------------------------------------
@@ -45,7 +46,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 
 import psycopg
 
-from andarilho_worker import queue
+from andarilho_worker import multipart, queue
 from andarilho_worker.artifacts import LocalObjectStore, ObjectStore, S3ObjectStore
 from andarilho_worker.db import Database
 from andarilho_worker.runner import Redactor
@@ -119,6 +120,7 @@ class Worker:
     def __init__(self, settings: Settings, db: Database, store: ObjectStore) -> None:
         self.settings = settings
         self.db = db
+        self.store = store
         self.supervisor = Supervisor(db, store, settings)
         self.stopping = threading.Event()
         self.pool = ThreadPoolExecutor(max_workers=settings.worker_max_concurrency)
@@ -136,6 +138,11 @@ class Worker:
                 if now - last_maintenance >= self.settings.reaper_seconds:
                     last_maintenance = now
                     stats = queue.maintenance(self.db)
+                    stats |= multipart.reconcile(
+                        self.db,
+                        self.store,
+                        horizon_seconds=self.settings.cleanup_reconcile_horizon_seconds,
+                    )
                     if any(stats.values()):
                         log.info("maintenance %s", stats)
                 self.active = {f for f in self.active if not f.done()}

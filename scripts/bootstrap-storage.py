@@ -3,9 +3,8 @@
 Idempotent: creates the bucket if missing, enables versioning, applies CORS from
 STORAGE_CORS_FILE (MinIO configures CORS server-wide and may answer
 NotImplemented, which is tolerated), and adds an abort-incomplete-multipart
-lifecycle rule that ends an unfinished upload MULTIPART_ABORT_DAYS (default 2) after
-it began; the worker reads the same variable. Intended for local development only;
-production buckets are provisioned by infrastructure tooling, with that same rule.
+lifecycle rule. Intended for local development only; production buckets are
+provisioned by infrastructure tooling.
 
   python /app/scripts/bootstrap-storage.py
 """
@@ -94,9 +93,7 @@ def _apply_lifecycle(s3, bucket: str) -> None:
                     "ID": "abort-incomplete-multipart",
                     "Status": "Enabled",
                     "Filter": {"Prefix": "tenants/"},
-                    "AbortIncompleteMultipartUpload": {
-                        "DaysAfterInitiation": int(os.environ.get("MULTIPART_ABORT_DAYS") or 2)
-                    },
+                    "AbortIncompleteMultipartUpload": {"DaysAfterInitiation": 2},
                 }
             ]
         },

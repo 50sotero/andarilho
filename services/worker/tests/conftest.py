@@ -30,7 +30,7 @@ DEFAULT_URL = "postgresql+psycopg://andarilho:local-password@localhost:55432/and
 TABLES = (
     "job_events, jobs, share_links, artifacts, usage_ledger, idempotency_records, "
     "project_members, audit_events, uploads, capture_sets, reconstruction_runs, scenes, "
-    "scene_revisions, projects"
+    "scene_revisions, projects, multipart_reconciliations"
 )
 
 

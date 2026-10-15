@@ -25,6 +25,7 @@ from psycopg.types.json import Jsonb
 from andarilho_worker.artifacts import FRAMES_DIRECTORY, attempt_prefix, scene_prefix
 from andarilho_worker.db import Database
 from andarilho_worker.errors import Cancelled, LeaseLost, error_body
+from andarilho_worker.multipart import record as record_multipart
 from andarilho_worker.recipes import RETEXTURE_STAGES
 
 log = logging.getLogger(__name__)
@@ -1186,16 +1187,17 @@ def expire_uploads(db: Database) -> tuple[int, int]:
     deleting them keeps abandoned uploads from piling up for good. An upload is kept while
     the API's idempotency record of its creation is live, however long the configured TTL
     makes it: a replay returns the stored response, which names the row. No job ever
-    refers to an initiated upload, but one that does is kept. Their
-    multipart data is left to the bucket's abort-incomplete-multipart lifecycle rule, as
-    when the API's own abort fails. Returns ``(expired, deleted)``.
+    refers to an initiated upload, but one that does is kept. A deleted row's multipart
+    upload is recorded in ``multipart_reconciliations``, whose checks abort it and keep
+    looking for parts that land late; the bucket's abort-incomplete-multipart lifecycle
+    rule covers it until then. Returns ``(expired, deleted)``.
     """
     with db.transaction() as conn:
         expired = conn.execute(
             "UPDATE uploads SET status = 'expired', updated_at = now() "
             "WHERE status = 'initiated' AND expires_at <= now()"
         ).rowcount
-        deleted = conn.execute(
+        gone = conn.execute(
             """
             DELETE FROM uploads AS u
             WHERE u.status = 'expired'
@@ -1207,10 +1209,20 @@ def expire_uploads(db: Database) -> tuple[int, int]:
                                 AND r.operation = 'uploads.create'
                                 AND r.expires_at > now()
                                 AND r.response_body -> 'upload' ->> 'id' = u.id::text)
+            RETURNING u.staging_key, u.multipart_upload_id
             """,
             (float(EXPIRED_UPLOAD_RETENTION_SECONDS),),
-        ).rowcount
-    return expired, deleted
+        ).fetchall()
+        record_multipart(
+            conn,
+            [
+                (r["staging_key"], r["multipart_upload_id"])
+                for r in gone
+                if r["multipart_upload_id"]
+            ],
+            aborted_at=None,
+        )
+    return expired, len(gone)
 
 
 def purge_idempotency_records(db: Database, *, batch: int = IDEMPOTENCY_PURGE_BATCH) -> int:

@@ -1,7 +1,8 @@
-"""Migrations 0006 and 0007: texturing, then scene_analysis, join the run stages.
+"""Migrations 0006 and 0007: texturing, then scene_analysis, join the run stages; 0008
+adds the multipart reconciliation table.
 
 Retired training rows stay valid throughout. These tests move the shared test database
-down (to 0005 or 0006) and back to head. Each restores
+down (to 0005, 0006 or 0007) and back to head. Each restores
 head in a ``finally`` so that later tests always see the current schema. No session is
 open while a migration runs.
 """
@@ -19,7 +20,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from factories import active_run
-from sqlalchemy import text
+from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -224,12 +225,25 @@ def test_downgrade_refuses_while_a_job_of_the_removed_stage_can_still_run(
         db.add(_job(project_id, run_id, stage, state))
         db.commit()
 
+    head = _revision(engine)
     with _alembic(database_url) as config:
         try:
             with pytest.raises(RuntimeError, match=f"{stage} job"):
                 command.downgrade(config, target)
             # Nothing was rolled back: the schema and the job are as they were.
-            assert _revision(engine) == "0007"
+            assert _revision(engine) == head
             assert stage in _stages(engine)
         finally:
             command.upgrade(config, "head")
+
+
+def test_0008_adds_the_multipart_reconciliation_table_and_its_downgrade_drops_it(
+    database_url, engine
+):
+    with _alembic(database_url) as config:
+        try:
+            command.downgrade(config, "0007")
+            assert "multipart_reconciliations" not in inspect(engine).get_table_names()
+        finally:
+            command.upgrade(config, "head")
+    assert "multipart_reconciliations" in inspect(engine).get_table_names()

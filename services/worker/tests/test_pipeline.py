@@ -18,11 +18,7 @@ from pdf_fixtures import classic_pdf, encrypted_pdf, object_stream_pdf, page_tre
 from psycopg.types.json import Jsonb
 
 from andarilho_worker import queue
-from andarilho_worker.artifacts import (
-    DAY_SECONDS,
-    MULTIPART_RECHECK_SECONDS,
-    LocalObjectStore,
-)
+from andarilho_worker.artifacts import LocalObjectStore
 from andarilho_worker.geometry.glb import inspect_textured_glb
 from andarilho_worker.runner import ProcessFailed, RunResult
 from andarilho_worker.stages import STAGES
@@ -741,19 +737,17 @@ def test_upload_cleanup_deletes_a_staging_copy_the_api_could_not(db, seed, store
     assert row["status"] == "verified" and store.list_keys(row["immutable_key"]) != []
 
 
-def _aborted_upload(seed, pid: str, *, age_days: float = 5) -> str:
+def _aborted_upload(seed, pid: str) -> str:
     """An upload removed mid-upload, as the API leaves it: aborted, its multipart upload
-    ID (``mp-x``) kept, and its cleanup queued. It was created ``age_days`` ago: by
-    default, long enough for the bucket's abort-incomplete-multipart rule to have run."""
+    ID (``mp-x``) kept, and its cleanup queued."""
     uid = str(uuid.uuid4())
     staging = f"tenants/{pid}/staging/{uid}"
     seed.exec(
         "INSERT INTO uploads (id, project_id, created_by, media_kind, display_filename, "
         "declared_content_type, expected_bytes, staging_key, multipart_upload_id, part_size, "
-        "part_count, status, expires_at, created_at) VALUES (%s, %s, 'user-1', 'video', "
-        "'walk.mp4', 'video/mp4', 10, %s, 'mp-x', 16777216, 1, 'aborted', "
-        "now() + interval '1 day', now() - make_interval(secs => %s))",
-        uid, pid, staging, age_days * DAY_SECONDS,
+        "part_count, status, expires_at) VALUES (%s, %s, 'user-1', 'video', 'walk.mp4', "
+        "'video/mp4', 10, %s, 'mp-x', 16777216, 1, 'aborted', now() + interval '1 day')",
+        uid, pid, staging,
     )  # fmt: skip
     seed.job(pid, "upload_cleanup", {"uploadId": uid, "projectId": pid, "key": None,
              "stagingKey": staging}, upload_id=uid)  # fmt: skip
@@ -770,6 +764,15 @@ def _run_upload_cleanup(db, worker) -> list[str]:
     queue.promote_retry_wait(db)
     job = queue.claim(db, "worker-test", "cpu")
     return [] if job is None else [worker.execute(job)]
+
+
+def _reconciliations(seed) -> set[tuple[str, str]]:
+    """The multipart uploads handed over to be checked for late parts for good."""
+    rows = seed.all(
+        "SELECT object_key, upload_id FROM multipart_reconciliations "
+        "WHERE last_aborted_at IS NOT NULL AND next_check_at > now() + interval '50 minutes'"
+    )
+    return {(r["object_key"], r["upload_id"]) for r in rows}
 
 
 def _multipart_id(seed, uid: str) -> str | None:
@@ -792,9 +795,12 @@ def test_upload_cleanup_aborts_a_removed_upload_again_until_no_part_is_left(
     assert late.stored_parts == {"mp-x": 1}
     assert _run_upload_cleanup(db, sup) == ["deferred"]  # the check finds it: abort again
     assert late.stored_parts == {} and _multipart_id(seed, uid) == "mp-x"
-    # A later check, with no abort before it, finds nothing: the ID is forgotten.
+    assert _reconciliations(seed) == set()
+    # A later check, with no abort before it, finds nothing: the ID is forgotten here and
+    # handed over to be checked for good, since a part upload has no time limit.
     assert _run_upload_cleanup(db, sup) == ["succeeded"]
     assert late.aborts == {"mp-x": 2} and _multipart_id(seed, uid) is None
+    assert _reconciliations(seed) == {(f"tenants/{pid}/staging/{uid}", "mp-x")}
 
 
 def test_upload_cleanup_checks_parts_only_a_horizon_after_its_abort(db, seed, store, settings):
@@ -815,33 +821,6 @@ def test_upload_cleanup_checks_parts_only_a_horizon_after_its_abort(db, seed, st
     assert _run_upload_cleanup(db, sup) == ["deferred"]  # the check finds the part
     assert store.stored_parts == {} and _multipart_id(seed, uid) == "mp-x"
     _age_cleanup(seed, 700, "multipartAbortedAt", stage="upload_cleanup")
-    assert _run_upload_cleanup(db, sup) == ["succeeded"]
-    assert _multipart_id(seed, uid) is None
-
-
-def test_upload_cleanup_keeps_the_id_until_the_bucket_rule_has_ended_the_upload(
-    db, seed, store, settings
-):
-    # A part upload has no time limit of its own, so one still running hours after the
-    # abort can land. Only the bucket's abort-incomplete-multipart rule bounds that.
-    pid = seed.project()
-    uid = _aborted_upload(seed, pid, age_days=0)
-    sup = Supervisor(db, store, settings, delay_fn=lambda attempt: 0.0)
-
-    assert _run_upload_cleanup(db, sup) == ["deferred"]  # aborts again
-    # The check finds no part, but the rule has not run yet: keep the ID, look again later.
-    assert _run_upload_cleanup(db, sup) == ["deferred"]
-    [job] = _upload_cleanups(seed, uid)
-    wait = job["wait"].total_seconds()
-    assert MULTIPART_RECHECK_SECONDS - 60 < wait <= MULTIPART_RECHECK_SECONDS
-    assert _multipart_id(seed, uid) == "mp-x"
-    store.stored_parts["mp-x"] = 1  # a slow part upload lands hours later
-    assert _run_upload_cleanup(db, sup) == ["deferred"]  # found: abort again
-    assert store.stored_parts == {} and _multipart_id(seed, uid) == "mp-x"
-    assert _run_upload_cleanup(db, sup) == ["deferred"]
-    assert _multipart_id(seed, uid) == "mp-x"
-    # Once the rule has run, a check that finds nothing forgets the ID.
-    seed.exec("UPDATE uploads SET created_at = created_at - interval '5 days' WHERE id = %s", uid)
     assert _run_upload_cleanup(db, sup) == ["succeeded"]
     assert _multipart_id(seed, uid) is None
 
@@ -1110,14 +1089,14 @@ def test_project_cleanup_completes_only_once_no_multipart_part_is_left(db, seed,
     seed.exec(
         "INSERT INTO uploads (id, project_id, created_by, media_kind, display_filename, "
         "declared_content_type, expected_bytes, staging_key, multipart_upload_id, part_size, "
-        "part_count, status, expires_at, created_at) VALUES (%s, %s, 'user-1', 'video', "
-        "'walk.mp4', 'video/mp4', 10, %s, 'mp-late', 16777216, 1, 'aborted', "
-        "now() + interval '1 day', now() - interval '5 days')",
+        "part_count, status, expires_at) VALUES (%s, %s, 'user-1', 'video', 'walk.mp4', "
+        "'video/mp4', 10, %s, 'mp-late', 16777216, 1, 'aborted', now() + interval '1 day')",
         str(uuid.uuid4()), pid, staging,
     )  # fmt: skip
     late = _LatePartStore(store.root, late=2)
     late.stored_parts["mp-late"] = 2
-    late.multipart_uploads["mp-live"] = f"tenants/{pid}/staging/{uuid.uuid4()}"  # still open
+    live = f"tenants/{pid}/staging/{uuid.uuid4()}"
+    late.multipart_uploads["mp-live"] = live  # still open
     seed.job(pid, "project_cleanup", {"projectId": pid, "prefix": f"tenants/{pid}/"}, priority=10)
     sup = Supervisor(db, late, settings, delay_fn=lambda attempt: 0.0)
 
@@ -1133,9 +1112,12 @@ def test_project_cleanup_completes_only_once_no_multipart_part_is_left(db, seed,
     assert seed.one("SELECT multipart_upload_id FROM uploads WHERE project_id = %s", pid)
     assert _run_cleanup(db, sup) == ["deferred"]  # parts landed after the second abort too
     assert late.stored_parts == {}  # the third abort left nothing
-    # A later check, with no abort before it, finds nothing, so the deletion completes.
+    assert _reconciliations(seed) == set()
+    # A later check, with no abort before it, finds nothing, so the deletion completes and
+    # hands both uploads over to be checked for good.
     assert _run_cleanup(db, sup) == ["succeeded"]
     assert late.aborts == {"mp-late": 3, "mp-live": 3}
+    assert _reconciliations(seed) == {(staging, "mp-late"), (live, "mp-live")}
     assert seed.one("SELECT lifecycle FROM projects WHERE id = %s", pid)["lifecycle"] == "deleted"
     assert seed.one("SELECT 1 FROM uploads WHERE project_id = %s", pid) is None
 
@@ -1179,69 +1161,6 @@ def test_project_cleanup_checks_multipart_parts_only_a_horizon_after_the_last_ab
     _age_cleanup(seed, 700, "firstPassAt", "multipartAbortedAt")
     assert _run_cleanup(db, sup) == ["succeeded"]
     assert seed.one(deleting, pid)["lifecycle"] == "deleted"
-
-
-def test_project_cleanup_scrubs_at_once_but_watches_uploads_until_the_bucket_rule_ends_them(
-    db, seed, store, settings
-):
-    # Uploads begun just before the deletion: a part upload still running could land
-    # for days, until the bucket's abort-incomplete-multipart rule ends them.
-    pid = _deleting_project(seed, store)
-    recorded = f"tenants/{pid}/staging/{uuid.uuid4()}"
-    seed.exec(
-        "INSERT INTO uploads (id, project_id, created_by, media_kind, display_filename, "
-        "declared_content_type, expected_bytes, staging_key, multipart_upload_id, part_size, "
-        "part_count, status, expires_at) VALUES (%s, %s, 'user-1', 'video', 'walk.mp4', "
-        "'video/mp4', 10, %s, 'mp-row', 16777216, 1, 'aborted', now() + interval '1 day')",
-        str(uuid.uuid4()), pid, recorded,
-    )  # fmt: skip
-    listed = f"tenants/{pid}/staging/{uuid.uuid4()}"
-    store.multipart_uploads["mp-open"] = listed
-    store.multipart_initiated["mp-open"] = time.time()
-    seed.job(pid, "project_cleanup", {"projectId": pid, "prefix": f"tenants/{pid}/"}, priority=10)
-    sup = Supervisor(db, store, settings, delay_fn=lambda attempt: 0.0)
-    project = (
-        "SELECT lifecycle, title, owner_subject, cleanup_completed_at FROM projects WHERE id = %s"
-    )
-
-    assert _run_cleanup(db, sup) == ["deferred"]  # first pass: abort both
-    # Nothing is left, so the project's data is scrubbed at once; the job stays, alone
-    # holding the uploads' IDs, and the project stays deleting.
-    assert _run_cleanup(db, sup) == ["deferred"]
-    row = seed.one(project, pid)
-    assert row["lifecycle"] == "deleting" and row["cleanup_completed_at"] is None
-    assert row["title"] == "Deleted project" and row["owner_subject"] == "deleted"
-    assert seed.one("SELECT 1 FROM uploads WHERE project_id = %s", pid) is None
-    [job] = _cleanup_jobs(seed, pid)
-    kept = {(key, uid) for key, uid, _ in job["input_manifest"]["multipartUploads"]}
-    assert kept == {(recorded, "mp-row"), (listed, "mp-open")}
-    wait = job["wait"].total_seconds()
-    assert MULTIPART_RECHECK_SECONDS - 60 < wait <= MULTIPART_RECHECK_SECONDS
-
-    store.stored_parts["mp-row"] = 1  # a slow part upload lands hours later
-    assert _run_cleanup(db, sup) == ["deferred"]  # found from the job's record: abort again
-    assert store.stored_parts == {}
-    assert _run_cleanup(db, sup) == ["deferred"]  # nothing left, but not expired yet
-    assert seed.one(project, pid)["lifecycle"] == "deleting"
-
-    # Once the rule has ended every upload, a check that finds nothing completes it.
-    row = seed.one("SELECT id, input_manifest FROM jobs WHERE stage = 'project_cleanup'")
-    manifest = dict(row["input_manifest"])
-    manifest["multipartUploads"] = [
-        [key, uid, initiated - 5 * DAY_SECONDS]
-        for key, uid, initiated in manifest["multipartUploads"]
-    ]
-    seed.exec("UPDATE jobs SET input_manifest = %s WHERE id = %s", Jsonb(manifest), row["id"])
-    assert _run_cleanup(db, sup) == ["succeeded"]
-    row = seed.one(project, pid)
-    assert row["lifecycle"] == "deleted" and row["cleanup_completed_at"] is not None
-    assert seed.one("SELECT 1 FROM jobs WHERE project_id = %s", pid) is None
-    audit = seed.one(
-        "SELECT data FROM audit_events WHERE project_id = %s "
-        "AND action = 'project.cleanup_completed'",
-        pid,
-    )
-    assert audit["data"]["multipartVerified"] == 2 and "multipartUploads" not in audit["data"]
 
 
 def test_a_requeued_project_cleanup_waits_longer_and_never_gives_up(db, seed, store, settings):

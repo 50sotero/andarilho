@@ -630,3 +630,35 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = _created()
 
     __table_args__ = (Index("ix_audit_events_project", "project_id", "id"),)
+
+
+class MultipartReconciliation(Base):
+    """An aborted multipart upload the worker keeps checking for parts that landed late.
+
+    S3 lets a part upload in flight during an abort succeed afterwards, and a part
+    upload has no time limit of its own, so no check is ever final: the worker checks
+    each entry for good, on a widening interval, and aborts again whenever a part
+    landed (``andarilho_worker.multipart``). No FK: an entry outlives its upload row and
+    its project's metadata, and holds only the storage key and the upload ID.
+    """
+
+    __tablename__ = "multipart_reconciliations"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    object_key: Mapped[str] = mapped_column(Text, nullable=False)
+    upload_id: Mapped[str] = mapped_column(String(1024), nullable=False)
+    # When this app last aborted the upload; NULL until the worker first aborts it.
+    last_aborted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    aborts: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # Checks in a row that found no part; each one doubles the wait before the next.
+    clean_checks: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_check_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at: Mapped[datetime] = _created()
+
+    __table_args__ = (
+        UniqueConstraint("object_key", "upload_id", name="uq_multipart_reconciliations_upload"),
+        Index("ix_multipart_reconciliations_due", "next_check_at"),
+    )
