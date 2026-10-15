@@ -944,7 +944,7 @@ RUN_MAX_SECONDS=3600
 DELIVERY_URL_TTL_SECONDS=300
 ```
 
-Local storage needs an internally reachable endpoint for the containers and a browser-reachable signing endpoint. Do not return `http://minio:9000` to a browser that cannot resolve it. Create the bucket/CORS during local bootstrap; omit custom endpoint overrides for ordinary AWS S3 production use. Environment validation must reject local/example credentials in production.
+Local storage needs an internally reachable endpoint for the containers and a browser-reachable signing endpoint. Do not return `http://minio:9000` to a browser that cannot resolve it. Create the bucket/CORS during local bootstrap; omit custom endpoint overrides for ordinary AWS S3 production use. Environment validation must reject local/example credentials in production, and a browser-facing storage endpoint (`S3_PUBLIC_ENDPOINT_URL`, else `S3_ENDPOINT_URL`) that is not HTTPS: presigned URLs carry upload rights and private scene assets.
 
 ### Commands to implement
 

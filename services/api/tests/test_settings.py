@@ -75,6 +75,9 @@ def test_production_accepts_real_values_and_forces_synthetic_off():
         {"auth_issuer": "https://example.supabase.co/auth/v1"},
         {"s3_access_key_id": "local-development-only", "s3_secret_access_key": "x" * 40},
         {"s3_access_key_id": "AKIAREAL", "s3_secret_access_key": "minioadmin"},
+        # Browser-facing storage URLs: the public endpoint, else the internal one.
+        {"s3_public_endpoint_url": "http://files.andarilho.app"},
+        {"s3_endpoint_url": "http://storage.internal:9000"},
     ],
 )
 def test_production_rejects_example_values(override):
@@ -82,6 +85,17 @@ def test_production_rejects_example_values(override):
         Settings(**{**PROD, **override})
     message = str(excinfo.value)
     assert "local-password" not in message and "minioadmin" not in message
+
+
+def test_production_allows_plain_http_only_behind_an_https_public_endpoint():
+    settings = Settings(
+        **PROD,
+        s3_endpoint_url="http://storage.internal:9000",
+        s3_public_endpoint_url="https://files.andarilho.app",
+    )
+    assert settings.s3_browser_endpoint_url == "https://files.andarilho.app"
+    with pytest.raises(ValidationError, match="S3_ENDPOINT_URL signs browser URLs"):
+        Settings(**PROD, s3_endpoint_url="http://storage.internal:9000")
 
 
 def test_env_names(monkeypatch):

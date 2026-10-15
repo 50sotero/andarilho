@@ -103,8 +103,7 @@ class Storage:
     def __init__(self, settings: Settings) -> None:
         self.bucket = settings.s3_bucket
         self.internal = _client(settings, settings.s3_endpoint_url)
-        public_endpoint = settings.s3_public_endpoint_url or settings.s3_endpoint_url
-        self.public = _client(settings, public_endpoint)
+        self.public = _client(settings, settings.s3_browser_endpoint_url)
 
     # -- multipart -------------------------------------------------------
     def create_multipart_upload(self, key: str, content_type: str) -> str:

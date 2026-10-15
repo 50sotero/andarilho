@@ -1,8 +1,8 @@
 """Environment-driven configuration (README section 14).
 
 Variable names match ``.env.example``. ``APP_ENV=production`` rejects the
-example/local credentials and insecure auth endpoints, and always disables the
-synthetic recipe.
+example/local credentials and insecure auth and browser-facing storage endpoints,
+and always disables the synthetic recipe.
 """
 
 from __future__ import annotations
@@ -112,6 +112,11 @@ class Settings(BaseSettings):
         return min(limit, S3_SINGLE_COPY_MAX_BYTES)
 
     @property
+    def s3_browser_endpoint_url(self) -> str | None:
+        """The endpoint presigned browser URLs use; None is the provider's default (AWS S3)."""
+        return self.s3_public_endpoint_url or self.s3_endpoint_url
+
+    @property
     def synthetic_recipe_enabled(self) -> bool:
         return bool(self.allow_synthetic_recipe)
 
@@ -131,6 +136,16 @@ class Settings(BaseSettings):
                 problems.append(f"{name.upper()} must use https in production")
         if self.ai_provider is not None and urlparse(self.ai_base_url).scheme != "https":
             problems.append("AI_BASE_URL must use https in production")
+        # Presigned upload and download URLs carry write capabilities and private scene
+        # assets to the browser. The internal endpoint may stay plain HTTP on a private
+        # network when a separate public endpoint is set.
+        browser = self.s3_browser_endpoint_url
+        if browser is not None and urlparse(browser).scheme != "https":
+            source = "S3_PUBLIC_ENDPOINT_URL" if self.s3_public_endpoint_url else "S3_ENDPOINT_URL"
+            problems.append(
+                f"{source} signs browser URLs and must use https in production "
+                "(set S3_PUBLIC_ENDPOINT_URL to an https endpoint)"
+            )
         checked = {
             "DATABASE_URL": self.database_url,
             "AUTH_ISSUER": self.auth_issuer,
