@@ -1092,7 +1092,15 @@ Preserve acquisition provenance and attribution. A mesh export may give a strong
 
 The AI model is **DeepSeek V4.1 Flash, reached through OpenCode**. It is the default for both the scene analysis (section 8) and the failed-run advice that the API offers. The key is a local file that `OPENCODE_API_KEY_FILE` names. It is never committed.
 
-OpenCode's catalog listed `deepseek-v4.1-flash` on 14 October 2026. That verifies the model's availability and nothing more. On 15 October 2026 the account answered HTTP 402 (insufficient account funds), so no live scene analysis has run yet. Until the account has credit, the analysis is tested against recorded replies. See [OpenCode models](https://opencode.ai/v2/docs/console/models/) and [inference API](https://opencode.ai/v2/docs/console/api/inference/).
+OpenCode's catalog listed `deepseek-v4.1-flash` on 14 October 2026. That verifies the model's availability and nothing more.
+
+**Which OpenCode product.** The owner's account has an OpenCode Go subscription. Go has its own endpoint, `https://opencode.ai/inference/go/v1`, which is now the default. The pay-as-you-go endpoint, `https://opencode.ai/inference/openai/v1`, bills a separate balance. That balance was empty, and on 15 October 2026 it answered HTTP 402 (insufficient account funds).
+
+Go rejects a request without an `x-opencode-session` header. Both clients therefore send a stable session per run, derived from the run ID so it does not name it, and identify themselves as `andarilho-worker/0.1` or `andarilho-api/0.1`.
+
+OpenCode describes Go as designed for coding agents and monitors its traffic for abuse. A home-scanning backend is not that traffic, and the owner chose Go knowing this. To use the balance instead, set `AI_BASE_URL` to the pay-as-you-go endpoint.
+
+No live scene analysis has run yet. Until one does, the analysis is tested against recorded replies. See [OpenCode models](https://opencode.ai/v2/docs/console/models/) and [inference API](https://opencode.ai/v2/docs/console/api/inference/).
 
 Use provider-specific identifiers: OpenCode uses `deepseek-v4.1-flash`; DeepSeek's own API currently serves V4.1 Flash as `deepseek-flash`. Those identifiers and credentials are not interchangeable. DeepSeek documents native image input, but image transport through the chosen OpenCode endpoint must also pass a capability smoke test before the app relies on it. See [DeepSeek release details](https://api-docs.deepseek.com/news/news260910/) and [vision input](https://api-docs.deepseek.com/guides/vision/).
 
@@ -1109,7 +1117,7 @@ The model does not measure. Its sizes are estimates. The geometry proposal groun
 
 ```dotenv
 AI_PROVIDER=opencode
-AI_BASE_URL=https://opencode.ai/inference/openai/v1
+AI_BASE_URL=https://opencode.ai/inference/go/v1
 AI_MODEL=deepseek-v4.1-flash
 OPENCODE_API_KEY_FILE=/path/outside/the/repository/opencode-key
 AI_MAX_OUTPUT_TOKENS=2048

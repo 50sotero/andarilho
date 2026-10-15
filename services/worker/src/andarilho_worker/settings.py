@@ -11,8 +11,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 LOCAL_SECRETS = frozenset({"local-development-only", "local-password", "example"})
-# The OpenAI-compatible gateway the API's AI advice also uses (README section 16).
-DEFAULT_AI_BASE_URL = "https://opencode.ai/inference/openai/v1"
+# The OpenAI-compatible gateway the API's AI advice also uses (README section 16): OpenCode
+# Go, the subscription. Pay-as-you-go balance is https://opencode.ai/inference/openai/v1.
+DEFAULT_AI_BASE_URL = "https://opencode.ai/inference/go/v1"
 DEFAULT_AI_MODEL = "deepseek-v4.1-flash"
 DEFAULT_AI_SCENE_TIMEOUT_SECONDS = 180.0
 DEFAULT_AI_SCENE_MAX_OUTPUT_TOKENS = 8192

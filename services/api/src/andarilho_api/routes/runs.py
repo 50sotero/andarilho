@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from andarilho_api import serializers as ser
-from andarilho_api.ai.client import AIClient, AIError
+from andarilho_api.ai.client import AIClient, AIError, session_id
 from andarilho_api.ai.tasks import explain_failed_run
 from andarilho_api.auth import current_subject
 from andarilho_api.db import get_db
@@ -282,7 +282,11 @@ def run_advice(run_id: uuid.UUID, subject: Subject, db: Db, request: Request):
     db.commit()  # release the connection while the provider answers
     try:
         completion = explain_failed_run(
-            client, error=error, failed_stage=failed_stage, quality=quality
+            client,
+            error=error,
+            failed_stage=failed_stage,
+            quality=quality,
+            session=session_id(str(run_id)),
         )
     except AIError as exc:
         raise _ai_failure(exc) from None

@@ -26,7 +26,7 @@ from PIL import Image
 from room_dataset import write_room_dataset
 from stage_fixtures import stage_context
 
-from andarilho_worker.ai import VisionClient
+from andarilho_worker.ai import VisionClient, session_id
 from andarilho_worker.errors import Cancelled, StageError
 from andarilho_worker.geometry.colmap import read_images_bin, write_images_bin
 from andarilho_worker.geometry.texture import camera_in_world
@@ -249,7 +249,10 @@ def test_a_complete_analysis_is_written_for_the_proposal(
 
     (request,) = fake.requests
     assert request.headers["authorization"] == f"Bearer {KEY}"
-    assert request.headers["user-agent"] == "andarilho-worker"
+    assert request.headers["user-agent"] == "andarilho-worker/0.1"
+    # OpenCode Go routes by a stable session per conversation: one per run, not the run id.
+    session = request.headers["x-opencode-session"]
+    assert session == session_id(ctx.run_id) and ctx.run_id not in session and len(session) == 32
     assert KEY not in json.dumps(artifact) and KEY not in json.dumps(result.manifest)
 
     manifest = result.manifest

@@ -25,7 +25,7 @@ from typing import Any
 
 import numpy as np
 
-from andarilho_worker.ai import AIInvalidReply, AIUnavailable, VisionClient
+from andarilho_worker.ai import AIInvalidReply, AIUnavailable, VisionClient, session_id
 from andarilho_worker.analysis import (
     SYSTEM_PROMPT,
     build_content,
@@ -178,7 +178,7 @@ def _ask(ctx: StageContext, content: list[dict[str, Any]], frames: set[int]) -> 
     """One call to the model, with its failures reduced to the artifact's status."""
     client = ctx.services.vision or VisionClient.from_settings(ctx.services.settings)
     try:
-        completion = client.complete_json(SYSTEM_PROMPT, content)
+        completion = client.complete_json(SYSTEM_PROMPT, content, session=session_id(ctx.run_id))
         reply = normalise_reply(completion.data, frames)
     except AIUnavailable as exc:
         return _Outcome("unavailable", exc.reason, None, [UNAVAILABLE_WARNING], {})

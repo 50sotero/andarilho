@@ -6,10 +6,15 @@ call is an ordinary bounded HTTP request: the key is read from the file that
 ``Authorization`` header, and is never logged or put in an exception. Every failure is
 reduced to a short reason that is safe to record, so the caller can carry on without the
 model. The API's own AI client (``services/api``, its ``ai`` package) follows the same rules.
+
+OpenCode Go asks each client to name itself in its user agent and to send a stable
+``x-opencode-session`` per conversation; other gateways ignore both. The session is
+derived from the subject (a run), so it names no record the provider could look up.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,7 +25,7 @@ import httpx
 if TYPE_CHECKING:
     from andarilho_worker.settings import Settings
 
-USER_AGENT = "andarilho-worker"
+USER_AGENT = "andarilho-worker/0.1"
 # A reply is one JSON object of rooms, doors and furniture; anything larger is not one.
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_KEY_BYTES = 4096
@@ -37,6 +42,11 @@ class AIUnavailable(Exception):
 
 class AIInvalidReply(Exception):
     """The model answered, but not with a JSON object."""
+
+
+def session_id(subject: str) -> str:
+    """A stable ``x-opencode-session`` value for one subject, such as a run."""
+    return hashlib.sha256(f"andarilho:{subject}".encode()).hexdigest()[:32]
 
 
 @dataclass(frozen=True)
@@ -124,10 +134,13 @@ class VisionClient:
             max_output_tokens=settings.ai_max_output_tokens,
         )
 
-    def complete_json(self, system: str, content: list[dict[str, Any]]) -> Completion:
+    def complete_json(
+        self, system: str, content: list[dict[str, Any]], *, session: str | None = None
+    ) -> Completion:
         """Send ``system`` and ``content`` (OpenAI content parts) and return the JSON reply.
 
         ``content`` holds text parts and ``image_url`` parts whose URLs are data URLs.
+        ``session`` (see :func:`session_id`) is sent as ``x-opencode-session``.
         Raises :class:`AIUnavailable` when the model cannot answer and
         :class:`AIInvalidReply` when its reply is not one JSON object.
         """
@@ -142,7 +155,7 @@ class VisionClient:
             "max_tokens": self._max_output_tokens,
             "response_format": {"type": "json_object"},
         }
-        raw = self._post(key, body)
+        raw = self._post(key, body, session)
         return self._completion(raw)
 
     def _read_key(self) -> str:
@@ -159,8 +172,10 @@ class VisionClient:
             raise AIUnavailable("no_key")
         return value
 
-    def _post(self, key: str, body: dict[str, Any]) -> bytes:
+    def _post(self, key: str, body: dict[str, Any], session: str | None) -> bytes:
         headers = {"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT}
+        if session:
+            headers["x-opencode-session"] = session
         try:
             with (
                 httpx.Client(

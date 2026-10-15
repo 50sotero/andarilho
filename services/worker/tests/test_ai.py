@@ -16,6 +16,7 @@ from andarilho_worker.ai import (
     AIUnavailable,
     Completion,
     VisionClient,
+    session_id,
 )
 from andarilho_worker.settings import Settings
 
@@ -117,7 +118,7 @@ def test_the_request_is_a_json_chat_call_with_the_key_in_the_header_only(tmp_pat
     assert request.method == "POST"
     assert str(request.url) == f"{BASE}/chat/completions"
     assert request.headers["authorization"] == f"Bearer {KEY}"
-    assert request.headers["user-agent"] == "andarilho-worker"
+    assert request.headers["user-agent"] == "andarilho-worker/0.1"
     body = json.loads(request.content)
     assert body == {
         "model": "deepseek-v4.1-flash",
@@ -130,6 +131,26 @@ def test_the_request_is_a_json_chat_call_with_the_key_in_the_header_only(tmp_pat
         "response_format": {"type": "json_object"},
     }
     assert KEY not in request.content.decode()
+
+
+def test_the_client_names_itself_and_sends_the_session_it_is_given(tmp_path):
+    seen: list[httpx.Headers] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers)
+        return _reply("{}")
+
+    client = _client(_key_file(tmp_path), handler)
+    client.complete_json("system", CONTENT, session=session_id("run-1"))
+    client.complete_json("system", CONTENT)
+    assert [h["user-agent"] for h in seen] == ["andarilho-worker/0.1"] * 2
+    assert seen[0]["x-opencode-session"] == session_id("run-1")
+    assert "x-opencode-session" not in seen[1]
+
+
+def test_a_session_is_stable_per_subject_and_does_not_name_it():
+    assert session_id("run-1") == session_id("run-1") != session_id("run-2")
+    assert len(session_id("run-1")) == 32 and "run-1" not in session_id("run-1")
 
 
 def test_the_key_is_read_from_the_file_at_each_call(tmp_path):

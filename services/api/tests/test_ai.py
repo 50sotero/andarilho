@@ -123,6 +123,17 @@ def test_failed_run_advice_sends_only_sanitized_facts(ai_client, auth, db, provi
                           "promptTokens": 210, "completionTokens": 64}  # fmt: skip
 
 
+def test_advice_names_the_client_and_a_stable_session_per_run(ai_client, auth, db, provider):
+    # OpenCode Go routes a conversation by x-opencode-session and asks for a named client.
+    first, second = failed_run(db, ai_client, auth), failed_run(db, ai_client, auth)
+    for run_id in (first, second, first):
+        assert ai_client.post(f"/v1/runs/{run_id}/advice", headers=auth()).status_code == 200
+    sessions = [request.headers["x-opencode-session"] for request in provider.requests]
+    assert sessions[0] == sessions[2] != sessions[1]
+    assert all(len(s) == 32 and first not in s and second not in s for s in sessions)
+    assert {request.headers["user-agent"] for request in provider.requests} == {"andarilho-api/0.1"}
+
+
 def test_failure_prompt_describes_camera_reconstruction_and_texturing(
     ai_client, auth, db, provider
 ):

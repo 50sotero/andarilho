@@ -91,7 +91,8 @@ class Settings(BaseSettings):
     # key comes from OPENCODE_API_KEY or the file OPENCODE_API_KEY_FILE names; it is
     # read when used and never logged, returned or passed to a subprocess.
     ai_provider: Literal["opencode"] | None = None
-    ai_base_url: str = "https://opencode.ai/inference/openai/v1"
+    # OpenCode Go (the subscription); pay-as-you-go balance is .../inference/openai/v1.
+    ai_base_url: str = "https://opencode.ai/inference/go/v1"
     ai_model: str = "deepseek-v4.1-flash"
     opencode_api_key: SecretStr | None = None
     opencode_api_key_file: str | None = None

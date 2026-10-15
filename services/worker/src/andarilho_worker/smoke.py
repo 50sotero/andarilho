@@ -92,7 +92,9 @@ class AnalysisRecorder:
             raise ValueError("exactly one of client and reply is required")
         self.folder, self.client, self.reply = folder, client, reply
 
-    def complete_json(self, system: str, content: list[dict[str, Any]]) -> Completion:
+    def complete_json(
+        self, system: str, content: list[dict[str, Any]], *, session: str | None = None
+    ) -> Completion:
         self.folder.mkdir(parents=True, exist_ok=True)
         texts, name = [system], "image"
         for part in content:
@@ -113,7 +115,7 @@ class AnalysisRecorder:
         if self.reply is not None:
             completion = Completion(data=self.reply, model="recorded", usage={})
         else:
-            completion = self.client.complete_json(system, content)
+            completion = self.client.complete_json(system, content, session=session)
         reply = json.dumps(completion.data, indent=2)
         (self.folder / "reply.json").write_text(reply, encoding="utf-8")
         return completion

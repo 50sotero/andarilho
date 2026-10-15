@@ -40,8 +40,12 @@ def explain_failed_run(
     error: Mapping[str, Any],
     failed_stage: str | None,
     quality: str,
+    session: str | None = None,
 ) -> Completion[RecaptureAdvice]:
-    """Plain-language explanation of a failed run and a short recapture plan."""
+    """Plain-language explanation of a failed run and a short recapture plan.
+
+    ``session`` is the run's provider session (``client.session_id``).
+    """
     facts = {
         "errorCode": str(error.get("code") or "PROCESSING_FAILED")[:64],
         "publicMessage": str(error.get("message") or "")[:500],
@@ -61,4 +65,4 @@ def explain_failed_run(
         'form {"summary": string, "steps": [string]}.\n\n'
         f"Facts: {json.dumps(facts, sort_keys=True)}"
     )
-    return client.complete_json("explain_failed_run", prompt, RecaptureAdvice)
+    return client.complete_json("explain_failed_run", prompt, RecaptureAdvice, session=session)

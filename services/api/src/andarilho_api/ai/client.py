@@ -11,10 +11,15 @@ The API key is read server-side when needed, from ``OPENCODE_API_KEY`` or the
 file ``OPENCODE_API_KEY_FILE`` names, trimmed, and only ever placed in the
 ``Authorization`` header. It is never logged, returned, put in a prompt or
 passed to a subprocess.
+
+OpenCode Go asks each client to name itself in its user agent and to send a stable
+``x-opencode-session`` per conversation; other gateways ignore both. The session is
+derived from the subject (a run), so it names no record the provider could look up.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -41,6 +46,12 @@ SYSTEM_PROMPT = (
 MAX_RESPONSE_BYTES = 256 * 1024
 MAX_KEY_BYTES = 4096
 ATTEMPTS = 2  # one retry, for transient gateway failures only
+USER_AGENT = "andarilho-api/0.1"
+
+
+def session_id(subject: str) -> str:
+    """A stable ``x-opencode-session`` value for one subject, such as a run."""
+    return hashlib.sha256(f"andarilho:{subject}".encode()).hexdigest()[:32]
 
 
 class AIError(Exception):
@@ -122,8 +133,13 @@ class AIClient:
     def model(self) -> str:
         return self._settings.ai_model
 
-    def complete_json[T: BaseModel](self, task: str, prompt: str, schema: type[T]) -> Completion[T]:
-        """Ask for one JSON object and validate it against ``schema``."""
+    def complete_json[T: BaseModel](
+        self, task: str, prompt: str, schema: type[T], *, session: str | None = None
+    ) -> Completion[T]:
+        """Ask for one JSON object and validate it against ``schema``.
+
+        ``session`` (see :func:`session_id`) is sent as ``x-opencode-session``.
+        """
         if not self.enabled:
             raise AIError("not_configured")
         key = read_api_key(self._settings)
@@ -139,7 +155,7 @@ class AIClient:
         if not self._slots.acquire(timeout=self._settings.ai_timeout_seconds):
             raise AIError("rate_limited")
         try:
-            data = self._post(key, body)
+            data = self._post(key, body, session)
         finally:
             self._slots.release()
         try:
@@ -166,9 +182,12 @@ class AIClient:
         )
         return Completion(value, self.provider, self.model, usage)
 
-    def _post(self, key: str, body: dict[str, Any]) -> dict[str, Any]:
+    def _post(self, key: str, body: dict[str, Any], session: str | None) -> dict[str, Any]:
         url = self._settings.ai_base_url.rstrip("/") + "/chat/completions"
         timeout = httpx.Timeout(self._settings.ai_timeout_seconds)
+        headers = {"Authorization": f"Bearer {key}", "User-Agent": USER_AGENT}
+        if session:
+            headers["x-opencode-session"] = session
         failure = AIError("unavailable")
         for _ in range(ATTEMPTS):
             try:
@@ -176,9 +195,7 @@ class AIClient:
                     httpx.Client(
                         transport=self._transport, timeout=timeout, follow_redirects=False
                     ) as client,
-                    client.stream(
-                        "POST", url, json=body, headers={"Authorization": f"Bearer {key}"}
-                    ) as response,
+                    client.stream("POST", url, json=body, headers=headers) as response,
                 ):
                     status = response.status_code
                     if status in (401, 403):

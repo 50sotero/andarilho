@@ -92,7 +92,7 @@ services:
       # and OPENCODE_API_KEY_HOST_FILE (the key file's host path) in ../.env. The file
       # is mounted read-only as a secret; the key itself never enters the environment.
       AI_PROVIDER: ${AI_PROVIDER:-}
-      AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/openai/v1}
+      AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/go/v1}
       AI_MODEL: ${AI_MODEL:-deepseek-v4.1-flash}
       AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-60}
       OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
@@ -131,7 +131,7 @@ services:
       # model above; the key comes from the same read-only secret as the API's AI advice.
       # Its timeout and reply budget are its own: one call carries a dozen images.
       AI_SCENE_ANALYSIS: ${AI_SCENE_ANALYSIS:-false}
-      AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/openai/v1}
+      AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/go/v1}
       AI_MODEL: ${AI_MODEL:-deepseek-v4.1-flash}
       AI_SCENE_TIMEOUT_SECONDS: ${AI_SCENE_TIMEOUT_SECONDS:-180}
       AI_SCENE_MAX_OUTPUT_TOKENS: ${AI_SCENE_MAX_OUTPUT_TOKENS:-8192}

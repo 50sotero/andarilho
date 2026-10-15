@@ -28,7 +28,7 @@ def test_an_unrecognised_switch_value_is_refused_by_name():
 
 def test_ai_settings_have_defaults_and_read_their_variables(tmp_path):
     defaults = Settings.from_env(BASE_ENV)
-    assert defaults.ai_base_url == "https://opencode.ai/inference/openai/v1"
+    assert defaults.ai_base_url == "https://opencode.ai/inference/go/v1"  # OpenCode Go
     assert defaults.ai_model == "deepseek-v4.1-flash"
     assert defaults.opencode_api_key_file is None
     assert defaults.ai_timeout_seconds == 180.0
@@ -61,7 +61,7 @@ def test_blank_ai_variables_fall_back_to_their_defaults():
             "AI_SCENE_TIMEOUT_SECONDS": "",
         }
     )
-    assert settings.ai_base_url == "https://opencode.ai/inference/openai/v1"
+    assert settings.ai_base_url == "https://opencode.ai/inference/go/v1"
     assert settings.ai_model == "deepseek-v4.1-flash"
     assert settings.opencode_api_key_file is None
     assert settings.ai_timeout_seconds == 180.0
