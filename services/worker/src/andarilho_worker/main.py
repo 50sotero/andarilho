@@ -10,22 +10,19 @@ How GPU stages are gated (infra notes)
 --------------------------------------
 * Every job row carries a ``capability`` (``cpu``/``gpu``) copied from the pinned
   recipe when the API inserts the first job and when the worker inserts each
-  next stage. ``camera_reconstruction`` and ``training`` are ``gpu`` in the
+  next stage. ``camera_reconstruction`` is the only ``gpu`` stage in the
   ``preview``/``standard`` recipes; the ``synthetic`` recipe has no GPU stage.
 * A worker only claims jobs whose capability equals ``WORKER_CAPABILITY``
   (claim SQL filters on it), so CPU workers never pick up GPU stages and a run
   simply waits in ``queued`` at the first GPU stage until a GPU worker exists.
 * Readiness (``python -m andarilho_worker --check``, also run at start-up)
   verifies the database, the object store and the advertised capability. A
-  ``gpu`` worker must find ``nvidia-smi`` (and it must succeed), ``colmap``,
-  ``ns-train`` and ``ns-export``; otherwise it refuses to start rather than
-  claiming GPU jobs it cannot run. ``splat-transform`` is optional: without it
-  normalization keeps the PLY render asset (CPU fallback), matching the README
-  rule that CUDA and Vulkan/WebGPU support are separate capabilities.
+  ``gpu`` worker must find ``nvidia-smi`` (and it must succeed) and ``colmap``;
+  otherwise it refuses to start rather than claiming GPU jobs it cannot run.
 * Run one GPU worker per GPU (``WORKER_MAX_CONCURRENCY=1``) and scale workers
   from the number of queued ``gpu`` jobs. The GPU image is
   ``infra/Dockerfile.worker-gpu``; the toolchain must be validated in that exact
-  image (a working ``nvidia-smi`` does not prove training/export work).
+  image (a working ``nvidia-smi`` does not prove that COLMAP was built with CUDA).
 * Budgets: each stage has a pinned timeout (capped by ``RUN_MAX_SECONDS``), the
   scratch directory has a byte budget, and a stage exceeding either fails with
   ``BUDGET_EXHAUSTED`` instead of retrying. Actual seconds are added to
@@ -56,7 +53,7 @@ from andarilho_worker.settings import Settings
 from andarilho_worker.supervisor import Supervisor
 
 log = logging.getLogger("andarilho_worker")
-GPU_TOOLS = ("nvidia-smi", "colmap", "ns-train", "ns-export")
+GPU_TOOLS = ("nvidia-smi", "colmap")
 
 
 class RedactingFilter(logging.Filter):

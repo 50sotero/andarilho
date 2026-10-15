@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1.7
-# GPU reconstruction worker (camera_reconstruction, training) for a Linux host
-# with an NVIDIA GPU. NOT built or exercised in routine CI; see
-# .github/workflows/gpu-smoke.yml. Every version below must be pinned together
-# and validated in this exact image before use (README sections 8 and 14).
+# GPU reconstruction worker (camera_reconstruction) for a Linux host with an NVIDIA
+# GPU. NOT built or exercised in routine CI; see .github/workflows/gpu-smoke.yml.
+# Every version below must be pinned together and validated in this exact image
+# before use (README sections 8 and 14).
 #
 # The base image is pinned by its multi-arch index digest (the tag is kept for
 # readers; the digest decides). To move it, inspect the new tag and update both:
@@ -11,23 +11,15 @@ ARG CUDA_IMAGE=nvidia/cuda:12.8.1-cudnn-devel-ubuntu24.04@sha256:24c8e3581ea6330
 FROM ${CUDA_IMAGE}
 
 ARG COLMAP_VERSION=3.12.5
-ARG NERFSTUDIO_VERSION=1.1.5
-# nerfstudio 1.1.5 pins gsplat==1.4.0 exactly.
-ARG GSPLAT_VERSION=1.4.0
-ARG TORCH_VERSION=2.7.1
-ARG TORCHVISION_VERSION=0.22.1
-ARG TORCH_CUDA=cu128
-ARG SPLAT_TRANSFORM_VERSION=1.4.0
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 \
-    TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9;9.0;12.0" UV_PROJECT_ENVIRONMENT=/opt/venv \
-    PATH="/opt/venv/bin:$PATH" TORCH_EXTENSIONS_DIR=/opt/torch_extensions
+    PATH="/opt/worker-venv/bin:$PATH"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg git cmake ninja-build build-essential python3.12 python3.12-venv python3.12-dev \
       libboost-program-options-dev libboost-graph-dev libboost-system-dev libeigen3-dev \
       libflann-dev libfreeimage-dev libmetis-dev libgoogle-glog-dev libgtest-dev libgmock-dev \
       libsqlite3-dev libglew-dev qtbase5-dev libqt5opengl5-dev libcgal-dev libceres-dev \
-      libcurl4-openssl-dev nodejs npm \
+      libcurl4-openssl-dev \
  && rm -rf /var/lib/apt/lists/*
 
 # COLMAP built with CUDA from a pinned release tag.
@@ -36,37 +28,8 @@ RUN git clone --depth 1 --branch ${COLMAP_VERSION} https://github.com/colmap/col
  && cmake --build /opt/colmap-build && cmake --install /opt/colmap-build && rm -rf /opt/colmap-src /opt/colmap-build
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.30 /uv /usr/local/bin/uv
-# Install torch/torchvision from the CUDA index and keep them pinned while
-# resolving nerfstudio, so its dependencies cannot replace the CUDA build.
-RUN uv venv --python python3.12 /opt/venv \
- && uv pip install --python /opt/venv/bin/python \
-      "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
-      --index-url https://download.pytorch.org/whl/${TORCH_CUDA} \
- && uv pip install --python /opt/venv/bin/python \
-      "nerfstudio==${NERFSTUDIO_VERSION}" "gsplat==${GSPLAT_VERSION}" \
-      "torch==${TORCH_VERSION}" "torchvision==${TORCHVISION_VERSION}" \
-      --extra-index-url https://download.pytorch.org/whl/${TORCH_CUDA} \
-      --index-strategy unsafe-best-match \
- && python -c "import torch; assert torch.__version__.startswith('${TORCH_VERSION}+${TORCH_CUDA}'), torch.__version__"
-# Precompile gsplat's CUDA kernels for the arch list above (no GPU needed, only
-# nvcc) so workers never JIT-compile at run time. Each nvcc job can take several
-# GB for five architectures; unbounded (one per core) it exhausted a 32 GB build VM.
-ARG MAX_JOBS=4
-RUN MAX_JOBS=${MAX_JOBS} python -c "from gsplat.cuda._backend import _C; assert _C is not None" \
- && chmod -R a+rX /opt/torch_extensions
-RUN npm install -g "@playcanvas/splat-transform@${SPLAT_TRANSFORM_VERSION}"
-# Splatfacto's LPIPS metric loads torchvision's AlexNet weights through torch.hub.
-# Bake them in where the non-root worker can read them: workers fetch nothing at
-# run time.
-ENV TORCH_HOME=/opt/torch-home
-RUN python -c "import torchvision; torchvision.models.alexnet(weights='DEFAULT')" \
- && ls /opt/torch-home/hub/checkpoints/alexnet-*.pth \
- && chmod -R a+rX /opt/torch-home
 
-# The worker gets its own locked environment. It runs the trainer only as
-# subprocesses (ns-train/ns-export from /opt/venv, still on PATH), and its pinned
-# dependencies (numpy 2) must not replace the versions nerfstudio resolved; the
-# trainer environment is checked for conflicts after the worker is installed.
+# The worker gets its own locked environment from services/worker/uv.lock.
 WORKDIR /app/services/worker
 COPY services/worker/pyproject.toml services/worker/uv.lock ./
 RUN UV_PROJECT_ENVIRONMENT=/opt/worker-venv UV_LINK_MODE=copy \
@@ -74,15 +37,12 @@ RUN UV_PROJECT_ENVIRONMENT=/opt/worker-venv UV_LINK_MODE=copy \
 COPY services/worker/ ./
 RUN UV_PROJECT_ENVIRONMENT=/opt/worker-venv UV_LINK_MODE=copy \
     uv sync --frozen --no-dev --python python3.12 \
- && uv pip check --python /opt/venv/bin/python \
+ && uv pip check --python /opt/worker-venv/bin/python \
  && rm -rf /root/.cache
-ENV PATH="/opt/worker-venv/bin:$PATH"
 # Fail the build if the pinned recipe uses an option these tool versions do not accept.
 RUN python -m andarilho_worker.toolcheck
 
-# A writable home: torch.compile (used during Splatfacto training) keeps its Triton
-# kernel cache under ~/.triton, other tools cache under ~/.cache, and /app is
-# read-only for the worker.
+# A writable home: other tools cache under ~/.cache, and /app is read-only for the worker.
 RUN useradd --system --uid 10001 --create-home --home-dir /home/andarilho andarilho \
  && mkdir -p /scratch && chown andarilho /scratch
 USER andarilho

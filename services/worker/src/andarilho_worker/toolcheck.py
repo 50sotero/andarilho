@@ -1,7 +1,7 @@
 """Check the pinned recipe's command-line options against the installed tools.
 
 Run inside a worker image (``python -m andarilho_worker.toolcheck``, with
-``--only splat-transform ffmpeg`` in the CPU image); the image builds do this so a
+``--only ffmpeg`` in the CPU image); the image builds do this so a
 recipe written for another tool version fails the build instead of failing a
 user's run. It needs no GPU: every check reads ``--help`` (and FFmpeg's encoder
 list, for encoders a template selects with ``-c:v``).
@@ -27,12 +27,6 @@ HELP: dict[str, tuple[tuple[str, ...], ...]] = {
     "colmap_matches_importer": (("colmap", "matches_importer", "-h"),),
     "colmap_mapper": (("colmap", "mapper", "-h"),),
     "colmap_image_undistorter": (("colmap", "image_undistorter", "-h"),),
-    "ns_train": (
-        ("ns-train", "splatfacto", "--help"),
-        ("ns-train", "splatfacto", "colmap", "--help"),
-    ),
-    "ns_export": (("ns-export", "gaussian-splat", "--help"),),
-    "splat_transform": (("splat-transform", "--help"),),
 }
 
 # Encoders a template selects with ``-c:v`` must be listed here.
@@ -80,7 +74,7 @@ def missing_options(
     """Template name -> options its tool's help does not list (empty when all match).
 
     ``only`` limits the check to templates run by those executables (an image that
-    installs only some of the tools, such as the CPU worker's splat-transform).
+    installs only some of the tools, such as the CPU worker, which has FFmpeg alone).
     """
     missing: dict[str, list[str]] = {}
     for name, commands in HELP.items():

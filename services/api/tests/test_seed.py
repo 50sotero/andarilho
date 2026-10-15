@@ -33,7 +33,7 @@ def _load_script():
 def _fixture_dir(tmp_path: Path) -> Path:
     """Use the committed fixture when complete; otherwise synthesize a stand-in."""
     if (FIXTURES / "synthetic-two-room.manifest.json").is_file() and (
-        FIXTURES / "synthetic-two-room.splat.ply"
+        FIXTURES / "synthetic-two-room.model.glb"
     ).is_file():
         return FIXTURES
     target = tmp_path / "fixtures"
@@ -41,7 +41,7 @@ def _fixture_dir(tmp_path: Path) -> Path:
     shutil.copy(FIXTURES / "synthetic-two-room.layout.json", target)
     from factories import manifest
 
-    blobs = {"render": b"ply-bytes", "collision": b"glb-bytes"}
+    blobs = {"render": b"model-glb", "collision": b"glb-bytes"}
     doc = manifest(
         "fixture-project",
         "fixture-scene",
@@ -52,7 +52,7 @@ def _fixture_dir(tmp_path: Path) -> Path:
     )
     del doc["assets"]["poster"]
     (target / "synthetic-two-room.manifest.json").write_text(json.dumps(doc))
-    (target / "synthetic-two-room.splat.ply").write_bytes(blobs["render"])
+    (target / "synthetic-two-room.model.glb").write_bytes(blobs["render"])
     (target / "synthetic-two-room.collision.glb").write_bytes(blobs["collision"])
     return target
 
@@ -78,6 +78,11 @@ def test_seed_fixture_end_to_end(app, client, auth, db, s3, tmp_path):
         assert asset["sha256"] == original["assets"][slot]["sha256"]
         body = s3.get_object(Bucket=BUCKET, Key=asset["key"])["Body"].read()
         assert hashlib.sha256(body).hexdigest() == asset["sha256"]
+    # The render model is a GLB uploaded with the GLB media type, not a splat file.
+    render = revision.manifest["assets"]["render"]
+    assert render["format"] == "glb" and render["key"].endswith("/model.glb")
+    head = s3.head_object(Bucket=BUCKET, Key=render["key"])
+    assert head["ContentType"] == "model/gltf-binary"
     run = db.execute(select(ReconstructionRun)).scalar_one()
     assert run.quality == "synthetic" and run.status == "succeeded"
     project = db.get(Project, uuid.UUID(pid))

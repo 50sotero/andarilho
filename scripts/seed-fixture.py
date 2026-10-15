@@ -51,14 +51,11 @@ DEFAULT_FIXTURES = ROOT / "packages" / "scene-contract" / "fixtures"
 FIXTURE_NAME = "synthetic-two-room"
 # Local file suffix for each manifest asset slot.
 ASSET_FILES = {
-    "render": ".splat.ply",
+    "render": ".model.glb",
     "collision": ".collision.glb",
     "poster": ".poster.webp",
 }
 CONTENT_TYPES = {
-    "ply": "application/octet-stream",
-    "sog": "application/octet-stream",
-    "spz": "application/octet-stream",
     "glb": "model/gltf-binary",
     "webp": "image/webp",
     "png": "image/png",

@@ -16,6 +16,7 @@ from andarilho_worker.runner import (
     ProcessTimeout,
     Redactor,
     ScratchBudgetExceeded,
+    minimal_env,
 )
 
 PARENT = textwrap.dedent(
@@ -208,5 +209,30 @@ def test_toolcheck_reports_an_encoder_ffmpeg_lacks():
     assert missing_options(tools(anim, webp)) == {}
     # A longer encoder name sharing the prefix does not satisfy the check.
     assert missing_options(tools(anim)) == {"ffmpeg_poster": ["libwebp"]}
-    assert missing_options(tools(anim), only=["splat-transform"]) == {}
+    assert missing_options(tools(anim), only=["colmap"]) == {}
     assert missing_options(tools(anim), only=["ffmpeg"]) == {"ffmpeg_poster": ["libwebp"]}
+
+
+def test_cpu_image_checks_only_ffmpeg():
+    from andarilho_worker.toolcheck import ENCODERS_HELP, missing_options
+
+    calls: list[tuple[str, ...]] = []
+
+    def record(argv):
+        calls.append(tuple(argv))
+        return ""
+
+    missing_options(record, only=["ffmpeg"])
+    assert calls == [ENCODERS_HELP]
+
+
+def test_minimal_environment_forwards_only_allowlisted_variables(monkeypatch):
+    monkeypatch.delenv("LANG", raising=False)
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.setenv("S3_SECRET_ACCESS_KEY", "do-not-pass")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://u:p@h/d")
+    env = minimal_env({"EXTRA": "1"})
+    assert env["CUDA_VISIBLE_DEVICES"] == "0"
+    assert env["LANG"] == "C.UTF-8"
+    assert env["EXTRA"] == "1"
+    assert "S3_SECRET_ACCESS_KEY" not in env and "DATABASE_URL" not in env

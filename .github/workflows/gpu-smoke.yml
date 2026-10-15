@@ -1,6 +1,6 @@
 name: gpu-smoke
 
-# Short real reconstruction/training/export smoke check on a protected,
+# Short real reconstruction and texturing smoke check on a protected,
 # self-hosted Linux NVIDIA runner (README section 19). Manual only: it never
 # runs pull-request code and needs no cloud credentials. Keep the time limit.
 on:
@@ -36,11 +36,10 @@ jobs:
         run: |
           docker run --rm --gpus all andarilho-worker-gpu:smoke nvidia-smi
           docker run --rm --gpus all andarilho-worker-gpu:smoke colmap -h
-          docker run --rm --gpus all andarilho-worker-gpu:smoke ns-train splatfacto --help
           docker run --rm andarilho-worker-gpu:smoke python -m andarilho_worker.toolcheck
-      # The real pipeline: FFmpeg frames -> COLMAP -> Splatfacto training/export ->
-      # normalization, through the worker's pinned recipe and stage code. Fails if
-      # any stage fails or produces no render asset.
+      # The real pipeline: FFmpeg frames -> COLMAP -> normalization -> geometry
+      # proposal -> texturing, through the worker's pinned recipe and stage code.
+      # Fails if any stage fails.
       - name: capture pipeline smoke
         run: |
           mkdir -p "$RUNNER_TEMP/out"
@@ -50,8 +49,8 @@ jobs:
             python -m andarilho_worker.smoke --video /data/capture.mp4 --out /out --max-seconds 4800
           test -s "$RUNNER_TEMP/out/report.json"
           cat "$RUNNER_TEMP/out/report.json"
-      # The report and the scene bundle it describes (render, collision, manifest,
-      # layout, poster), so the result can be walked locally with VIEWER_BUNDLE_DIR.
+      # The report and the scene bundle it describes (render model, collision,
+      # manifest, layout, poster), so the result can be walked locally with VIEWER_BUNDLE_DIR.
       - uses: actions/upload-artifact@v7
         if: always()
         with:

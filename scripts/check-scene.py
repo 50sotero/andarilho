@@ -1,8 +1,9 @@
 """Validate a scene manifest and its local asset files.
 
 Checks the JSON Schema, manifest semantics (finite numbers, similarity matrix,
-spawn floor/bounds, asset prefixes), asset bytes/sha256, render asset header, and
-the collision GLB (identity node transforms, finite vertices within bounds, spawn
+spawn floor/bounds, asset prefixes), asset bytes/sha256, the render model (a GLB
+with unlit materials, within the triangle and texture limits and the scene bounds),
+and the collision GLB (identity node transforms, finite vertices within bounds, spawn
 capsule clearance and floor support).
 
 Usage (from the repository root):
@@ -10,8 +11,9 @@ Usage (from the repository root):
       packages/scene-contract/fixtures/synthetic-two-room.manifest.json
 
 Asset files are resolved next to the manifest. For ``<stem>.manifest.json`` the
-render asset is ``<stem>.splat.<format>``, the collision asset ``<stem>.collision.glb``
-and an optional layout ``<stem>.layout.json``; otherwise each key's basename is used.
+render model is ``<stem>.model.<format>`` (``<stem>.model.glb``), the collision asset
+``<stem>.collision.glb`` and an optional layout ``<stem>.layout.json``; otherwise each
+key's basename is used.
 Override with --render/--collision/--poster/--layout.
 """
 
@@ -45,7 +47,7 @@ def main() -> int:
         if not isinstance(asset, dict):
             return None
         if stem is not None:
-            suffix = {"render": f"splat.{asset.get('format')}", "collision": "collision.glb"}.get(
+            suffix = {"render": f"model.{asset.get('format')}", "collision": "collision.glb"}.get(
                 kind, f"{kind}.{asset.get('format')}"
             )
             return base / f"{stem}.{suffix}"
