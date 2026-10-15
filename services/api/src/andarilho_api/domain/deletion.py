@@ -8,7 +8,10 @@
    reservations released.
 
 Incomplete multipart uploads are marked ``aborted`` and returned so the caller
-can abort them in storage after commit (best effort). A ``project_cleanup`` job
+can abort them in storage after commit (best effort). Their rows keep the
+multipart upload ID: a part in flight can land after the abort, and the worker's
+cleanup aborts each recorded upload again and checks it has no parts left before
+it deletes the rows. A ``project_cleanup`` job
 (capability ``cpu``, ``run_id`` NULL) is queued for the worker to reconcile and
 delete everything under ``tenants/{project_id}/`` (steps 3-6).
 """
@@ -86,7 +89,6 @@ def request_deletion(
         if upload.status == "initiated" and upload.multipart_upload_id:
             to_abort.append((upload.staging_key, upload.multipart_upload_id))
         upload.status = "aborted"
-        upload.multipart_upload_id = None
 
     db.add(_cleanup_job(project.id, now))
     audit.record(

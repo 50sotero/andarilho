@@ -210,7 +210,8 @@ def sign_parts(
 def _reject(db: Session, upload: Upload, code: str, *, cleanup: bool = False) -> None:
     upload.status = "rejected"
     upload.rejection_code = code
-    upload.multipart_upload_id = None
+    # The multipart upload ID stays: project deletion re-aborts every recorded upload and
+    # checks its parts are gone, since a part in flight can land after an abort.
     upload.updated_at = utcnow()
     if cleanup:
         _queue_cleanup(db, upload)
@@ -390,8 +391,7 @@ def delete_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store
                 storage.abort_multipart_upload(upload.staging_key, upload.multipart_upload_id)
             except StorageError:
                 logger.warning("multipart abort failed; lifecycle rules will reconcile")
-        upload.status = "aborted"
-        upload.multipart_upload_id = None
+        upload.status = "aborted"  # its multipart upload ID stays, as in _reject
         upload.updated_at = utcnow()
         db.commit()
     return Response(status_code=204)

@@ -977,6 +977,56 @@ def test_a_project_cleanup_that_runs_out_of_retries_is_queued_again(db, seed, st
     assert seed.one("SELECT lifecycle FROM projects WHERE id = %s", pid)["lifecycle"] == "deleted"
 
 
+class _LatePartStore(LocalObjectStore):
+    """A part in flight lands just after each of the first ``late`` aborts of an upload, as
+    S3 allows; a later abort finally frees it."""
+
+    def __init__(self, root, late: int) -> None:
+        super().__init__(root)
+        self.late = late
+        self.aborts: dict[str, int] = {}
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        super().abort_multipart_upload(key, upload_id)
+        self.aborts[upload_id] = self.aborts.get(upload_id, 0) + 1
+        if self.aborts[upload_id] <= self.late:
+            self.stored_parts[upload_id] = 1
+
+
+def test_project_cleanup_completes_only_once_no_multipart_part_is_left(db, seed, store, settings):
+    pid = _deleting_project(seed, store)
+    staging = f"tenants/{pid}/staging/{uuid.uuid4()}"
+    # As the API leaves an upload it aborted when the deletion began: marked aborted, the
+    # multipart upload no longer listed, but its ID kept and two parts still stored.
+    seed.exec(
+        "INSERT INTO uploads (id, project_id, created_by, media_kind, display_filename, "
+        "declared_content_type, expected_bytes, staging_key, multipart_upload_id, part_size, "
+        "part_count, status, expires_at) VALUES (%s, %s, 'user-1', 'video', 'walk.mp4', "
+        "'video/mp4', 10, %s, 'mp-late', 16777216, 1, 'aborted', now() + interval '1 day')",
+        str(uuid.uuid4()), pid, staging,
+    )  # fmt: skip
+    late = _LatePartStore(store.root, late=2)
+    late.stored_parts["mp-late"] = 2
+    late.multipart_uploads["mp-live"] = f"tenants/{pid}/staging/{uuid.uuid4()}"  # still open
+    seed.job(pid, "project_cleanup", {"projectId": pid, "prefix": f"tenants/{pid}/"}, priority=10)
+    sup = Supervisor(db, late, settings, delay_fn=lambda attempt: 0.0)
+
+    assert _run_cleanup(db, sup) == ["deferred"]  # first pass, then the reconcile horizon
+    assert late.multipart_uploads == {} and late.aborts == {"mp-late": 1, "mp-live": 1}
+    # A part landed after the second abort too: the upload still holds storage, so the
+    # project stays deleting and its upload row, with the ID, is kept.
+    assert _run_cleanup(db, sup) == ["deferred"]
+    # mp-live is no longer listed and has no row: the job's own record keeps it checked.
+    assert late.stored_parts == {"mp-late": 1, "mp-live": 1}
+    assert seed.one("SELECT lifecycle FROM projects WHERE id = %s", pid)["lifecycle"] == "deleting"
+    assert seed.one("SELECT multipart_upload_id FROM uploads WHERE project_id = %s", pid)
+    # The third abort leaves nothing, so the deletion completes.
+    assert _run_cleanup(db, sup) == ["succeeded"]
+    assert late.stored_parts == {} and late.aborts == {"mp-late": 3, "mp-live": 3}
+    assert seed.one("SELECT lifecycle FROM projects WHERE id = %s", pid)["lifecycle"] == "deleted"
+    assert seed.one("SELECT 1 FROM uploads WHERE project_id = %s", pid) is None
+
+
 def test_a_requeued_project_cleanup_waits_longer_and_never_gives_up(db, seed, store, settings):
     pid = _deleting_project(seed, store)
     seed.job(pid, "project_cleanup", {"projectId": pid, "requeues": 40}, priority=10)

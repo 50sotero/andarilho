@@ -62,7 +62,9 @@ def test_delete_project_lifecycle(client, auth, db, s3):
     assert run.cancel_requested_at is not None
     ledger = db.execute(select(UsageLedger).where(UsageLedger.run_id == run.id)).scalar_one()
     assert ledger.state == "reserved"  # released after the running job is confirmed stopped
-    assert db.get(Upload, uuid.UUID(pending_upload)).status == "aborted"
+    pending = db.get(Upload, uuid.UUID(pending_upload))
+    # The ID stays so the cleanup can abort it again and check no late part was stored.
+    assert pending.status == "aborted" and pending.multipart_upload_id is not None
     assert db.get(Upload, uuid.UUID(video)).status == "verified"
     cleanup = db.execute(select(Job).where(Job.stage == "project_cleanup")).scalar_one()
     assert cleanup.run_id is None and cleanup.capability == "cpu" and cleanup.state == "queued"

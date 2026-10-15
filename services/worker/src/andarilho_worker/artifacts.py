@@ -79,6 +79,9 @@ class ObjectStore(Protocol):
     def list_keys(self, prefix: str) -> list[str]: ...
     def delete_prefix(self, prefix: str) -> int: ...
     def abort_multipart_uploads(self, prefix: str) -> int: ...
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]: ...
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
+    def count_multipart_parts(self, key: str, upload_id: str) -> int: ...
 
 
 def _sha256_file(path: Path) -> str:
@@ -96,6 +99,9 @@ class LocalObjectStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.multipart_uploads: dict[str, str] = {}  # upload id -> key (simulated)
+        # Parts stored for an upload id (simulated). An abort removes them, but a part in
+        # flight can land after it, as in S3; tests add such a part here.
+        self.stored_parts: dict[str, int] = {}
 
     def _path(self, key: str) -> Path:
         return self.root.joinpath(*check_key(key).split("/"))
@@ -176,10 +182,22 @@ class LocalObjectStore:
         return len(keys)
 
     def abort_multipart_uploads(self, prefix: str) -> int:
-        doomed = [uid for uid, key in self.multipart_uploads.items() if key.startswith(prefix)]
-        for uid in doomed:
-            del self.multipart_uploads[uid]
+        doomed = self.list_multipart_uploads(prefix)
+        for key, uid in doomed:
+            self.abort_multipart_upload(key, uid)
         return len(doomed)
+
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]:
+        return sorted(
+            (key, uid) for uid, key in self.multipart_uploads.items() if key.startswith(prefix)
+        )
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        self.multipart_uploads.pop(upload_id, None)
+        self.stored_parts.pop(upload_id, None)
+
+    def count_multipart_parts(self, key: str, upload_id: str) -> int:
+        return self.stored_parts.get(upload_id, 0)
 
 
 class S3ObjectStore:
@@ -206,8 +224,12 @@ class S3ObjectStore:
         )
         return cls(settings.s3_bucket, client)
 
+    @staticmethod
+    def _code(exc: Exception) -> str:
+        return str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+
     def _wrap(self, exc: Exception) -> Exception:
-        code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+        code = self._code(exc)
         if code in ("NoSuchKey", "404", "NotFound", "NoSuchVersion"):
             return FileNotFoundError("object not found")
         return TransientError("TRANSIENT_FAILURE", "Storage is temporarily unavailable.")
@@ -387,6 +409,49 @@ class S3ObjectStore:
         except Exception as exc:
             raise self._wrap(exc) from exc
         return aborted
+
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]:
+        """The ``(key, upload id)`` of every multipart upload in progress under ``prefix``."""
+        check_key(prefix.rstrip("/") + "/x")
+        try:
+            paginator = self.client.get_paginator("list_multipart_uploads")
+            return [
+                (upload["Key"], upload["UploadId"])
+                for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix)
+                for upload in page.get("Uploads", [])
+            ]
+        except Exception as exc:
+            raise self._wrap(exc) from exc
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        """Abort one upload. One that is already gone (aborted or completed) is fine."""
+        try:
+            self.client.abort_multipart_upload(
+                Bucket=self.bucket, Key=check_key(key), UploadId=upload_id
+            )
+        except Exception as exc:
+            if self._code(exc) == "NoSuchUpload":
+                return
+            raise self._wrap(exc) from exc
+
+    def count_multipart_parts(self, key: str, upload_id: str) -> int:
+        """How many parts S3 still stores for an upload; 0 once the upload is gone.
+
+        A part upload in flight can still succeed after the upload was aborted, so S3
+        asks for the abort to be repeated until ``ListParts`` comes back empty.
+        """
+        try:
+            paginator = self.client.get_paginator("list_parts")
+            return sum(
+                len(page.get("Parts", []))
+                for page in paginator.paginate(
+                    Bucket=self.bucket, Key=check_key(key), UploadId=upload_id
+                )
+            )
+        except Exception as exc:
+            if self._code(exc) == "NoSuchUpload":
+                return 0
+            raise self._wrap(exc) from exc
 
 
 def put_immutable(

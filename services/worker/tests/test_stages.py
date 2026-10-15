@@ -622,6 +622,53 @@ def test_delete_prefix_fails_when_s3_reports_objects_it_did_not_delete():
     assert healthy.client.versions == {}
 
 
+class _S3Error(Exception):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.response = {"Error": {"Code": code}}
+
+
+class _StubMultipartS3:
+    """A multipart upload that is gone (NoSuchUpload), or a storage outage."""
+
+    def __init__(self, code: str, parts: list[list[int]] | None = None) -> None:
+        self.code = code
+        self.parts = parts
+
+    def abort_multipart_upload(self, Bucket, Key, UploadId):  # noqa: N803 - boto3 names
+        raise _S3Error(self.code)
+
+    def get_paginator(self, name):
+        stub = self
+
+        class Paginator:
+            def paginate(self, Bucket, Key, UploadId):  # noqa: N803 - boto3 names
+                if stub.parts is None:
+                    raise _S3Error(stub.code)
+                for numbers in stub.parts:
+                    yield {"Parts": [{"PartNumber": n} for n in numbers]}
+
+        return Paginator()
+
+
+def test_s3_multipart_checks_treat_a_gone_upload_as_empty_and_fail_on_outages():
+    from andarilho_worker.artifacts import S3ObjectStore
+    from andarilho_worker.errors import TransientError
+
+    key = "tenants/p1/staging/u1"
+    gone = S3ObjectStore("b", _StubMultipartS3("NoSuchUpload"))
+    gone.abort_multipart_upload(key, "mp-1")  # already aborted or completed: fine
+    assert gone.count_multipart_parts(key, "mp-1") == 0
+    # Parts that landed after an abort are counted across ListParts pages.
+    late = S3ObjectStore("b", _StubMultipartS3("NoSuchUpload", parts=[[1, 2], [3]]))
+    assert late.count_multipart_parts(key, "mp-1") == 3
+    outage = S3ObjectStore("b", _StubMultipartS3("ServiceUnavailable"))
+    with pytest.raises(TransientError):
+        outage.abort_multipart_upload(key, "mp-1")
+    with pytest.raises(TransientError):
+        outage.count_multipart_parts(key, "mp-1")
+
+
 def test_put_immutable_never_replaces_committed_bytes(tmp_path):
     from andarilho_worker.artifacts import LocalObjectStore, put_immutable
     from andarilho_worker.errors import StageError
