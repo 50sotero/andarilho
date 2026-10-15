@@ -676,9 +676,12 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                      CASE WHEN {CANCEL_COND} THEN 'cancelled'
                           WHEN j.attempts >= j.max_attempts THEN 'failed'
                           ELSE 'queued' END AS outcome,
-                     -- The lost attempt ran at least until its last renewed lease.
+                     -- The lost attempt ran at least until its last heartbeat, which
+                     -- set updated_at (the lease then ran on for up to 90 s with no
+                     -- worker behind it, so that tail is not charged).
                      GREATEST(1, CEIL(EXTRACT(EPOCH FROM
-                       (j.lease_expires_at - COALESCE(j.started_at, j.lease_expires_at)))))
+                       (LEAST(j.updated_at, j.lease_expires_at)
+                        - COALESCE(j.started_at, j.lease_expires_at)))))
                        AS charge_seconds
               FROM jobs j
               WHERE j.state = 'running' AND j.lease_expires_at < now()

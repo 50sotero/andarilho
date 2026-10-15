@@ -274,6 +274,23 @@ def test_reaper_charges_lost_attempts_to_the_run_budget(db, seed):
     assert 595 <= used <= 605
 
 
+def test_reaper_charges_a_lost_attempt_only_until_its_last_heartbeat(db, seed):
+    pid = seed.project()
+    seed.run(pid, max_attempts=3)
+    job = queue.claim(db, "w", "cpu")
+    # Five minutes of work, a heartbeat, then the worker died at once: its lease
+    # ran on for another 90 s with nothing behind it.
+    seed.exec(
+        "UPDATE jobs SET started_at = now() - interval '10 minutes', "
+        "updated_at = now() - interval '5 minutes', "
+        "lease_expires_at = now() - interval '210 seconds' WHERE id = %s",
+        job.id,
+    )
+    assert [o.state for o in queue.reap_expired(db)] == ["queued"]
+    used = seed.one("SELECT actual_cpu_seconds FROM usage_ledger")["actual_cpu_seconds"]
+    assert 295 <= used <= 305
+
+
 def test_a_failed_run_stops_its_first_revision_pending(db, seed):
     pid = seed.project()
     run_id, _ = seed.run(pid, first_stage="packaging")
