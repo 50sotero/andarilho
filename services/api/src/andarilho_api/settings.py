@@ -17,6 +17,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 MIB = 1024 * 1024
 GIB = 1024 * MIB
 
+# A capture set lists at most this many videos and photos, and a run reads at most
+# RUN_MAX_VIDEOS videos (the recipes' maxVideos). The photo limit leaves room for
+# them, so any selection the published intake policy allows fits in a capture set.
+CAPTURE_SET_MAX_INPUTS = 400
+RUN_MAX_VIDEOS = 8
+
 # Values that only ever appear in examples or local development.
 _EXAMPLE_MARKERS = (
     "example.supabase.co",
@@ -58,7 +64,7 @@ class Settings(BaseSettings):
     upload_max_video_bytes: int | None = Field(default=None, gt=0)
     upload_max_photo_bytes: int = Field(default=50 * MIB, gt=0)
     upload_max_floor_plan_bytes: int = Field(default=20 * MIB, gt=0)
-    upload_max_photos: int = Field(default=300, gt=0)
+    upload_max_photos: int = Field(default=300, gt=0, le=CAPTURE_SET_MAX_INPUTS - RUN_MAX_VIDEOS)
     upload_part_size: int = Field(default=16 * MIB, ge=5 * MIB, le=5 * GIB)
     upload_max_parts: int = Field(default=1000, ge=1, le=10000)
     upload_ttl_seconds: int = Field(default=86400, ge=300)

@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic.alias_generators import to_camel
 
 from andarilho_api.schemas.scene import Layout
+from andarilho_api.settings import CAPTURE_SET_MAX_INPUTS
 
 
 class Body(BaseModel):
@@ -84,7 +85,7 @@ class EmptyBody(Body):
 
 
 class CaptureSetCreate(Body):
-    upload_ids: Annotated[list[uuid.UUID], Field(min_length=1, max_length=400)]
+    upload_ids: Annotated[list[uuid.UUID], Field(min_length=1, max_length=CAPTURE_SET_MAX_INPUTS)]
     floor_plan_upload_id: uuid.UUID | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
 

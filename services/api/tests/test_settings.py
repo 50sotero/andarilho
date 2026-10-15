@@ -10,7 +10,8 @@ from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
 
-from andarilho_api.settings import Settings
+from andarilho_api.domain.recipes import RECIPES
+from andarilho_api.settings import CAPTURE_SET_MAX_INPUTS, RUN_MAX_VIDEOS, Settings
 
 PROD = {
     "app_env": "production",
@@ -30,6 +31,15 @@ def test_development_defaults():
     assert settings.upload_max_photos == 300
     assert settings.upload_max_floor_plan_bytes == 20 * 1024 * 1024
     assert settings.cors_allowed_origins == []
+
+
+def test_photo_limit_leaves_room_for_videos_in_a_capture_set():
+    # The worker defaults to 8 videos when a recipe sets no maxVideos.
+    assert all(r.params.get("maxVideos", 8) <= RUN_MAX_VIDEOS for r in RECIPES.values())
+    most = CAPTURE_SET_MAX_INPUTS - RUN_MAX_VIDEOS
+    assert Settings(app_env="development", upload_max_photos=most).upload_max_photos == most
+    with pytest.raises(ValidationError):
+        Settings(app_env="development", upload_max_photos=most + 1)
 
 
 def test_production_accepts_real_values_and_forces_synthetic_off():
