@@ -806,7 +806,7 @@ def test_a_cleanup_that_runs_out_of_retries_is_queued_again_later(db, seed, stor
     assert store.list_keys(scene) == []
 
 
-def test_requeued_cleanups_wait_longer_each_time_and_finally_give_up(db, seed, store, settings):
+def test_requeued_cleanups_wait_longer_each_time_and_never_give_up(db, seed, store, settings):
     pid = seed.project()
     scene = scene_of(pid, make_revision(seed, pid))
     outage = Supervisor(db, UndeletableStore(store.root), settings, delay_fn=lambda attempt: 0.0)
@@ -816,12 +816,15 @@ def test_requeued_cleanups_wait_longer_each_time_and_finally_give_up(db, seed, s
     assert again["input_manifest"]["requeues"] == 4
     assert again["wait"].total_seconds() > 8 * queue.ARTIFACT_CLEANUP_REQUEUE_SECONDS - 60
 
+    # Days into an outage the wait stays at a day, and the request is still queued: nothing
+    # else would find these prefixes again.
     seed.exec("DELETE FROM jobs WHERE stage = 'artifact_cleanup'")
-    enqueue(
-        db, pid, [scene], reason="revision_invalid", requeues=queue.ARTIFACT_CLEANUP_MAX_REQUEUES
-    )
+    enqueue(db, pid, [scene], reason="revision_invalid", requeues=40)
     assert exhaust_cleanup(db, outage)[-1] == "failed"
-    assert queued_cleanup_rows(seed, pid) == []
+    [later] = queued_cleanup_rows(seed, pid)
+    assert later["input_manifest"]["requeues"] == 41
+    cap = queue.ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS
+    assert cap - 60 < later["wait"].total_seconds() <= cap
 
 
 def test_a_cleanup_whose_worker_is_lost_on_its_last_attempt_is_queued_again(db, seed, store):

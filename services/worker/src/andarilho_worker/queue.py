@@ -38,10 +38,9 @@ IDEMPOTENCY_PURGE_BATCH = 1000
 # A cleanup that used up its attempts on temporary failures (a storage outage, lost
 # workers) is queued again, waiting twice as long each time up to a day, so an outage
 # longer than the retry window cannot leave its objects until the project is deleted.
-# It gives up after this many requeues (about four days).
+# It never gives up: no maintenance pass rediscovers the prefixes it was asked to delete.
 ARTIFACT_CLEANUP_REQUEUE_SECONDS = 3600
 ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS = 24 * 3600
-ARTIFACT_CLEANUP_MAX_REQUEUES = 8
 # A project deletion that used up its attempts is queued again on the same schedule, and
 # it never gives up: the owner asked for the data to go, and nothing else would retry it
 # (the web hides the delete control once a project is being deleted).
@@ -421,19 +420,16 @@ def requeue_artifact_cleanup(
     """Queue a cleanup again, later, after it used up its attempts on temporary failures.
 
     Only the paths that exhaust retries call this (retry_job and the reaper); a refused
-    request fails permanently and is never requeued. A malformed request is dropped
-    rather than raised, because this runs inside the failing job's transition.
+    request fails permanently and is never requeued. The wait doubles from an hour up to
+    a day, and a valid request is never dropped, however long storage stays unavailable:
+    nothing else would find its prefixes again. A malformed request is dropped rather
+    than raised, because this runs inside the failing job's transition.
     """
     prefixes = manifest.get("prefixes")
     requeues = int(manifest.get("requeues") or 0)
     if manifest.get("projectId") != project_id or not isinstance(prefixes, list):
         return
-    if requeues >= ARTIFACT_CLEANUP_MAX_REQUEUES:
-        log.error("artifact cleanup gave up after %s requeues: %s", requeues, prefixes)
-        return
-    delay = min(
-        ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS, ARTIFACT_CLEANUP_REQUEUE_SECONDS * 2**requeues
-    )
+    delay = _requeue_delay(requeues)
     revision = manifest.get("sceneRevisionId")
     try:
         queue_artifact_cleanup(
@@ -1187,9 +1183,10 @@ def expire_uploads(db: Database) -> tuple[int, int]:
 
     Expiry already stopped them holding quota, and the API refuses their parts. Marking
     them makes that explicit (the API answers UPLOAD_EXPIRED and stops listing them), and
-    deleting them keeps abandoned uploads from piling up for good. The day covers the
-    API's idempotency record of the creation (at least a day): until then a replay finds
-    the row. No job ever refers to an initiated upload, but one that does is kept. Their
+    deleting them keeps abandoned uploads from piling up for good. An upload is kept while
+    the API's idempotency record of its creation is live, however long the configured TTL
+    makes it: a replay returns the stored response, which names the row. No job ever
+    refers to an initiated upload, but one that does is kept. Their
     multipart data is left to the bucket's abort-incomplete-multipart lifecycle rule, as
     when the API's own abort fails. Returns ``(expired, deleted)``.
     """
@@ -1205,6 +1202,11 @@ def expire_uploads(db: Database) -> tuple[int, int]:
               AND u.expires_at <= now() - make_interval(secs => %s)
               AND NOT EXISTS (SELECT 1 FROM jobs j
                               WHERE j.project_id = u.project_id AND j.upload_id = u.id)
+              AND NOT EXISTS (SELECT 1 FROM idempotency_records r
+                              WHERE r.project_id = u.project_id
+                                AND r.operation = 'uploads.create'
+                                AND r.expires_at > now()
+                                AND r.response_body -> 'upload' ->> 'id' = u.id::text)
             """,
             (float(EXPIRED_UPLOAD_RETENTION_SECONDS),),
         ).rowcount

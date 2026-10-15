@@ -189,15 +189,42 @@ def test_maintenance_expires_abandoned_uploads_and_deletes_them_a_day_later(db, 
     assert queue.expire_uploads(db) == (0, 0)
 
 
-def idempotency_record(seed, project_id: str, expires_in: str) -> str:
+def idempotency_record(
+    seed,
+    project_id: str,
+    expires_in: str,
+    body: dict | None = None,
+    operation: str = "uploads.create",
+) -> str:
     key = str(uuid.uuid4())
     seed.exec(
         "INSERT INTO idempotency_records (id, project_id, operation, idempotency_key, subject, "
         "request_hash, response_status, response_body, expires_at) VALUES (%s, %s, "
-        "'uploads.create', %s, 'user-1', %s, 201, '{}'::jsonb, now() + %s::interval)",
-        str(uuid.uuid4()), project_id, key, "0" * 64, expires_in,
+        "%s, %s, 'user-1', %s, 201, %s, now() + %s::interval)",
+        str(uuid.uuid4()), project_id, operation, key, "0" * 64, Jsonb(body or {}), expires_in,
     )  # fmt: skip
     return key
+
+
+def test_an_expired_upload_is_kept_while_its_creation_can_be_replayed(db, seed):
+    # With IDEMPOTENCY_TTL_SECONDS above a day, a retry of the creation would replay a
+    # response naming the upload, so the row must outlive that record, not just the day.
+    pid = seed.project()
+    upload = initiated_upload(seed, pid, "-2 days")
+    created = {"upload": {"id": upload}, "partSize": 1, "partCount": 1}
+    idempotency_record(seed, pid, "1 hour", created)
+    # Records that cannot replay it do not keep it: an expired one, another operation's.
+    idempotency_record(seed, pid, "-1 minute", created)
+    idempotency_record(seed, pid, "1 hour", created, operation="runs.create")
+
+    assert queue.expire_uploads(db) == (1, 0)
+    assert seed.one("SELECT status FROM uploads WHERE id = %s", upload)["status"] == "expired"
+
+    seed.exec(
+        "UPDATE idempotency_records SET expires_at = now() WHERE operation = 'uploads.create'"
+    )
+    assert queue.expire_uploads(db) == (0, 1)
+    assert seed.one("SELECT id FROM uploads WHERE id = %s", upload) is None
 
 
 def test_maintenance_purges_expired_idempotency_records_a_batch_at_a_time(db, seed):
