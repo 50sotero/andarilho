@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+import uuid
 
 from andarilho_worker import queue
 from andarilho_worker.artifacts import LocalObjectStore
@@ -131,21 +132,58 @@ def test_a_pass_checks_at_most_a_batch_of_entries(db, seed, store):
     assert reconcile(db, store, horizon_seconds=900, batch=10)["multipartChecked"] == 2
 
 
-def test_maintenance_hands_a_deleted_expired_upload_to_the_checks(db, seed, store):
-    pid = seed.project()
+def _expired_upload(seed, pid: str, status: str = "initiated") -> tuple[str, str]:
+    """An upload two days past its expiry, still holding its multipart upload ``mp-old``."""
+    uid = str(uuid.uuid4())
+    key = f"tenants/{pid}/staging/{uid}"
     seed.exec(
         "INSERT INTO uploads (id, project_id, created_by, media_kind, display_filename, "
         "declared_content_type, expected_bytes, staging_key, multipart_upload_id, part_size, "
-        "part_count, status, expires_at) VALUES (gen_random_uuid(), %s, 'user-1', 'video', "
-        "'walk.mp4', 'video/mp4', 10, %s, 'mp-old', 16777216, 1, 'initiated', "
-        "now() - interval '2 days')",
-        pid, f"tenants/{pid}/staging/old",
+        "part_count, status, expires_at) VALUES (%s, %s, 'user-1', 'video', 'walk.mp4', "
+        "'video/mp4', 10, %s, 'mp-old', 16777216, 1, %s, now() - interval '2 days')",
+        uid, pid, key, status,
     )  # fmt: skip
-    store.multipart_uploads["mp-old"] = f"tenants/{pid}/staging/old"
+    return uid, key
+
+
+def _multipart_id(seed, uid: str) -> str | None:
+    row = seed.one("SELECT multipart_upload_id FROM uploads WHERE id = %s", uid)
+    return row["multipart_upload_id"]
+
+
+def test_an_expired_upload_is_aborted_at_once_and_keeps_its_quota_until_a_clean_check(
+    db, seed, store
+):
+    pid = seed.project()
+    uid, key = _expired_upload(seed, pid)
+    store.multipart_uploads["mp-old"] = key
     store.stored_parts["mp-old"] = 3
 
-    assert queue.expire_uploads(db) == (1, 1)
+    # Marked expired and handed over at once; the row keeps its ID, and so its quota.
+    assert queue.expire_uploads(db) == (1, 0)
     entry = seed.one("SELECT object_key, last_aborted_at FROM multipart_reconciliations")
-    assert entry == {"object_key": f"tenants/{pid}/staging/old", "last_aborted_at": None}
-    reconcile(db, store, horizon_seconds=900)
+    assert entry == {"object_key": key, "last_aborted_at": None}
+    assert reconcile(db, store, horizon_seconds=900)["multipartAborted"] == 1
     assert store.multipart_uploads == {} and store.stored_parts == {}
+    assert _multipart_id(seed, uid) == "mp-old"  # only a check a horizon later decides
+    store.stored_parts["mp-old"] = 1  # a part that was in flight lands after the abort
+    _due(seed)
+    assert reconcile(db, store, horizon_seconds=900)["multipartAborted"] == 1
+    assert _multipart_id(seed, uid) == "mp-old"
+    _due(seed)
+    assert reconcile(db, store, horizon_seconds=900)["multipartAborted"] == 0
+    assert _multipart_id(seed, uid) is None  # nothing left: the quota is free
+
+    # A day past its expiry, with its ID cleared, the row goes; the checks go on.
+    assert queue.expire_uploads(db) == (0, 1)
+    assert seed.one("SELECT count(*) AS n FROM multipart_reconciliations")["n"] == 1
+
+
+def test_an_upload_already_marked_expired_is_handed_over_too(db, seed, store):
+    pid = seed.project()
+    uid, key = _expired_upload(seed, pid, status="expired")
+    assert queue.expire_uploads(db) == (0, 0)  # kept: it still holds its ID
+    entry = seed.one("SELECT object_key, upload_id FROM multipart_reconciliations")
+    assert entry == {"object_key": key, "upload_id": "mp-old"}
+    assert queue.expire_uploads(db) == (0, 0)  # recorded once
+    assert seed.one("SELECT count(*) AS n FROM multipart_reconciliations")["n"] == 1

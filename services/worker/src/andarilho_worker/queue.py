@@ -1182,25 +1182,36 @@ def sweep_cancelled(db: Database) -> int:
 def expire_uploads(db: Database) -> tuple[int, int]:
     """Mark initiated uploads past their expiry ``expired``, and delete them a day later.
 
-    Expiry already stopped them holding quota, and the API refuses their parts. Marking
-    them makes that explicit (the API answers UPLOAD_EXPIRED and stops listing them), and
-    deleting them keeps abandoned uploads from piling up for good. An upload is kept while
-    the API's idempotency record of its creation is live, however long the configured TTL
-    makes it: a replay returns the stored response, which names the row. No job ever
-    refers to an initiated upload, but one that does is kept. A deleted row's multipart
-    upload is recorded in ``multipart_reconciliations``, whose checks abort it and keep
-    looking for parts that land late; the bucket's abort-incomplete-multipart lifecycle
-    rule covers it until then. Returns ``(expired, deleted)``.
+    The API refuses their parts. Marking them makes that explicit (the API answers
+    UPLOAD_EXPIRED and stops listing them), and hands each multipart upload to
+    ``multipart_reconciliations`` at once: its checks abort it, and the first that finds
+    no part left a reconciliation horizon later clears the upload's ID, which releases
+    its quota (:mod:`andarilho_worker.multipart`); they keep checking for good after
+    that. Deleting the rows keeps abandoned uploads from piling up for good. An upload
+    is kept until its ID is cleared, and while the API's idempotency record of its
+    creation is live, however long the configured TTL makes it: a replay returns the
+    stored response, which names the row. No job ever refers to an initiated upload, but
+    one that does is kept. Returns ``(expired, deleted)``.
     """
     with db.transaction() as conn:
         expired = conn.execute(
             "UPDATE uploads SET status = 'expired', updated_at = now() "
             "WHERE status = 'initiated' AND expires_at <= now()"
         ).rowcount
-        gone = conn.execute(
+        # Every expired upload still holding its ID, not only those just marked, so one
+        # marked before this hand-over existed is not left out. Recorded ones are kept.
+        holding = conn.execute(
+            "SELECT staging_key, multipart_upload_id FROM uploads "
+            "WHERE status = 'expired' AND multipart_upload_id IS NOT NULL"
+        ).fetchall()
+        record_multipart(
+            conn, [(r["staging_key"], r["multipart_upload_id"]) for r in holding], aborted_at=None
+        )
+        deleted = conn.execute(
             """
             DELETE FROM uploads AS u
             WHERE u.status = 'expired'
+              AND u.multipart_upload_id IS NULL
               AND u.expires_at <= now() - make_interval(secs => %s)
               AND NOT EXISTS (SELECT 1 FROM jobs j
                               WHERE j.project_id = u.project_id AND j.upload_id = u.id)
@@ -1209,20 +1220,10 @@ def expire_uploads(db: Database) -> tuple[int, int]:
                                 AND r.operation = 'uploads.create'
                                 AND r.expires_at > now()
                                 AND r.response_body -> 'upload' ->> 'id' = u.id::text)
-            RETURNING u.staging_key, u.multipart_upload_id
             """,
             (float(EXPIRED_UPLOAD_RETENTION_SECONDS),),
-        ).fetchall()
-        record_multipart(
-            conn,
-            [
-                (r["staging_key"], r["multipart_upload_id"])
-                for r in gone
-                if r["multipart_upload_id"]
-            ],
-            aborted_at=None,
-        )
-    return expired, len(gone)
+        ).rowcount
+    return expired, deleted
 
 
 def purge_idempotency_records(db: Database, *, batch: int = IDEMPOTENCY_PURGE_BATCH) -> int:

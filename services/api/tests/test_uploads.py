@@ -404,7 +404,9 @@ def test_capture_set_requires_verified_uploads(client, auth, db):
     assert client.post(url, json={"uploadIds": [video]}, headers=auth("user-b")).status_code == 404
 
 
-def test_expired_upload_rejects_parts_and_frees_quota(client, auth, db, settings):
+def test_expired_upload_rejects_parts_and_holds_quota_until_its_parts_are_gone(
+    client, auth, db, settings
+):
     from datetime import UTC, datetime, timedelta
 
     pid = create_project(client, auth)["id"]
@@ -418,6 +420,14 @@ def test_expired_upload_rejects_parts_and_frees_quota(client, auth, db, settings
     )
     assert response.status_code == 409
     assert response.json()["error"]["code"] == "UPLOAD_EXPIRED"
+    # Its parts are still stored, so it still counts, past its expiry and once the worker
+    # marks it expired, until the worker has aborted it and found no part left.
+    assert _init(client, auth, pid, size=10).status_code == 413
+    row.status = "expired"
+    db.commit()
+    assert _init(client, auth, pid, size=10).status_code == 413
+    row.multipart_upload_id = None
+    db.commit()
     assert _init(client, auth, pid, size=10).status_code == 201
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import uuid
 
-from sqlalchemy import and_, func, not_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from andarilho_api.domain.recipes import INTAKE
@@ -79,15 +79,18 @@ def check_upload(
     if part_count > settings.upload_max_parts:
         raise too_large("The file needs more upload parts than allowed.")
 
-    # Initiated uploads past their expiry no longer hold quota.
+    # An upload holds quota while storage may hold its bytes.
     holding = and_(
         Upload.project_id == project_id,
         or_(
             Upload.status.in_(COUNTED_STATUSES),
+            # An expired one, past its expiry or marked so, until the worker has aborted
+            # its multipart upload and a check a reconciliation horizon later found no
+            # part left: then it clears the ID.
+            and_(Upload.status == "expired", Upload.multipart_upload_id.is_not(None)),
             # Rejected or removed uploads hold quota until the worker deletes their bytes.
             and_(Upload.status.in_(("rejected", "aborted")), Upload.immutable_key.is_not(None)),
         ),
-        not_(and_(Upload.status == "initiated", Upload.expires_at <= func.now())),
     )
     used = db.execute(
         select(func.coalesce(func.sum(Upload.expected_bytes), 0)).where(holding)

@@ -9,8 +9,9 @@ therefore recorded in ``multipart_reconciliations``: one removed or rejected mid
 (:func:`andarilho_worker.queue.expire_uploads`). Maintenance checks each entry for good.
 An upload never aborted here, or one holding a part, is aborted and checked again a
 reconciliation horizon later; a check that finds nothing moves the next one further
-out, doubling from an hour up to a week. Entries are never deleted: one costs a row
-and a ``ListParts`` call a week.
+out, doubling from an hour up to a week. An expired upload keeps its ID, and with it
+its quota, until such a check: that check clears it. Entries are never deleted: one
+costs a row and a ``ListParts`` call a week.
 """
 
 from __future__ import annotations
@@ -112,6 +113,12 @@ def reconcile(
                     (max(1.0, float(horizon_seconds)), row["id"]),
                 )
             else:
+                # Its storage is free: an expired upload no longer holds quota.
+                conn.execute(
+                    "UPDATE uploads SET multipart_upload_id = NULL, updated_at = now() "
+                    "WHERE staging_key = %s AND multipart_upload_id = %s AND status = 'expired'",
+                    (key, upload_id),
+                )
                 conn.execute(
                     """
                     UPDATE multipart_reconciliations
