@@ -7,7 +7,8 @@ import uuid
 from datetime import timedelta
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Response
+from fastapi import APIRouter, Depends, Header, Response
+from fastapi.responses import JSONResponse
 from sqlalchemy import exists, or_, select
 from sqlalchemy.orm import Session
 
@@ -15,6 +16,7 @@ from andarilho_api import serializers as ser
 from andarilho_api.auth import current_subject
 from andarilho_api.db import get_db
 from andarilho_api.deps import get_settings_dep, get_storage, utcnow
+from andarilho_api.domain import idempotency
 from andarilho_api.domain.membership import WRITERS, load_project, load_scoped, lock_row
 from andarilho_api.domain.quotas import check_upload, intake_policy
 from andarilho_api.errors import ApiError, invalid_state, validation_failed
@@ -78,10 +80,28 @@ def create_upload(
     db: Db,
     storage: Store,
     settings: Config,
+    idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
 ):
+    """Start a multipart upload. With an ``Idempotency-Key`` a retry whose response
+    was lost gets the same upload back instead of creating (and charging) another."""
     project, _ = load_project(
         db, project_id, subject, roles=WRITERS, lock=True, require_active=True
     )
+    operation = "uploads.create"
+    idem_key = idempotency.require_key(idempotency_key) if idempotency_key else None
+    req_hash = idempotency.request_hash(operation, str(project.id), body.model_dump(mode="json"))
+    if idem_key is not None:
+        # Before the quota check: the upload being replayed already holds its quota.
+        record = idempotency.find(
+            db,
+            project_id=project.id,
+            operation=operation,
+            key=idem_key,
+            subject=subject,
+            req_hash=req_hash,
+        )
+        if record is not None:
+            return JSONResponse(status_code=record.response_status, content=record.response_body)
     part_size, part_count = check_upload(
         db,
         settings,
@@ -113,9 +133,24 @@ def create_upload(
         expires_at=utcnow() + timedelta(seconds=settings.upload_ttl_seconds),
     )
     db.add(upload)
-    db.commit()
+    db.flush()
     db.refresh(upload)
-    return {"upload": ser.upload(upload), "partSize": part_size, "partCount": part_count}
+    result = {"upload": ser.upload(upload), "partSize": part_size, "partCount": part_count}
+    if idem_key is not None:
+        # Stored in the same transaction as the upload, so a replay always finds it.
+        idempotency.store(
+            db,
+            project_id=project.id,
+            operation=operation,
+            key=idem_key,
+            subject=subject,
+            req_hash=req_hash,
+            status=201,
+            body=result,
+            ttl_seconds=settings.idempotency_ttl_seconds,
+        )
+    db.commit()
+    return result
 
 
 @router.get("/uploads/{upload_id}")

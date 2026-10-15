@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  CREATION_KEY_TTL_MS,
   EXPIRY_SAFETY_MARGIN_MS,
+  clearCreationKey,
+  creationKey,
   fileFingerprint,
   loadResumeRecord,
   partRange,
@@ -165,6 +168,41 @@ describe("persistence", () => {
     expect(pruneResumeRecords(storage, NOW)).toBe(2);
     expect(storage.getItem("unrelated")).toBe("keep");
     expect(loadResumeRecord("project-1", file, { storage, now: NOW })).not.toBeNull();
+  });
+});
+
+describe("upload creation keys", () => {
+  const fp = fileFingerprint(file);
+  let n = 0;
+  const newKey = () => `key-${(n += 1).toString().padStart(4, "0")}`;
+
+  it("keeps one key until the creation is answered, across uploader instances", () => {
+    const storage = new MemoryStorage();
+    const first = creationKey("project-1", fp, { storage, now: NOW, newKey });
+    expect(creationKey("project-1", fp, { storage, now: NOW + 1000, newKey })).toBe(first);
+    expect(creationKey("project-2", fp, { storage, now: NOW, newKey })).not.toBe(first);
+    clearCreationKey("project-1", fp, storage);
+    expect(creationKey("project-1", fp, { storage, now: NOW, newKey })).not.toBe(first);
+  });
+
+  it("starts over once the server would no longer replay the key", () => {
+    const storage = new MemoryStorage();
+    const first = creationKey("project-1", fp, { storage, now: NOW, newKey });
+    const later = NOW + CREATION_KEY_TTL_MS;
+    expect(creationKey("project-1", fp, { storage, now: later, newKey })).not.toBe(first);
+  });
+
+  it("works without storage and prunes stale or broken keys", () => {
+    expect(creationKey("project-1", fp, { storage: null, newKey })).toMatch(/^key-/);
+    expect(creationKey("project-1", fp, { storage: new ThrowingStorage(), newKey })).toMatch(
+      /^key-/,
+    );
+    const storage = new MemoryStorage();
+    creationKey("project-1", fp, { storage, now: NOW, newKey });
+    creationKey("project-1", "old", { storage, now: NOW - CREATION_KEY_TTL_MS, newKey });
+    storage.setItem("andarilho:upload-create:broken", "nope");
+    expect(pruneResumeRecords(storage, NOW)).toBe(2);
+    expect(storage.length).toBe(1);
   });
 });
 

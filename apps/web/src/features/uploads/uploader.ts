@@ -14,6 +14,8 @@ import { ApiError } from "@/lib/api/errors";
 import type { ApiClient } from "@/lib/api/client";
 import type { MediaKind, Upload } from "@/lib/api/types";
 import {
+  clearCreationKey,
+  creationKey,
   fileFingerprint,
   getDefaultStorage,
   isExpired,
@@ -176,6 +178,8 @@ export class MultipartUpload {
   private urlCache = new Map<number, { url: string; expiresAt: number }>();
   private pendingUrls = new Map<number, Promise<void>>();
   private urlCacheUploadId: string | null = null;
+  // Idempotency-Key of a creation that has not had a definite answer yet.
+  private creationKey: string | null = null;
 
   constructor(
     projectId: string,
@@ -331,12 +335,29 @@ export class MultipartUpload {
       removeResumeRecord(this.projectId, this.fingerprint, this.storage);
     }
 
-    const { data } = await this.api.createUpload(this.projectId, {
-      filename: this.file.name,
-      bytes: this.file.size,
-      mediaKind: this.mediaKind,
-      contentType: this.contentType,
+    // A lost response may hide an upload the server created: a retry with the same
+    // key gets it back instead of creating (and charging quota for) another.
+    this.creationKey ??= creationKey(this.projectId, this.fingerprint, {
+      storage: this.storage,
+      now: this.now(),
     });
+    let data: Awaited<ReturnType<UploaderApi["createUpload"]>>["data"];
+    try {
+      ({ data } = await this.api.createUpload(
+        this.projectId,
+        {
+          filename: this.file.name,
+          bytes: this.file.size,
+          mediaKind: this.mediaKind,
+          contentType: this.contentType,
+        },
+        this.creationKey,
+      ));
+    } catch (error) {
+      if (!isRetryable(error)) this.forgetCreationKey();
+      throw error;
+    }
+    this.forgetCreationKey();
     const record: UploadResumeRecord = {
       version: 1,
       uploadId: data.upload.id,
@@ -350,6 +371,11 @@ export class MultipartUpload {
     saveResumeRecord(record, this.storage);
     this.emit({ uploadId: record.uploadId, resumed: false });
     return record;
+  }
+
+  private forgetCreationKey() {
+    this.creationKey = null;
+    clearCreationKey(this.projectId, this.fingerprint, this.storage);
   }
 
   private discardRecord() {

@@ -531,4 +531,71 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).toHaveBeenCalledTimes(2);
     expect(upload.state.phase).toBe("completed");
   });
+
+  it("retries a creation whose response was lost with the same key", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const keys: (string | undefined)[] = [];
+    let lose = true;
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (_p: string, _b: unknown, key?: string) => {
+        keys.push(key);
+        // The server created the upload, but the response never arrived.
+        if (lose) throw new TypeError("Failed to fetch");
+        return { data: { upload: uploadRecord("u-1"), partSize: PART, partCount: 2 }, etag: null };
+      }),
+    });
+    const make = () =>
+      new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+        api,
+        putPart: async (url) => `"e${partOf(url)}"`,
+        storage,
+        maxAttempts: 1,
+        sleep: noSleep,
+      });
+    await expect(make().start()).rejects.toBeInstanceOf(TypeError);
+    lose = false;
+    // A reload builds a new uploader; the saved key still replays the same upload.
+    await make().start();
+    expect(keys.length).toBe(2);
+    expect(keys[0]).toMatch(/^[A-Za-z0-9._:-]{8,255}$/);
+    expect(keys[1]).toBe(keys[0]);
+    // Answered: the next upload of this file gets a new key.
+    removeAllResumeState(storage);
+    await make().start();
+    expect(keys[2]).not.toBe(keys[0]);
+  });
+
+  it("does not reuse the key of a creation the server refused", async () => {
+    const size = PART;
+    const keys: (string | undefined)[] = [];
+    let refuse = true;
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (_p: string, _b: unknown, key?: string) => {
+        keys.push(key);
+        if (refuse) {
+          throw new ApiError(413, { code: "QUOTA_EXCEEDED", message: "Full.", retryable: false });
+        }
+        return { data: { upload: uploadRecord("u-1"), partSize: PART, partCount: 1 }, etag: null };
+      }),
+    });
+    const upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+      api,
+      putPart: async (url) => `"e${partOf(url)}"`,
+      storage: new MemoryStorage(),
+      sleep: noSleep,
+    });
+    await expect(upload.start()).rejects.toBeInstanceOf(ApiError);
+    refuse = false;
+    await upload.start();
+    expect(keys[1]).not.toBe(keys[0]);
+  });
 });
+
+/** Drops resume records so the next start creates a new upload. */
+function removeAllResumeState(storage: MemoryStorage) {
+  for (let i = storage.length - 1; i >= 0; i -= 1) {
+    const key = storage.key(i);
+    if (key?.startsWith("andarilho:upload:")) storage.removeItem(key);
+  }
+}

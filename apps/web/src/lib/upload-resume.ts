@@ -208,7 +208,74 @@ export function partRange(
   return [start, Math.min(start + partSize, fileSize)];
 }
 
-/** Removes expired or corrupted records for any project. Returns the number removed. */
+/*
+ * Upload creation keys. A POST that creates an upload can succeed on the server
+ * and still lose its response; retrying with the same Idempotency-Key replays that
+ * upload instead of creating (and charging quota for) a second one. The key is kept
+ * until the creation gets a definite answer, across reloads where storage allows.
+ */
+
+export const CREATION_STORAGE_PREFIX = "andarilho:upload-create:";
+/** The API keeps idempotency records for a day by default (IDEMPOTENCY_TTL_SECONDS). */
+export const CREATION_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+const CREATION_KEY = /^[A-Za-z0-9._:-]{8,255}$/;
+
+function creationSlot(projectId: string, fingerprint: string): string {
+  return `${CREATION_STORAGE_PREFIX}${projectId}:${fingerprint}`;
+}
+
+function parseCreationKey(text: string | null, now: number): string | null {
+  if (!text) return null;
+  try {
+    const saved = JSON.parse(text) as { key?: unknown; createdAt?: unknown };
+    if (typeof saved.key !== "string" || !CREATION_KEY.test(saved.key)) return null;
+    if (typeof saved.createdAt !== "number" || now - saved.createdAt >= CREATION_KEY_TTL_MS) {
+      return null;
+    }
+    return saved.key;
+  } catch {
+    return null;
+  }
+}
+
+/** The pending creation key for this file, or a new one (saved where storage allows). */
+export function creationKey(
+  projectId: string,
+  fingerprint: string,
+  options: { storage?: KeyValueStorage | null; now?: number; newKey?: () => string } = {},
+): string {
+  const storage = options.storage === undefined ? getDefaultStorage() : options.storage;
+  const now = options.now ?? Date.now();
+  const slot = creationSlot(projectId, fingerprint);
+  try {
+    const saved = parseCreationKey(storage?.getItem(slot) ?? null, now);
+    if (saved) return saved;
+  } catch {
+    // Fall through to a new key.
+  }
+  const key = (options.newKey ?? (() => crypto.randomUUID()))();
+  try {
+    storage?.setItem(slot, JSON.stringify({ key, createdAt: now }));
+  } catch {
+    // Without storage the key lasts as long as the uploader that holds it.
+  }
+  return key;
+}
+
+/** Forgets the key once the creation got a definite answer. */
+export function clearCreationKey(
+  projectId: string,
+  fingerprint: string,
+  storage: KeyValueStorage | null = getDefaultStorage(),
+): void {
+  try {
+    storage?.removeItem(creationSlot(projectId, fingerprint));
+  } catch {
+    // ignore
+  }
+}
+
+/** Removes expired or corrupted records and creation keys for any project; returns how many. */
 export function pruneResumeRecords(
   storage: KeyValueStorage | null = getDefaultStorage(),
   now: number = Date.now(),
@@ -218,6 +285,10 @@ export function pruneResumeRecords(
   try {
     for (let i = 0; i < storage.length; i += 1) {
       const key = storage.key(i);
+      if (key?.startsWith(CREATION_STORAGE_PREFIX)) {
+        if (!parseCreationKey(storage.getItem(key), now)) doomed.push(key);
+        continue;
+      }
       if (!key || !key.startsWith(RESUME_STORAGE_PREFIX)) continue;
       let record: UploadResumeRecord | null = null;
       try {

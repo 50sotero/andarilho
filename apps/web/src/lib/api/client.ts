@@ -110,10 +110,12 @@ export function createApiClient(fetchImpl: FetchLike = (input, init) => fetch(in
       }),
 
     // Uploads
-    createUpload: (projectId: string, body: CreateUploadRequest) =>
+    /** Pass the same `idempotencyKey` on a retry to get back an upload a lost response created. */
+    createUpload: (projectId: string, body: CreateUploadRequest, idempotencyKey?: string) =>
       request<CreateUploadResponse>(`/v1/projects/${id(projectId)}/uploads`, {
         method: "POST",
         body,
+        idempotencyKey,
       }),
     getUpload: (uploadId: string, signal?: AbortSignal) =>
       request<UploadStatusResponse>(`/v1/uploads/${id(uploadId)}`, { signal }),

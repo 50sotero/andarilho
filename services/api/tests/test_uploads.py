@@ -8,7 +8,7 @@ from urllib.parse import urlparse
 import pytest
 from conftest import BUCKET
 from factories import create_project, verified_upload
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from andarilho_api.models import Job, ReconstructionRun, Upload
 from andarilho_api.storage import StorageError
@@ -170,6 +170,28 @@ def test_no_upload_is_larger_than_one_storage_copy(client, auth, app):
     pid = create_project(client, auth)["id"]
     assert _init(client, auth, pid, size=5 * 1024 * MIB + 1).status_code == 413
     assert _init(client, auth, pid, size=5 * 1024 * MIB).status_code == 201
+
+
+def test_creating_an_upload_again_with_its_key_replays_it(client, auth, db, app):
+    # Room for exactly one such file: a replay must not be refused for its own quota.
+    app.state.settings.upload_max_total_bytes = 1000
+    pid = create_project(client, auth)["id"]
+    body = {"filename": "walk.mp4", "bytes": 1000, "mediaKind": "video",
+            "contentType": "video/mp4"}  # fmt: skip
+    url = f"/v1/projects/{pid}/uploads"
+    first = client.post(url, json=body, headers=auth(**{"Idempotency-Key": "create-walk-1"}))
+    assert first.status_code == 201, first.text
+    # The response was lost; the browser retries with the same key.
+    again = client.post(url, json=body, headers=auth(**{"Idempotency-Key": "create-walk-1"}))
+    assert again.status_code == 201 and again.json() == first.json()
+    assert db.execute(select(func.count()).select_from(Upload)).scalar_one() == 1
+    # The same key for a different file is refused; without a key nothing is replayed.
+    other = client.post(
+        url, json={**body, "bytes": 999}, headers=auth(**{"Idempotency-Key": "create-walk-1"})
+    )
+    assert other.status_code == 409
+    assert other.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
+    assert client.post(url, json=body, headers=auth()).status_code == 413  # quota is held
 
 
 def test_photo_count_limit(client, auth, db, app):
