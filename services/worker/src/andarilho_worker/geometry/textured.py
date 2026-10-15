@@ -17,8 +17,18 @@ from typing import Any
 
 import numpy as np
 
-# Surface kinds: the collision kinds plus the visual-only ceiling.
-SURFACE_KINDS = ("wall", "closed_opening", "sill", "lintel", "floor", "ceiling", "obstacle")
+# Surface kinds: the collision kinds, the visual-only ceiling, and furniture parts (drawn
+# whether or not the piece is solid).
+SURFACE_KINDS = (
+    "wall",
+    "closed_opening",
+    "sill",
+    "lintel",
+    "floor",
+    "ceiling",
+    "obstacle",
+    "furniture",
+)
 
 
 @dataclass

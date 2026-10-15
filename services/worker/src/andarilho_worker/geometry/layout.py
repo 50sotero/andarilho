@@ -4,6 +4,9 @@ All output geometry is in canonical world coordinates: meters, +Y up, layout 2D
 points ``[x, z]`` map to world ``(x, elevation, z)``. Wall segments are generated
 on either side of every opening plus a lintel above it; no solid wall is ever
 extruded across an open doorway.
+
+Furniture has its own object frame (see ``furniture_transform``): its parts are
+drawn from a unit box, and only its footprint and height take part in collision.
 """
 
 from __future__ import annotations
@@ -29,6 +32,10 @@ MAX_WALL_THICKNESS = 2.0
 MAX_HEIGHT = 10.0
 MAX_EXTENT = 500.0
 SPAWN_FLOOR_TOLERANCE = 0.05
+MAX_FURNITURE_FOOTPRINT = 6.0  # metres across the width and depth of one piece
+MAX_FURNITURE_HEIGHT = 4.0
+# The eight corners of a part box: True takes the box's max on that axis, False its min.
+BOX_CORNER_MASK = np.array([(u, v, w) for u in (0, 1) for v in (0, 1) for w in (0, 1)], dtype=bool)
 
 
 @dataclass(frozen=True)
@@ -75,11 +82,13 @@ def validate_layout(layout: Mapping[str, Any]) -> list[Finding]:
         findings.append(Finding("DUPLICATE_ID", "floor ids must be unique"))
     if len(walls) != len(layout.get("walls", [])):
         findings.append(Finding("DUPLICATE_ID", "wall ids must be unique"))
-    ids = [o["id"] for o in layout.get("openings", [])] + [
-        o["id"] for o in layout.get("obstacles", [])
-    ]
+    ids = (
+        [o["id"] for o in layout.get("openings", [])]
+        + [o["id"] for o in layout.get("obstacles", [])]
+        + [f["id"] for f in layout.get("furniture", [])]
+    )
     if len(set(ids)) != len(ids):
-        findings.append(Finding("DUPLICATE_ID", "opening/obstacle ids must be unique"))
+        findings.append(Finding("DUPLICATE_ID", "opening/obstacle/furniture ids must be unique"))
 
     for floor in layout["floors"]:
         polys = floor["polygons"]
@@ -162,6 +171,9 @@ def validate_layout(layout: Mapping[str, Any]) -> list[Finding]:
                 Finding("INVALID_OBSTACLE", f"obstacle {obstacle['id']} has impossible height")
             )
 
+    for item in layout.get("furniture", []):
+        findings.extend(_furniture_findings(item, floors))
+
     spawn = layout["spawn"]
     floor = floors.get(spawn["floorId"])
     if floor is None:
@@ -177,6 +189,35 @@ def validate_layout(layout: Mapping[str, Any]) -> list[Finding]:
                 (x, z), obstacle["footprint"]
             ):
                 findings.append(Finding("SPAWN_BLOCKED", "spawn is inside an obstacle"))
+        for item in layout.get("furniture", []):
+            # Only solid pieces block the spawn, as only they are in the collision mesh.
+            if (
+                item.get("solid", True)
+                and item["floorId"] == floor["id"]
+                and point_in_polygon((x, z), furniture_footprint(item))
+            ):
+                findings.append(Finding("SPAWN_BLOCKED", "spawn is inside a piece of furniture"))
+    return findings
+
+
+def _furniture_findings(item: Mapping[str, Any], floors: Mapping[str, Any]) -> list[Finding]:
+    """Semantic checks the JSON schema cannot express for one piece of furniture."""
+    name = f"furniture {item['id']}"
+    findings: list[Finding] = []
+    if item["floorId"] not in floors:
+        findings.append(Finding("UNKNOWN_FLOOR", f"{name} references unknown floor"))
+    width, height, depth = item["size"]
+    if not (
+        0 < width <= MAX_FURNITURE_FOOTPRINT
+        and 0 < depth <= MAX_FURNITURE_FOOTPRINT
+        and 0 < height <= MAX_FURNITURE_HEIGHT
+    ):
+        findings.append(Finding("INVALID_FURNITURE", f"{name} has an impossible size"))
+    for k, part in enumerate(item["parts"]):
+        if any(lo >= hi for lo, hi in zip(part["min"], part["max"], strict=True)):
+            findings.append(
+                Finding("INVALID_FURNITURE", f"{name} part {k} must have min below max")
+            )
     return findings
 
 
@@ -189,6 +230,55 @@ def ensure_valid_layout(layout: Mapping[str, Any]) -> None:
 def floor_supports(floor: Mapping[str, Any], point: Sequence[float]) -> bool:
     inside = any(point_in_polygon(point, p) for p in floor["polygons"])
     return inside and not any(point_in_polygon(point, h) for h in floor.get("holes", []))
+
+
+# --------------------------------------------------------------------------
+# Furniture frame
+# --------------------------------------------------------------------------
+
+
+def furniture_transform(item: Mapping[str, Any], elevation: float) -> np.ndarray:
+    """The 4x4 matrix that maps a part's unit-box fractions ``(u, v, w, 1)`` to world metres.
+
+    A fraction point is local ``((u - 0.5) * width, v * height, (w - 0.5) * depth)`` in the
+    object frame: origin at the footprint centre, x across the width, y up, z from back to
+    front. The local frame is turned by the yaw (a three.js ``rotation.y``) and placed on the
+    floor at ``elevation``. The front, local +z, faces ``(sin yaw, cos yaw)`` in (x, z).
+    """
+    width, height, depth = (float(v) for v in item["size"])
+    px, pz = (float(v) for v in item["position"])
+    yaw = float(item["yawRadians"])
+    c, s = math.cos(yaw), math.sin(yaw)
+    return np.array(
+        [
+            [c * width, 0.0, s * depth, px - c * width / 2 - s * depth / 2],
+            [0.0, height, 0.0, elevation],
+            [-s * width, 0.0, c * depth, pz + s * width / 2 - c * depth / 2],
+            [0.0, 0.0, 0.0, 1.0],
+        ]
+    )
+
+
+def furniture_points(transform: np.ndarray, fractions: Sequence[Sequence[float]]) -> np.ndarray:
+    """World points (K, 3) of unit-box fraction points (K, 3), through a furniture transform."""
+    points = np.asarray(fractions, dtype=np.float64).reshape(-1, 3)
+    homogeneous = np.column_stack([points, np.ones(len(points))])
+    return (homogeneous @ transform.T)[:, :3]
+
+
+def part_box(item: Mapping[str, Any], part: Mapping[str, Any], elevation: float) -> np.ndarray:
+    """The eight world corners (8, 3) of one part's box."""
+    lo = np.asarray(part["min"], dtype=np.float64)
+    hi = np.asarray(part["max"], dtype=np.float64)
+    corners = np.where(BOX_CORNER_MASK, hi, lo)
+    return furniture_points(furniture_transform(item, elevation), corners)
+
+
+def furniture_footprint(item: Mapping[str, Any]) -> list[list[float]]:
+    """The width x depth rectangle around the position, turned by the yaw, counter-clockwise."""
+    corners = [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (1.0, 0.0, 1.0), (0.0, 0.0, 1.0)]
+    points = furniture_points(furniture_transform(item, 0.0), corners)
+    return [[float(x), float(z)] for x, _, z in points]
 
 
 # --------------------------------------------------------------------------
@@ -377,6 +467,16 @@ def collision_parts(layout: Mapping[str, Any]) -> list[MeshPart]:
         parts.append(
             MeshPart(obstacle["id"], "obstacle", pos, tris, {"obstacleId": obstacle["id"]})
         )
+    for item in layout.get("furniture", []):
+        # A solid piece is one box over its whole footprint and height. That is a conservative
+        # shape for walking, whatever its parts look like. A piece that is not solid is drawn only.
+        if not item.get("solid", True):
+            continue
+        elevation = float(floors[item["floorId"]]["elevation"])
+        top = elevation + float(item["size"][1])
+        pos, tris = prism(furniture_footprint(item), elevation, top)
+        name = f"furniture:{item['id']}"
+        parts.append(MeshPart(name, "furniture", pos, tris, {"furnitureId": item["id"]}))
     return parts
 
 
@@ -385,9 +485,17 @@ def collision_glb(layout: Mapping[str, Any]) -> bytes:
 
 
 def layout_bounds(layout: Mapping[str, Any], pad: float = 0.05) -> dict[str, list[float]]:
-    """World bounds covering the generated collision geometry, padded and rounded outward."""
-    parts = collision_parts(layout)
-    allpos = np.vstack([p.positions for p in parts])
+    """World bounds covering the collision geometry and every drawn furniture part.
+
+    The model draws every piece, solid or not, so the bounds take each part's box rather than
+    the collision mesh alone. Padded and rounded outward.
+    """
+    blocks = [p.positions for p in collision_parts(layout)]
+    floors = {f["id"]: f for f in layout["floors"]}
+    for item in layout.get("furniture", []):
+        elevation = float(floors[item["floorId"]]["elevation"])
+        blocks.extend(part_box(item, part, elevation) for part in item["parts"])
+    allpos = np.vstack(blocks)
     lo = allpos.min(axis=0) - pad
     hi = allpos.max(axis=0) + pad
     return {

@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import copy
 import json
+import math
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from andarilho_worker.geometry.layout import floor_supports, rectangle_layout
+from andarilho_worker.geometry.layout import (
+    floor_supports,
+    furniture_points,
+    furniture_transform,
+    part_box,
+    rectangle_layout,
+)
 from andarilho_worker.geometry.polygon import point_in_polygon, signed_area
 from andarilho_worker.geometry.surfaces import (
     Surface,
@@ -18,6 +26,7 @@ from andarilho_worker.geometry.surfaces import (
     layout_surfaces,
     surfaces_to_parts,
 )
+from andarilho_worker.geometry.textured import SURFACE_KINDS
 
 FIXTURES = Path(__file__).resolve().parents[3] / "packages" / "scene-contract" / "fixtures"
 WALL_KINDS = {"wall", "closed_opening", "sill", "lintel"}
@@ -409,6 +418,172 @@ def test_obstacle_faces_wind_and_point_outward(name):
         assert point_in_polygon(probe - 0.01 * outward, footprint), s.name
         checked_sides[s.extras["obstacleId"]] += 1
     assert checked_sides == {oid: len(fp) for oid, fp in footprints.items()}
+
+
+def _piece(item_id: str, parts: list[dict], **changes) -> dict:
+    """One furniture piece on floor-0 in a 7 x 7 m room, with the given parts."""
+    item = {
+        "id": item_id,
+        "floorId": "floor-0",
+        "category": item_id,
+        "position": [1.0, 2.0],
+        "yawRadians": 0.3,
+        "size": [2.0, 0.9, 0.9],
+        "parts": copy.deepcopy(parts),
+    }
+    item.update(changes)
+    layout = rectangle_layout((-3.0, -3.0), (4.0, 4.0), elevation=0.0, height=2.5)
+    layout["furniture"] = [item]
+    return layout
+
+
+# A sofa seat on the floor, a raised back and a cylinder leg on the floor.
+SOFA_PARTS = [
+    {"shape": "box", "min": [0, 0, 0], "max": [1, 0.4, 1], "color": "#7a4a2a"},
+    {"shape": "box", "min": [0, 0.4, 0], "max": [1, 1, 0.15], "color": "#6a3a20"},
+    {"shape": "cylinder", "min": [0.02, 0, 0.02], "max": [0.08, 0.1, 0.08], "color": "#222222"},
+]
+
+
+def _furniture(surfaces: list[Surface], part: int | None = None) -> list[Surface]:
+    return [
+        s
+        for s in surfaces
+        if s.kind == "furniture" and (part is None or s.extras["partIndex"] == part)
+    ]
+
+
+def _rounded(points) -> set[tuple[float, ...]]:
+    return {tuple(round(float(c), 9) for c in p) for p in points}
+
+
+def _convention_point(item: dict, elevation: float, u: float, v: float, w: float) -> list[float]:
+    """A part fraction's world point, written out from the layout contract's formulas."""
+    width, height, depth = item["size"]
+    px, pz = item["position"]
+    yaw = item["yawRadians"]
+    lx, lz = (u - 0.5) * width, (w - 0.5) * depth
+    x = px + lx * math.cos(yaw) + lz * math.sin(yaw)
+    z = pz - lx * math.sin(yaw) + lz * math.cos(yaw)
+    return [x, elevation + v * height, z]
+
+
+def test_a_sofa_yields_the_faces_each_part_needs():
+    # The seat sits on the floor, so it has no underside; the raised back has one; the cylinder
+    # leg has twelve facets and a top, and no underside because it stands on the floor.
+    surfaces = layout_surfaces(_piece("sofa", SOFA_PARTS))
+    assert Counter(s.extras["partIndex"] for s in _furniture(surfaces)) == {0: 5, 1: 6, 2: 13}
+    names = {s.name for s in _furniture(surfaces)}
+    assert "sofa:p1:bottom" in names and "sofa:p0:bottom" not in names
+    assert "sofa:p2:bottom" not in names
+    assert sum(name.startswith("sofa:p2:side") for name in names) == 12
+
+
+def test_furniture_faces_carry_their_piece_part_and_colour():
+    surfaces = layout_surfaces(_piece("sofa", SOFA_PARTS))
+    back = next(s for s in surfaces if s.name == "sofa:p1:top")
+    assert back.extras == {"furnitureId": "sofa", "partIndex": 1, "color": (0x6A, 0x3A, 0x20)}
+    assert {s.extras["furnitureId"] for s in _furniture(surfaces)} == {"sofa"}
+
+
+def test_furniture_normals_point_out_of_their_own_part():
+    layout = _piece("sofa", SOFA_PARTS)
+    item = layout["furniture"][0]
+    centres = [part_box(item, part, 0.0).mean(axis=0) for part in item["parts"]]
+    for s in _furniture(layout_surfaces(layout)):
+        face_centre = _world_ring(s).mean(axis=0)
+        outward = float((face_centre - centres[s.extras["partIndex"]]) @ s.normal)
+        assert outward > 0, s.name
+        assert np.linalg.norm(s.normal) == pytest.approx(1.0)
+
+
+def test_a_part_face_sits_where_the_convention_puts_its_corners():
+    layout = _piece("sofa", SOFA_PARTS)
+    item = layout["furniture"][0]
+    back_top = next(s for s in layout_surfaces(layout) if s.name == "sofa:p1:top")
+    expected = [
+        _convention_point(item, 0.0, u, 1.0, w) for u, w in ((0, 0), (1, 0), (1, 0.15), (0, 0.15))
+    ]
+    assert _rounded(_world_ring(back_top)) == _rounded(expected)
+    np.testing.assert_allclose(back_top.normal, [0, 1, 0], atol=1e-12)
+    back_under = next(s for s in layout_surfaces(layout) if s.name == "sofa:p1:bottom")
+    np.testing.assert_allclose(back_under.normal, [0, -1, 0], atol=1e-12)
+    np.testing.assert_allclose(_world_ring(back_under)[:, 1], 0.36, atol=1e-12)
+
+
+def test_a_raised_table_top_keeps_its_underside():
+    table = [
+        {"shape": "box", "min": [0, 0.9, 0], "max": [1, 1, 1], "color": "#c0a080"},
+        {"shape": "box", "min": [0.05, 0, 0.05], "max": [0.12, 0.9, 0.12], "color": "#444444"},
+    ]
+    surfaces = layout_surfaces(_piece("table", table, size=[1.2, 0.75, 0.6]))
+    under = next(s for s in surfaces if s.name == "table:p0:bottom")
+    np.testing.assert_allclose(under.normal, [0, -1, 0], atol=1e-12)
+    assert _world_ring(under)[:, 1] == pytest.approx(0.9 * 0.75)
+    # The leg stands on the floor, so nothing under it is in view.
+    assert not any(s.name == "table:p1:bottom" for s in surfaces)
+
+
+def test_a_cylinder_is_an_ellipse_inscribed_in_its_part_box():
+    part = {"shape": "cylinder", "min": [0.1, 0.0, 0.2], "max": [0.7, 0.5, 0.6], "color": "#ffffff"}
+    layout = _piece("column", [part], yawRadians=0.6, size=[2.0, 1.0, 1.0])
+    item = layout["furniture"][0]
+    top = next(s for s in layout_surfaces(layout) if s.name == "column:p0:top")
+    # Local fractions of the cap: an ellipse centred at (0.4, 0.4) with radii 0.3 and 0.2.
+    local = furniture_points(np.linalg.inv(furniture_transform(item, 0.0)), _world_ring(top))
+    ellipse = ((local[:, 0] - 0.4) / 0.3) ** 2 + ((local[:, 2] - 0.4) / 0.2) ** 2
+    np.testing.assert_allclose(ellipse, 1.0, atol=1e-9)
+    assert len(top.outer) == 12
+
+
+def test_a_part_lifted_less_than_eight_centimetres_shows_no_underside():
+    # The bottom sits 5 cm above the floor, under the 8 cm needed to see the underside.
+    part = {"shape": "box", "min": [0, 0.05, 0], "max": [1, 1, 1], "color": "#ffffff"}
+    names = {
+        s.name for s in _furniture(layout_surfaces(_piece("shelf", [part], size=[1.0, 1.0, 1.0])))
+    }
+    assert "shelf:p0:top" in names
+    assert "shelf:p0:bottom" not in names
+
+
+def test_a_cylinder_under_a_centimetre_across_leaves_no_faces():
+    # A pin 0.8 cm across: its facets and cap edges are all shorter than a centimetre.
+    pin = {
+        "shape": "cylinder",
+        "min": [0.4, 0, 0.4],
+        "max": [0.404, 0.5, 0.404],
+        "color": "#ffffff",
+    }
+    surfaces = layout_surfaces(_piece("pin", [pin], size=[2.0, 0.9, 2.0]))
+    assert _furniture(surfaces) == []
+
+
+def test_faces_under_a_centimetre_are_dropped():
+    # A plate 4 mm thick: its edges are too thin to see, so only its faces remain.
+    plate = [
+        {"shape": "box", "min": [0, 0.5, 0], "max": [1, 0.5 + 0.004 / 0.9, 1], "color": "#ffffff"}
+    ]
+    names = {
+        s.name for s in _furniture(layout_surfaces(_piece("plate", plate, size=[1.0, 0.9, 1.0])))
+    }
+    assert names == {"plate:p0:top", "plate:p0:bottom"}
+
+
+def test_furniture_surfaces_chart_and_wind_like_the_rest():
+    layout = _piece("sofa", SOFA_PARTS)
+    surfaces = layout_surfaces(layout)
+    assert {s.kind for s in surfaces} <= set(SURFACE_KINDS)
+    atlas = build_atlas(surfaces)
+    parts = surfaces_to_parts(surfaces, atlas)
+    for k, (part, s) in enumerate(zip(parts, surfaces, strict=True)):
+        if s.kind != "furniture":
+            continue
+        a, b, c = (part.positions[part.indices[:, i]] for i in range(3))
+        cross = np.cross(b - a, c - a)
+        solid = np.linalg.norm(cross, axis=1) > 1e-12
+        assert np.all(cross[solid] @ s.normal > 0), s.name
+        _, world, inside = chart_texels(s, atlas.placements[k], atlas)
+        assert np.abs((world[inside] - s.origin) @ s.normal).max() < 1e-9, s.name
 
 
 def test_cap_normals_face_away_from_the_piece(room):

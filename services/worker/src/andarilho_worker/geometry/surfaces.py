@@ -2,7 +2,8 @@
 
 ``layout_surfaces`` turns a validated layout into one :class:`Surface` per visible
 face, built from the same boxes and polygons as ``layout.collision_parts`` so the
-textured model follows the collision model. A surface is a plane with an origin
+textured model follows the collision model. Furniture is drawn part by part, in
+its own colours, whether or not the piece is solid. A surface is a plane with an origin
 and two orthonormal axes: the point at surface coordinates ``(u, v)`` is
 ``origin + u * u_axis + v * v_axis`` in canonical world metres (+Y up).
 
@@ -21,7 +22,13 @@ from typing import Any
 
 import numpy as np
 
-from andarilho_worker.geometry.layout import _wall_pieces, ensure_valid_layout, floor_supports
+from andarilho_worker.geometry.layout import (
+    _wall_pieces,
+    ensure_valid_layout,
+    floor_supports,
+    furniture_points,
+    furniture_transform,
+)
 from andarilho_worker.geometry.polygon import point_in_polygon, signed_area, triangulate
 from andarilho_worker.geometry.textured import TexturedPart
 
@@ -32,6 +39,11 @@ CORNER_TOLERANCE = 1e-6
 # How far beyond a wall face to look for the floor it is seen from, metres.
 FACE_PROBE = 0.1
 UP = np.array([0.0, 1.0, 0.0])
+# A furniture face with an edge shorter than this is too small for a camera to resolve.
+MIN_FURNITURE_EDGE = 0.01
+# A part whose bottom is at least this far above the floor shows its underside.
+RAISED_BOTTOM = 0.08
+CYLINDER_SIDES = 12
 
 
 @dataclass
@@ -235,8 +247,146 @@ def _obstacle_surfaces(obstacle: Mapping[str, Any], elevation: float) -> list[Su
     return out
 
 
+def _rgb(colour: str) -> tuple[int, int, int]:
+    """A ``#rrggbb`` colour as three ints."""
+    return (int(colour[1:3], 16), int(colour[3:5], 16), int(colour[5:7], 16))
+
+
+def _large_enough(ring: np.ndarray) -> bool:
+    """Whether every edge of a closed (K, 3) ring is at least ``MIN_FURNITURE_EDGE`` long."""
+    edges = np.roll(ring, -1, axis=0) - ring
+    return bool(np.all(np.linalg.norm(edges, axis=1) >= MIN_FURNITURE_EDGE))
+
+
+def _outward(a: np.ndarray, b: np.ndarray, centre: np.ndarray) -> np.ndarray:
+    """The horizontal unit normal of the 2D edge a->b that points away from ``centre``.
+
+    Furniture parts are convex, so the side facing away from the part's centre is the outside.
+    """
+    d = b - a
+    normal = np.array([d[1], -d[0]]) / math.hypot(d[0], d[1])
+    return normal if float(normal @ ((a + b) / 2 - centre)) >= 0 else -normal
+
+
+def _furniture_wall(
+    name: str,
+    transform: np.ndarray,
+    start: tuple[float, float],
+    end: tuple[float, float],
+    centre: np.ndarray,
+    v_range: tuple[float, float],
+    extras: Mapping[str, Any],
+) -> Surface | None:
+    """A vertical part face between two (u, w) fraction points, or None when too small."""
+    v0, v1 = v_range
+    ring = furniture_points(
+        transform,
+        [
+            (start[0], v0, start[1]),
+            (end[0], v0, end[1]),
+            (end[0], v1, end[1]),
+            (start[0], v1, start[1]),
+        ],
+    )
+    if not _large_enough(ring):
+        return None
+    a, b = ring[0, [0, 2]], ring[1, [0, 2]]
+    normal = _outward(a, b, centre[[0, 2]])
+    return _vertical(name, "furniture", a, b, normal, ring[0, 1], ring[2, 1], extras)
+
+
+def _box_faces(
+    name: str,
+    transform: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    raised: bool,
+    extras: Mapping[str, Any],
+) -> list[Surface]:
+    """The top, the four sides and, for a raised part, the underside of a box part."""
+    (u0, v0, w0), (u1, v1, w1) = lo, hi
+    # Sides face away from this part's own centre, which is not the piece's centre when the
+    # part sits at the back of the piece.
+    centre = furniture_points(transform, [((u0 + u1) / 2, (v0 + v1) / 2, (w0 + w1) / 2)])[0]
+    out: list[Surface] = []
+    caps = [(v1, True, "top")] + ([(v0, False, "bottom")] if raised else [])
+    for v, up, tag in caps:
+        ring = furniture_points(transform, [(u0, v, w0), (u1, v, w0), (u1, v, w1), (u0, v, w1)])
+        if _large_enough(ring):
+            face = _horizontal(
+                f"{name}:{tag}", "furniture", ring[0, 1], ring[:, [0, 2]], [], up=up, extras=extras
+            )
+            out.append(face)
+    # The four sides, each as the edge of the footprint it stands on.
+    edges = [
+        ((u0, w0), (u0, w1)),
+        ((u1, w0), (u1, w1)),
+        ((u0, w0), (u1, w0)),
+        ((u0, w1), (u1, w1)),
+    ]
+    for j, (start, end) in enumerate(edges):
+        face = _furniture_wall(f"{name}:side{j}", transform, start, end, centre, (v0, v1), extras)
+        if face is not None:
+            out.append(face)
+    return out
+
+
+def _cylinder_faces(
+    name: str,
+    transform: np.ndarray,
+    lo: np.ndarray,
+    hi: np.ndarray,
+    raised: bool,
+    extras: Mapping[str, Any],
+) -> list[Surface]:
+    """The facets, the top and, for a raised part, the underside of an upright cylinder part.
+
+    The cylinder is inscribed in its part box, so its cross-section is an ellipse with the box's
+    half-extents across the width and depth. It is drawn as ``CYLINDER_SIDES`` flat facets.
+    """
+    (u0, v0, w0), (u1, v1, w1) = lo, hi
+    cu, cw = (u0 + u1) / 2, (w0 + w1) / 2
+    ru, rw = (u1 - u0) / 2, (w1 - w0) / 2
+    angles = np.linspace(0.0, 2.0 * np.pi, CYLINDER_SIDES, endpoint=False)
+    rim = [(cu + ru * math.cos(t), cw + rw * math.sin(t)) for t in angles]
+    centre = furniture_points(transform, [(cu, (v0 + v1) / 2, cw)])[0]
+    out: list[Surface] = []
+    for i in range(CYLINDER_SIDES):
+        start, end = rim[i], rim[(i + 1) % CYLINDER_SIDES]
+        face = _furniture_wall(f"{name}:side{i}", transform, start, end, centre, (v0, v1), extras)
+        if face is not None:
+            out.append(face)
+    caps = [(v1, True, "top")] + ([(v0, False, "bottom")] if raised else [])
+    for v, up, tag in caps:
+        ring = furniture_points(transform, [(u, v, w) for u, w in rim])
+        if _large_enough(ring):
+            face = _horizontal(
+                f"{name}:{tag}", "furniture", ring[0, 1], ring[:, [0, 2]], [], up=up, extras=extras
+            )
+            out.append(face)
+    return out
+
+
+def _furniture_surfaces(item: Mapping[str, Any], elevation: float) -> list[Surface]:
+    """The visible faces of one piece, part by part, each part in its own colour."""
+    transform = furniture_transform(item, elevation)
+    height = float(item["size"][1])
+    out: list[Surface] = []
+    for k, part in enumerate(item["parts"]):
+        lo = np.asarray(part["min"], dtype=np.float64)
+        hi = np.asarray(part["max"], dtype=np.float64)
+        raised = float(lo[1]) * height >= RAISED_BOTTOM
+        extras = {"furnitureId": item["id"], "partIndex": k, "color": _rgb(part["color"])}
+        name = f"{item['id']}:p{k}"
+        if part["shape"] == "box":
+            out += _box_faces(name, transform, lo, hi, raised, extras)
+        else:
+            out += _cylinder_faces(name, transform, lo, hi, raised, extras)
+    return out
+
+
 def layout_surfaces(layout: Mapping[str, Any]) -> list[Surface]:
-    """Every visible face of a valid layout, in floor, wall and obstacle order."""
+    """Every visible face of a valid layout, in floor, wall, obstacle and furniture order."""
     ensure_valid_layout(layout)
     floors = {f["id"]: f for f in layout["floors"]}
     walls_by_floor: dict[str, list[Mapping[str, Any]]] = {}
@@ -269,6 +419,9 @@ def layout_surfaces(layout: Mapping[str, Any]) -> list[Surface]:
     for obstacle in layout.get("obstacles", []):
         elevation = float(floors[obstacle["floorId"]]["elevation"])
         surfaces.extend(_obstacle_surfaces(obstacle, elevation))
+    for item in layout.get("furniture", []):
+        elevation = float(floors[item["floorId"]]["elevation"])
+        surfaces.extend(_furniture_surfaces(item, elevation))
     return surfaces
 
 

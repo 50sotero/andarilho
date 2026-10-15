@@ -13,9 +13,14 @@ import pytest
 
 from andarilho_worker import validation
 from andarilho_worker.geometry.glb import _pack_glb, _split_glb, write_textured_glb
-from andarilho_worker.geometry.layout import layout_bounds, rectangle_layout
+from andarilho_worker.geometry.layout import (
+    collision_glb,
+    layout_bounds,
+    rectangle_layout,
+)
 from andarilho_worker.geometry.texture import TextureParams, procedural_texture_layout
 from andarilho_worker.geometry.textured import TexturedMesh, TexturedPart
+from andarilho_worker.manifest import asset_entry, build_manifest, navigation_for, scene_prefix
 from andarilho_worker.validation import (
     canonical_json,
     check_poster_asset,
@@ -193,6 +198,112 @@ def test_spawn_obstacle_check_uses_the_spawn_floor(manifest):
     same_floor = copy.deepcopy(upstairs)
     same_floor["obstacles"][0]["floorId"] = manifest["spawn"]["floorId"]
     assert "SPAWN_BLOCKED" in codes(validate_scene(manifest, fetch, layout=same_floor))
+
+
+def _table(item_id: str, position: list[float], **changes) -> dict:
+    """A table with a raised top and a leg standing on the floor."""
+    item = {
+        "id": item_id,
+        "floorId": "floor-0",
+        "category": "table",
+        "position": position,
+        "yawRadians": 0.0,
+        "size": [1.0, 0.75, 0.6],
+        "solid": True,
+        "parts": [
+            {"shape": "box", "min": [0, 0.9, 0], "max": [1, 1, 1], "color": "#c0a080"},
+            {"shape": "box", "min": [0.05, 0, 0.05], "max": [0.12, 0.9, 0.12], "color": "#444444"},
+        ],
+    }
+    item.update(changes)
+    return item
+
+
+PACKAGE_PROJECT, PACKAGE_REVISION = "project-1", "revision-1"
+
+
+def _fetch(blobs: dict[str, bytes]):
+    def fetch(key: str) -> bytes:
+        return blobs[key]
+
+    return fetch
+
+
+def _package(layout: dict, geometry_source: str = "proposal") -> tuple[dict, dict[str, bytes]]:
+    """The manifest and assets that packaging would write for a layout, as bytes by key."""
+    prefix = scene_prefix(PACKAGE_PROJECT, PACKAGE_REVISION)
+    model = write_textured_glb(
+        procedural_texture_layout(layout, TextureParams(texel_size=0.02, page_size=512))
+    )
+    collision = collision_glb(layout)
+    manifest = build_manifest(
+        scene_id="scene-1",
+        scene_revision_id=PACKAGE_REVISION,
+        revision=1,
+        run_id="run-1",
+        layout=layout,
+        layout_revision=1,
+        render=asset_entry(prefix + "model.glb", model, "glb"),
+        collision=asset_entry(prefix + "collision.glb", collision, "glb"),
+        poster=None,
+        scale_status="estimated",
+        geometry_source=geometry_source,
+        recipe_digest="recipe-digest",
+        capture_set_id="capture-1",
+        quality={"registeredViews": 0, "selectedViews": 0, "disconnectedComponents": 0},
+    )
+    return manifest, {prefix + "model.glb": model, prefix + "collision.glb": collision}
+
+
+@pytest.mark.parametrize("source", ["user_confirmed_trace", "synthetic_fixture", "proposal"])
+def test_every_geometry_source_is_walkable_at_once(source):
+    nav = navigation_for(source, 4)
+    assert nav["mode"] == "approved_collision"
+    assert nav["approved"] is True
+    assert nav["layoutRevision"] == 4
+    assert (nav["playerRadius"], nav["playerHeight"], nav["eyeHeight"]) == (0.25, 1.7, 1.6)
+
+
+def test_an_automatic_proposal_packages_walkable_and_valid():
+    layout = rectangle_layout((-2.0, -2.0), (2.0, 2.0), elevation=0.0, height=2.5)
+    manifest, blobs = _package(layout, geometry_source="proposal")
+    assert manifest["provenance"]["geometrySource"] == "proposal"
+    assert manifest["navigation"]["mode"] == "approved_collision"
+    assert manifest["navigation"]["approved"] is True
+    findings = validate_scene(manifest, _fetch(blobs), project_id=PACKAGE_PROJECT, layout=layout)
+    assert findings == []
+
+
+def test_a_furnished_scene_validates_with_its_bounds_and_collision():
+    layout = rectangle_layout((-2.0, -2.0), (2.0, 2.0), elevation=0.0, height=2.5)
+    # The lamp is not solid and reaches 0.45 m beyond the walls. Its parts are drawn, so the
+    # scene bounds must take them in or the model would lie outside them.
+    lamp = {
+        "id": "lamp",
+        "floorId": "floor-0",
+        "category": "lamp",
+        "position": [2.2, 0.0],
+        "yawRadians": 0.0,
+        "size": [0.5, 1.8, 0.5],
+        "solid": False,
+        "parts": [{"shape": "cylinder", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#ffe9a0"}],
+    }
+    layout["furniture"] = [_table("table", [-1.0, 0.5]), lamp]
+    manifest, blobs = _package(layout)
+    assert manifest["bounds"]["max"][0] >= 2.45
+    findings = validate_scene(manifest, _fetch(blobs), project_id=PACKAGE_PROJECT, layout=layout)
+    assert findings == []
+
+
+def test_solid_furniture_over_the_spawn_blocks_the_scene_and_a_passable_piece_does_not():
+    base = rectangle_layout((-2.0, -2.0), (2.0, 2.0), elevation=0.0, height=2.5)
+    manifest, blobs = _package(base)  # packaged without the furniture, validated with it
+    fetch = _fetch(blobs)
+    blocking = {**base, "furniture": [_table("table", [0.0, 0.0])]}  # the spawn is at (0, 0)
+    findings = validate_scene(manifest, fetch, project_id=PACKAGE_PROJECT, layout=blocking)
+    assert "SPAWN_BLOCKED" in codes(findings)
+    passable = {**base, "furniture": [_table("table", [0.0, 0.0], solid=False)]}
+    assert validate_scene(manifest, fetch, project_id=PACKAGE_PROJECT, layout=passable) == []
 
 
 def test_canonical_sha_matches_api_rule():

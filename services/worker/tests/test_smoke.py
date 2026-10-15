@@ -98,7 +98,7 @@ def test_smoke_chains_capture_stages_into_a_textured_bundle(tmp_path, monkeypatc
     assert manifest["renderMode"] == "mesh"
     assert manifest["assets"]["render"]["format"] == "glb"
     assert manifest["assets"]["render"]["key"].endswith("/model.glb")
-    assert manifest["navigation"]["mode"] == "inspection_only"  # a proposal awaits review
+    assert manifest["navigation"]["mode"] == "approved_collision"  # a proposal is walkable at once
     assert manifest["quality"]["registeredViews"] == CAMERAS
     assert "Only a short walk was recorded." in manifest["quality"]["warnings"]
     assert manifest["scaleStatus"] == "estimated"

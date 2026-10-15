@@ -26,9 +26,10 @@ from andarilho_worker.geometry.glb import (
     write_glb,
     write_textured_glb,
 )
-from andarilho_worker.geometry.layout import collision_parts
+from andarilho_worker.geometry.layout import collision_parts, layout_bounds, rectangle_layout
+from andarilho_worker.geometry.texture import TextureParams, procedural_texture_layout
 from andarilho_worker.geometry.textured import TexturedMesh, TexturedPart
-from andarilho_worker.validation import check_collision_glb
+from andarilho_worker.validation import check_collision_glb, check_render_asset
 
 FIXTURES = Path(__file__).resolve().parents[3] / "packages" / "scene-contract" / "fixtures"
 COLLISION_SHA256 = "76f09ecbe81a4c85f1a3c379d488019009808b4e325a3c6cd7c09b5134f5508f"
@@ -924,3 +925,50 @@ def test_collision_glb_with_non_scalar_indices_is_a_finding():
     findings = check_collision_glb(patched, _manifest())
     assert [f.code for f in findings] == ["COLLISION_GLB"]
     assert "must be SCALAR" in findings[0].message
+
+
+def _furnished_layout() -> dict:
+    """A 7 x 7 m room with a sofa: a seat on the floor, a raised back and a cylinder leg."""
+    layout = rectangle_layout((-3.0, -3.0), (4.0, 4.0), elevation=0.0, height=2.5)
+    sofa = {
+        "id": "sofa",
+        "floorId": "floor-0",
+        "category": "sofa",
+        "position": [1.0, 2.0],
+        "yawRadians": 0.3,
+        "size": [2.0, 0.9, 0.9],
+        "solid": True,
+        "parts": [
+            {"shape": "box", "min": [0, 0, 0], "max": [1, 0.4, 1], "color": "#7a4a2a"},
+            {"shape": "box", "min": [0, 0.4, 0], "max": [1, 1, 0.15], "color": "#6a3a20"},
+            {"shape": "cylinder", "min": [0.02, 0, 0.02], "max": [0.08, 0.1, 0.08],
+             "color": "#222222"},
+        ],
+    }  # fmt: skip
+    layout["furniture"] = [sofa]
+    return layout
+
+
+def test_a_furnished_model_is_an_unlit_glb_with_its_parts_in_colour():
+    layout = _furnished_layout()
+    mesh = procedural_texture_layout(layout, TextureParams(texel_size=0.02, page_size=512))
+    data = write_textured_glb(mesh)
+    summary = inspect_textured_glb(data)
+    assert summary["unlit"] and summary["triangles"] > 0
+    doc = _doc(data)
+    back = next(node for node in doc["nodes"] if node["name"] == "sofa:p1:top")
+    assert back["extras"] == {
+        "kind": "furniture",
+        "furnitureId": "sofa",
+        "partIndex": 1,
+        "color": [106, 58, 32],
+    }
+    kinds = {node["extras"]["kind"] for node in doc["nodes"]}
+    assert {"furniture", "floor", "wall"} <= kinds
+    assert doc["extras"]["andarilho"]["coverage"]["furniture"] == 1.0
+
+
+def test_a_furnished_model_is_a_valid_render_asset_inside_its_bounds():
+    layout = _furnished_layout()
+    data = write_textured_glb(procedural_texture_layout(layout))
+    assert check_render_asset(data, "glb", {"bounds": layout_bounds(layout)}) == []

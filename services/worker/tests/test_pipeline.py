@@ -184,8 +184,15 @@ def test_packaging_publishes_the_poster_and_carries_it_to_layout_revisions(
     assert carried["sha256"] == poster["sha256"]
 
 
-def test_packaging_carries_the_capture_quality_poster_and_unseen_area_warning(db, seed, store, sup):
-    """A captured revision's packaging reads the run's outputs, as a layout save does."""
+@pytest.mark.parametrize("analysis", [None, ["Two chairs were drawn from one photo."]])
+def test_packaging_carries_the_capture_quality_poster_and_unseen_area_warning(
+    db, seed, store, sup, analysis
+):
+    """A captured revision's packaging reads the run's outputs, as a layout save does.
+
+    The scene analysis warnings are optional: a run without them packages as before, and when
+    present they follow the frame warnings and come before the unseen-area warning.
+    """
     from andarilho_worker.geometry.glb import write_textured_glb
     from andarilho_worker.geometry.layout import collision_glb, rectangle_layout
     from andarilho_worker.geometry.texture import TextureParams, procedural_texture_layout
@@ -216,6 +223,7 @@ def test_packaging_carries_the_capture_quality_poster_and_unseen_area_warning(db
             "sceneRevisionId": rid, "layoutSource": "user", "modelKey": model_key,
             "collisionKey": collision_key, "posterKey": poster_key, "scaleStatus": "estimated",
             "frameWarnings": ["Only a short walk was recorded."],
+            **({"analysisWarnings": analysis} if analysis is not None else {}),
             "textureCoverage": {"all": 0.5, "wall": 0.4, "floor": 0.9, "ceiling": 0.9},
             "coverage": {"registeredViews": 24, "selectedViews": 24, "disconnectedComponents": 0,
                          "warnings": ["An earlier warning."], "registeredRatio": 1.0},
@@ -232,6 +240,7 @@ def test_packaging_carries_the_capture_quality_poster_and_unseen_area_warning(db
     assert manifest["quality"]["warnings"] == [
         "An earlier warning.",
         "Only a short walk was recorded.",
+        *(analysis or []),
         "About 50% of the walls, floor and ceiling were not seen in the video and are shown "
         "in plain grey.",
     ]
