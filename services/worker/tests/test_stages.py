@@ -4,18 +4,41 @@ from __future__ import annotations
 
 import json
 import struct
+import tarfile
 from collections import Counter
 from pathlib import Path
 
 import numpy as np
 import pytest
+from colmap_fixtures import (
+    FLOOR,
+    apply_affine,
+    cameras_for,
+    colmap_transform,
+    join_points,
+    l_walk,
+    make_room,
+    similarity_matrix_problem,
+    to_sparse,
+)
 from exif_fixtures import exif_tiff, jpeg_with_exif
+from stage_fixtures import stage_context
 
 from andarilho_worker import queue
 from andarilho_worker.errors import StageError
+from andarilho_worker.geometry.colmap import (
+    ColmapCamera,
+    ColmapImage,
+    SparsePoints,
+    write_cameras_bin,
+    write_images_bin,
+    write_points3d_bin,
+)
+from andarilho_worker.geometry.frame import frame_from_sparse, reliable_points
 from andarilho_worker.recipes import ARGV, RECIPES, recipe_for, render_argv
 from andarilho_worker.runner import ProcessFailed, RunResult
 from andarilho_worker.settings import Settings
+from andarilho_worker.stages import normalize
 from andarilho_worker.stages import prepare as prepare_mod
 from andarilho_worker.stages.reconstruct import SparseModel, coverage_gate
 from andarilho_worker.supervisor import Supervisor
@@ -540,171 +563,189 @@ def test_matcher_respects_photo_ordering(tmp_path, names, expected):
     ]
 
 
-def test_slow_sog_compression_falls_back_to_the_ply(db, seed, store, settings, monkeypatch):
-    from andarilho_worker.geometry.ply import write_splat_ply
-    from andarilho_worker.geometry.synthetic import synthetic_splats
-    from andarilho_worker.runner import ProcessTimeout
-    from andarilho_worker.stages import STAGES
-    from andarilho_worker.stages import normalize as normalize_mod
-
-    monkeypatch.setattr(normalize_mod, "tool_available", lambda name: True)
-    timeouts: list[float] = []
-
-    class SlowCompressor:
-        def run(self, argv, *, timeout, **kw):
-            timeouts.append(timeout)
-            raise ProcessTimeout(f"{argv[0]} exceeded {timeout:.0f}s")
-
-    pid = seed.project()
-    run_id, job_id = seed.run(pid, quality="preview", first_stage="normalizing")
-    ply_key = f"tenants/{pid}/runs/{run_id}/attempts/training/1/scene.ply"
-    store.put_bytes(ply_key, write_splat_ply(synthetic_splats(normalize_mod.synthetic_layout())))
-    seed.exec(
-        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
-        json.dumps({"outputs": {"plyKey": ply_key, "quality": "preview"}}), job_id,
-    )  # fmt: skip
-    sup = Supervisor(db, store, settings, runner=SlowCompressor(), stages=STAGES)
-    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
-    assert len(timeouts) == 1 and timeouts[0] <= normalize_mod.SOG_MAX_SECONDS
-    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
-    assert outputs["input_manifest"]["outputs"]["renderFormat"] == "ply"
-    result = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'normalizing'")
-    assert result["result_manifest"]["compression"]["reason"] == "timeout"
-
-
-def test_sog_compression_drops_the_bands_above_the_recipe_sh_degree(
-    db, seed, store, settings, monkeypatch
-):
-    from andarilho_worker.geometry.ply import write_splat_ply
-    from andarilho_worker.geometry.synthetic import synthetic_splats
-    from andarilho_worker.stages import STAGES
-    from andarilho_worker.stages import normalize as normalize_mod
-
-    monkeypatch.setattr(normalize_mod, "tool_available", lambda name: True)
-    calls: list[list[str]] = []
-
-    class Compressor:
-        def run(self, argv, *, timeout, **kw):
-            argv = [str(a) for a in argv]
-            calls.append(argv)
-            Path(argv[-1]).write_bytes(b"PK\x03\x04 sog")
-            return RunResult(tuple(argv), 0, "", "", 0.01)
-
-    pid = seed.project()
-    run_id, job_id = seed.run(pid, quality="preview", first_stage="normalizing")
-    ply_key = f"tenants/{pid}/runs/{run_id}/attempts/training/1/scene.ply"
-    store.put_bytes(ply_key, write_splat_ply(synthetic_splats(normalize_mod.synthetic_layout())))
-    seed.exec(
-        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
-        json.dumps({"outputs": {"plyKey": ply_key, "quality": "preview"}}), job_id,
-    )  # fmt: skip
-    sup = Supervisor(db, store, settings, runner=Compressor(), stages=STAGES)
-    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
-    (argv,) = calls
-    assert argv[0] == "splat-transform"
-    # An action after the input applies to it: drop the bands, then write the SOG.
-    flag = argv.index("--filter-harmonics")
-    assert argv[flag - 1].endswith("normalized.ply")
-    assert argv[flag + 1] == str(RECIPES["preview"].params["renderShDegree"]) == "1"
-    assert argv[-1].endswith("scene.sog")
-    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
-    assert outputs["input_manifest"]["outputs"]["renderFormat"] == "sog"
-    result = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'normalizing'")
-    compression = result["result_manifest"]["compression"]
-    assert compression["format"] == "sog" and compression["shDegree"] == 1
-    assert compression["bytes"] == len(b"PK\x03\x04 sog")
-
-
-def test_normalize_levels_the_scene_on_the_floor_under_the_walk_and_spawns_at_its_start(
-    db, seed, store, settings, monkeypatch
-):
-    import math
-
-    from andarilho_worker.geometry.ply import SplatCloud, write_splat_ply
-    from andarilho_worker.geometry.synthetic import synthetic_splats
-    from andarilho_worker.stages import STAGES
-    from andarilho_worker.stages import normalize as normalize_mod
-    from andarilho_worker.validation import similarity_matrix_problem
-
-    monkeypatch.setattr(normalize_mod, "tool_available", lambda name: False)
-    # The synthetic two-room scene as a trainer exports it: Z up (world y -> z).
-    world = synthetic_splats(normalize_mod.synthetic_layout()).data.copy()
-    world["y"], world["z"] = -world["z"].copy(), world["y"].copy()
-    pid = seed.project()
-    run_id, job_id = seed.run(pid, quality="preview", first_stage="normalizing")
-    prefix = f"tenants/{pid}/runs/{run_id}/attempts"
-    store.put_bytes(f"{prefix}/training/1/scene.ply", write_splat_ply(SplatCloud(world)))
-    # A walk from x = 3 to x = 1 at 1.5 m, facing -X. COLMAP frame for an identity
-    # dataparser transform: colmap (x, y, z) = export (x, -z, y).
-    cameras = [
-        {"name": f"00/frame_{i:05d}.jpg", "center": [3.0 - 0.2 * i, -1.5, 0.0],
-         "forward": [-1.0, 0.0, 0.0]}
-        for i in range(11)
-    ]  # fmt: skip
-    store.put_bytes(f"{prefix}/camera/1/cameras.json", json.dumps({"cameras": cameras}).encode())
-    store.put_bytes(
-        f"{prefix}/training/1/dataparser_transforms.json",
-        json.dumps(
-            {"transform": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0]], "scale": 1.0}
-        ).encode(),
+def _dataset_archive(tmp_path: Path, images: list[ColmapImage], points: SparsePoints) -> Path:
+    """A dataset.tar as camera_reconstruction writes it: frames under images/, the model in sparse/0."""
+    root = tmp_path / "dataset"
+    model = root / "sparse" / "0"
+    model.mkdir(parents=True)
+    write_cameras_bin(
+        model / "cameras.bin", [ColmapCamera(1, "PINHOLE", 640, 480, (500.0, 500.0, 320.0, 240.0))]
     )
-    seed.exec(
-        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
-        json.dumps({"outputs": {
-            "plyKey": f"{prefix}/training/1/scene.ply", "quality": "preview",
-            "camerasKey": f"{prefix}/camera/1/cameras.json",
-            "dataparserTransformsKey": f"{prefix}/training/1/dataparser_transforms.json",
-        }}), job_id,
-    )  # fmt: skip
-    sup = Supervisor(db, store, settings, stages=STAGES)
-    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
-    job = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
-    outputs = job["input_manifest"]["outputs"]
-    assert similarity_matrix_problem(outputs["worldFromDecodedRender"]) is None
-    assert outputs["proposalBounds"]["floorY"] == 0.0
-    assert outputs["proposalSpawn"]["yawRadians"] == pytest.approx(math.pi / 2, abs=0.02)
-    assert outputs["frameWarnings"] == []
-    result = seed.one("SELECT result_manifest FROM jobs WHERE stage = 'normalizing'")
-    frame = result["result_manifest"]["frame"]
-    assert frame["method"] == "floor_plane"
-    assert frame["tiltDegrees"] < 1.0
-    assert frame["metersPerUnit"] == pytest.approx(1.0, rel=0.03)
-
-    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
-    revision = seed.one("SELECT layout FROM scene_revisions WHERE run_id = %s", run_id)
-    spawn = revision["layout"]["spawn"]
-    assert spawn["feet"] == pytest.approx(outputs["proposalSpawn"]["feet"])
-    assert spawn["yawRadians"] == pytest.approx(math.pi / 2, abs=0.02)
+    write_images_bin(model / "images.bin", images)
+    write_points3d_bin(model / "points3D.bin", points)
+    frames = root / "images"
+    frames.mkdir(parents=True)
+    for image in images:
+        (frames / image.name).write_bytes(b"\xff\xd8\xff" + bytes(64 * 1024))
+    archive = tmp_path / "dataset.tar"
+    with tarfile.open(archive, "w") as tar:
+        tar.add(frames, arcname="images")
+        tar.add(root / "sparse", arcname="sparse")
+    return archive
 
 
-def test_normalize_streams_the_export_instead_of_reading_it_inline(
-    db, seed, store, settings, monkeypatch
+def _walk_scene(seed: int = 3, *, extra_points: int = 0):
+    """A walk through a 5 x 3.5 m room, as COLMAP stores it: (kinds, images, points)."""
+    rng = np.random.default_rng(seed)
+    transform = colmap_transform()
+    room, kind = make_room(rng)
+    centres, forwards = l_walk(rng)
+    images = cameras_for(centres, forwards, transform)
+    points = to_sparse(room, transform, rng)
+    if extra_points:
+        clutter = rng.uniform([0, 0, 0], [5, 2.6, 3.5], (extra_points, 3))
+        points = join_points(points, to_sparse(clutter, transform, rng))
+    return kind, images, points
+
+
+DATASET_KEY = "tenants/p/runs/run/attempts/camera_reconstruction/job/1/dataset.tar"
+
+
+def test_normalize_frames_the_sparse_model_and_writes_its_evidence(tmp_path, store, settings):
+    kind, images, points = _walk_scene()
+    store.put_file(DATASET_KEY, _dataset_archive(tmp_path, images, points), "application/x-tar")
+    ctx = stage_context(
+        tmp_path, store, settings, {"datasetKey": DATASET_KEY, "quality": "preview"}
+    )
+
+    result = normalize.run(ctx)
+
+    outputs = result.outputs
+    assert set(outputs) == {
+        "worldFromColmap", "scaleStatus", "proposalBounds", "proposalSpawn", "frameWarnings",
+        "evidenceKey",
+    }  # fmt: skip
+    assert similarity_matrix_problem(outputs["worldFromColmap"]) is None
+    assert outputs["scaleStatus"] == "estimated"
+    floor = apply_affine(outputs["worldFromColmap"], points.xyz[kind == FLOOR])
+    assert np.percentile(np.abs(floor[:, 1]), 95) < 0.03
+    cameras = apply_affine(outputs["worldFromColmap"], np.array([i.center() for i in images]))
+    bounds = outputs["proposalBounds"]
+    assert bounds["floorY"] == 0.0
+    assert np.all(np.array(bounds["minXZ"]) <= cameras[:, [0, 2]].min(axis=0))
+    assert np.all(np.array(bounds["maxXZ"]) >= cameras[:, [0, 2]].max(axis=0))
+    assert outputs["proposalSpawn"]["feet"][0] == pytest.approx(cameras[0, 0], abs=0.01)
+    assert outputs["proposalSpawn"]["feet"][1] == 0.0
+    assert result.manifest["sparsePoints"] == len(points.xyz)
+    assert result.manifest["cameras"] == len(images)
+    assert result.manifest["frame"]["method"] == "floor_plane"
+
+
+def test_capture_evidence_has_the_editor_shape_and_three_decimals(tmp_path, store, settings):
+    _kind, images, points = _walk_scene()
+    store.put_file(DATASET_KEY, _dataset_archive(tmp_path, images, points), "application/x-tar")
+    ctx = stage_context(
+        tmp_path, store, settings, {"datasetKey": DATASET_KEY, "quality": "preview"}
+    )
+    result = normalize.run(ctx)
+
+    blob = store.get_bytes(result.outputs["evidenceKey"])
+    evidence = json.loads(blob)
+    assert list(evidence) == ["schemaVersion", "units", "points", "cameras"]
+    assert evidence["schemaVersion"] == 1 and evidence["units"] == "m"
+    assert b" " not in blob  # compact separators
+    assert result.manifest["evidencePoints"] == len(evidence["points"]) == len(points.xyz)
+    assert all(v == round(v, 3) for row in evidence["points"] for v in row)
+    assert all(v == round(v, 3) for row in evidence["cameras"] for v in row)
+    # The cameras are in walk order (sorted by name) and in the canonical world.
+    canonical = apply_affine(
+        result.outputs["worldFromColmap"], np.array([i.center() for i in images])
+    )
+    assert np.array(evidence["cameras"]) == pytest.approx(canonical, abs=1e-3)
+    assert len(evidence["cameras"]) == len(images)
+
+
+def test_capture_evidence_keeps_at_most_five_thousand_points_in_their_order():
+    _kind, images, points = _walk_scene(extra_points=4000)
+    frame = frame_from_sparse(points, images, seed=0)
+    blob, kept = normalize.capture_evidence(frame, images, points, seed=0)
+    evidence = json.loads(blob)
+    assert kept == len(evidence["points"]) == normalize.EVIDENCE_POINTS
+    assert normalize.capture_evidence(frame, images, points, seed=0)[0] == blob
+    assert normalize.capture_evidence(frame, images, points, seed=1)[0] != blob
+    # Every kept point is one of the reliable points, in the order they were stored.
+    reliable = np.round(apply_affine(frame.matrix, reliable_points(points)), 3).tolist()
+    position: dict[tuple, int] = {}
+    for index, row in enumerate(reliable):
+        position.setdefault(tuple(row), index)
+    order = [position[tuple(row)] for row in evidence["points"]]
+    assert order == sorted(order)
+
+
+def test_image_frames_are_never_extracted(tmp_path, store, settings):
+    _kind, images, points = _walk_scene()
+    store.put_file(DATASET_KEY, _dataset_archive(tmp_path, images, points), "application/x-tar")
+    ctx = stage_context(
+        tmp_path, store, settings, {"datasetKey": DATASET_KEY, "quality": "preview"}
+    )
+
+    normalize.run(ctx)
+
+    names = {p.relative_to(ctx.scratch).as_posix() for p in ctx.scratch.rglob("*")}
+    assert "normalize/sparse/0/images.bin" in names
+    assert not [n for n in names if "images" in n.split("/")]
+    assert not (ctx.scratch / "dataset.tar").exists()  # the archive is removed once read
+
+
+@pytest.mark.parametrize("empty", ["cameras", "points", "archive"])
+def test_a_model_without_cameras_or_points_is_a_registration_failure(
+    tmp_path, store, settings, empty
 ):
-    from andarilho_worker.geometry.ply import write_splat_ply
-    from andarilho_worker.geometry.synthetic import synthetic_splats
+    _kind, images, points = _walk_scene()
+    if empty == "archive":
+        store.put_bytes(DATASET_KEY, b"not a tar archive")
+    else:
+        if empty == "cameras":
+            images = []
+        else:
+            points = SparsePoints(
+                np.empty((0, 3)), np.empty((0, 3), np.uint8), np.empty(0), np.empty(0, np.int64)
+            )
+        store.put_file(DATASET_KEY, _dataset_archive(tmp_path, images, points), "application/x-tar")
+    ctx = stage_context(
+        tmp_path, store, settings, {"datasetKey": DATASET_KEY, "quality": "preview"}
+    )
+
+    with pytest.raises(StageError) as error:
+        normalize.run(ctx)
+    assert error.value.code == "CAMERA_REGISTRATION_FAILED"
+
+
+def test_a_missing_dataset_is_a_missing_input(tmp_path, store, settings):
+    ctx = stage_context(tmp_path, store, settings, {"datasetKey": DATASET_KEY})
+    with pytest.raises(StageError) as error:
+        normalize.run(ctx)
+    assert error.value.code == "MISSING_INPUT"
+
+
+def test_the_synthetic_recipe_writes_no_files_and_only_the_bundled_scale(tmp_path, store, settings):
+    ctx = stage_context(tmp_path, store, settings, {"quality": "synthetic"}, quality="synthetic")
+
+    result = normalize.run(ctx)
+
+    assert result.outputs == {"scaleStatus": "user_measured", "proposalBounds": None}
+    assert store.list_keys(ctx.attempt_key("")) == [ctx.attempt_key("result.json")]
+
+
+def test_normalizing_hands_the_frame_and_the_evidence_to_the_proposal(
+    db, seed, store, settings, tmp_path
+):
     from andarilho_worker.stages import STAGES
-    from andarilho_worker.stages import normalize as normalize_mod
 
-    layout = normalize_mod.synthetic_layout()
-
-    monkeypatch.setattr(normalize_mod, "tool_available", lambda name: False)
+    _kind, images, points = _walk_scene()
     pid = seed.project()
     run_id, job_id = seed.run(pid, quality="preview", first_stage="normalizing")
-    ply_key = f"tenants/{pid}/runs/{run_id}/attempts/training/1/scene.ply"
-    store.put_bytes(ply_key, write_splat_ply(synthetic_splats(layout)))
+    key = f"tenants/{pid}/runs/{run_id}/attempts/camera_reconstruction/c1/1/dataset.tar"
+    store.put_file(key, _dataset_archive(tmp_path, images, points), "application/x-tar")
     seed.exec(
         "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
-        json.dumps({"outputs": {"plyKey": ply_key, "quality": "preview"}}), job_id,
+        json.dumps({"outputs": {"datasetKey": key, "quality": "preview"}}), job_id,
     )  # fmt: skip
-    inline = store.get_bytes
-
-    def no_inline_export(key, *args, **kwargs):
-        assert key != ply_key, "large exports must not be read inline"
-        return inline(key, *args, **kwargs)
-
-    monkeypatch.setattr(store, "get_bytes", no_inline_export)
     sup = Supervisor(db, store, settings, stages=STAGES)
-    job = queue.claim(db, "cpu-worker", "cpu")
-    assert sup.execute(job) == "succeeded"
-    outputs = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
-    assert outputs["input_manifest"]["outputs"]["renderFormat"] == "ply"
+    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "succeeded"
+    row = seed.one("SELECT input_manifest FROM jobs WHERE stage = 'geometry_proposal'")
+    outputs = row["input_manifest"]["outputs"]
+    assert outputs["scaleStatus"] == "estimated"
+    assert similarity_matrix_problem(outputs["worldFromColmap"]) is None
+    assert outputs["evidenceKey"].startswith(f"tenants/{pid}/runs/{run_id}/attempts/normalizing/")
+    assert json.loads(store.get_bytes(outputs["evidenceKey"]))["schemaVersion"] == 1

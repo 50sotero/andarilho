@@ -23,11 +23,12 @@ from andarilho_worker.geometry.glb import (
     read_glb,
 )
 from andarilho_worker.geometry.layout import Finding, floor_supports, validate_layout
-from andarilho_worker.geometry.ply import MAX_HEADER_BYTES
 from andarilho_worker.geometry.polygon import point_in_polygon
 
 BOUNDS_TOLERANCE = 1e-3
 SPAWN_FLOOR_TOLERANCE = 0.1
+# Leading bytes read from a poster to check its image magic.
+MAX_HEADER_BYTES = 64 * 1024
 # The textured model: a layout has hundreds of triangles, so these leave wide headroom
 # while keeping a phone's GPU memory bounded (README section 11).
 MAX_RENDER_TRIANGLES = 200_000

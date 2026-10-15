@@ -1,43 +1,37 @@
 """Up direction, floor, estimated scale and spawn from the camera path (README section 9).
 
-COLMAP leaves scale arbitrary, and Nerfstudio's ``up`` orientation assumes the
-cameras were held level on average. A phone filming a walkthrough points down,
-which tilts that axis (about 10 degrees on the first real capture). The camera
-of a walking person stays above one floor, so this module:
+COLMAP leaves scale arbitrary, and its up axis arbitrary too. A phone filming a
+walkthrough points down, which tilts the level of the room (about 10 degrees on the
+first real capture). The camera of a walking person stays above one floor, so this
+module:
 
-* takes the up direction from the normal of the dominant plane under the camera
-  path (RANSAC over the splats near it) when that plane lies within
-  ``MAX_TILT_DEGREES`` of the trainer's up and every camera is above it;
+* takes the up direction from the camera poses (the phone's right axis stays level
+  while it is panned or pitched) and levels the sparse points with it;
+* takes the floor from the dominant plane under the camera path (RANSAC over the
+  points near it) when that plane lies within ``MAX_TILT_DEGREES`` of the levelled
+  up and every camera is above it;
 * sets the scale so the median camera height above that floor is
   ``CAMERA_HEIGHT_METERS``. This is an estimate: ``scaleStatus`` stays
   ``estimated`` until the user measures a known distance;
 * puts the spawn where the walk started, on the floor, facing the way the first
   camera faced, and proposes a floor around the camera path.
 
-Without a credible plane it keeps the trainer's up, assumes the floor one typical
-splat distance below the lowest camera, and says so in ``warnings``.
+Without a credible plane it keeps the levelled up, assumes the floor one typical
+point distance below the lowest camera, and says so in ``warnings``.
 
-Frames: the camera poses are COLMAP world-from-camera centres and viewing
-directions. ``colmap_to_export`` applies Nerfstudio's COLMAP world swap, its
-dataparser transform and scale, and the normalizing stage's recentering, which is
-the frame of the splats the viewer decodes. The returned matrix maps that frame to
-the canonical world (+Y up, nominal meters) as a proper rotation, a positive
-uniform scale and a translation.
-
-``frame_from_sparse`` serves the textured-layout pipeline, which has no splats: it
-starts from COLMAP's own frame (arbitrary up, arbitrary scale) and takes the up
-direction from the camera poses (the phone's right axis stays level while it is
-panned or pitched; on a straight walk the cross product of right and walk gives
-it). It then levels the sparse points, turns the walls onto the X and Z axes (the
-dominant wall direction, from nearest-neighbour pairs or the camera headings) and
-hands the result to ``estimate_frame``. Its matrix maps raw COLMAP world coordinates
-to the canonical world (worldFromColmap).
+Frames: the poses are COLMAP's world-to-camera quaternions and translations; the
+camera centres and viewing directions are derived from them. ``frame_from_sparse``
+is the entry point. It starts from COLMAP's own frame (arbitrary up, arbitrary
+scale), turns the walls onto the X and Z axes (the dominant wall direction, from
+nearest-neighbour pairs or the camera headings) and hands the result to
+``estimate_frame``. Its matrix maps raw COLMAP world coordinates to the canonical
+world (worldFromColmap).
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,8 +45,8 @@ PATH_MARGIN_METERS = 0.75  # proposed floor around the camera path
 MIN_ROOM_HEIGHT, MAX_ROOM_HEIGHT = 2.2, 4.0
 RANSAC_ITERATIONS = 2000
 RANSAC_SAMPLE = 200_000
-NEAR_PATH = 2.5  # splats within this many typical distances of a camera are candidates
-INLIER_DISTANCE = 0.02  # plane inliers, in typical splat-to-camera distances
+NEAR_PATH = 2.5  # points within this many typical distances of a camera are candidates
+INLIER_DISTANCE = 0.02  # plane inliers, in typical point-to-camera distances
 MIN_CLEARANCE = 0.2  # every camera at least this far above the floor, same unit
 MIN_INLIERS = 200
 REFINE_ITERATIONS = 5
@@ -89,7 +83,7 @@ SPARSE_WALK_RESULTANT = 0.5
 HEADING_BINS = 90  # one-degree bins over a 90-degree wall period
 HEADING_SMOOTH = 3  # the histogram peak is smoothed over +/- this many bins
 
-# Nerfstudio Z up -> Andarilho Y up: (x, y, z) -> (x, z, -y)
+# Z up -> Y up: (x, y, z) -> (x, z, -y)
 Z_UP_TO_Y_UP = np.array([[1.0, 0, 0], [0, 0, 1.0], [0, -1.0, 0]])
 
 
@@ -99,32 +93,6 @@ class CameraPath:
 
     centers: np.ndarray  # (n, 3)
     forwards: np.ndarray  # (n, 3)
-
-    @classmethod
-    def from_record(cls, cameras: Sequence[Mapping[str, Any]]) -> CameraPath:
-        ordered = sorted(cameras, key=lambda c: str(c["name"]))
-        return cls(
-            np.array([c["center"] for c in ordered], dtype=np.float64).reshape(-1, 3),
-            np.array([c["forward"] for c in ordered], dtype=np.float64).reshape(-1, 3),
-        )
-
-
-def colmap_to_export(
-    points: np.ndarray,
-    transform: Sequence[Sequence[float]],
-    scale: float,
-    center: Sequence[float],
-    *,
-    directions: bool = False,
-) -> np.ndarray:
-    """COLMAP world -> the recentered export frame (directions skip translation and scale)."""
-    p = np.asarray(points, dtype=np.float64).reshape(-1, 3)
-    p = np.column_stack([p[:, 0], p[:, 2], -p[:, 1]])  # Nerfstudio's COLMAP world swap
-    t = np.asarray(transform, dtype=np.float64)
-    if directions:
-        out = p @ t[:, :3].T
-        return out / np.maximum(np.linalg.norm(out, axis=1, keepdims=True), 1e-12)
-    return (p @ t[:, :3].T + t[:, 3]) * float(scale) - np.asarray(center, dtype=np.float64)
 
 
 def rotation_to_z(normal: np.ndarray) -> np.ndarray:
@@ -212,13 +180,12 @@ def nearest_distance(points: np.ndarray, targets: np.ndarray, chunk: int = 16_38
 @dataclass(frozen=True)
 class FrameEstimate:
     # Column-major 4x4 similarity mapping the input frame to the canonical world (+Y up,
-    # metres, floor at y = 0): worldFromDecodedRender for splats, worldFromColmap for
-    # sparse points.
+    # metres, floor at y = 0): worldFromColmap for sparse points.
     matrix: list[float]
     meters_per_unit: float
-    method: str  # "floor_plane" or "trainer_up"
-    # Angle from the input's up to the floor normal. Splats: the trainer's up. Sparse
-    # points: the camera-derived up, since the points are levelled before the floor fit.
+    method: str  # "floor_plane" or "trainer_up" (no floor found; the input's up is kept)
+    # Angle from the input's up to the floor normal: the camera-derived up for sparse
+    # points, since they are levelled before the floor fit.
     tilt_degrees: float
     floor_inliers: int
     spawn_feet: list[float]
@@ -261,7 +228,7 @@ def estimate_frame(
     seed: int = 0,
     min_inliers_fraction: float | None = None,
 ) -> FrameEstimate:
-    """Estimate the canonical frame from export-frame splat positions and the camera path.
+    """Estimate the canonical frame from points and a camera path in a Z-up frame.
 
     ``min_inliers_fraction`` asks the floor to be supported by that share of the points
     near the path (at least 20); ``None`` keeps ``MIN_INLIERS``.
@@ -340,12 +307,12 @@ def frame_from_sparse(
     Raw COLMAP world coordinates map to +Y up, metres, a floor at y = 0 and the
     proposed floor's centre (XZ) at the origin. The matrix is a proper rotation, a
     positive uniform scale and a translation. The cameras are taken in walk order
-    (sorted by name, as ``CameraPath.from_record`` does), so the first one sets the
+    (sorted by name, the order of the extracted frames), so the first one sets the
     spawn. Raises ``ValueError`` without cameras or points.
     """
     if len(images) == 0:
         raise ValueError("no cameras")
-    xyz = _reliable_points(points)
+    xyz = reliable_points(points)
     if len(xyz) == 0:
         raise ValueError("no sparse points")
     walk = sorted(images, key=lambda image: image.name)
@@ -390,8 +357,8 @@ def frame_from_sparse(
     )
 
 
-def _reliable_points(points: SparsePoints) -> np.ndarray:
-    """The sparse points worth trusting: a real track and a small reprojection error.
+def reliable_points(points: SparsePoints) -> np.ndarray:
+    """The XYZ of the sparse points worth trusting: a real track and a small reprojection error.
 
     When fewer than SPARSE_MIN_POINTS pass, the fallback keeps every point under
     SPARSE_FALLBACK_ERROR_PX (4 px) and drops the track requirement. When fewer than

@@ -160,7 +160,8 @@ def run(ctx: StageContext) -> StageResult:
         )
     except ProcessFailed as exc:
         raise TransientError() from exc
-    # Nerfstudio's colmap dataparser expects images/ and sparse/0/.
+    # The dataset keeps images/ for texturing and sparse/0/ for normalizing, which reads
+    # the poses and points out of the archive without extracting the frames.
     dataset_sparse = undistorted / "sparse" / "0"
     dataset_sparse.mkdir(parents=True, exist_ok=True)
     for item in list((undistorted / "sparse").iterdir()):
@@ -173,7 +174,7 @@ def run(ctx: StageContext) -> StageResult:
         tar.add(undistorted / "sparse", arcname="sparse")
     dataset_key = ctx.attempt_key("dataset.tar")
     ctx.store.put_file(dataset_key, tar_path, "application/x-tar")
-    # The camera path (in COLMAP's frame) places the floor, up and spawn later on.
+    # The camera path in COLMAP's frame, recorded with the run's other artifacts.
     cameras = read_camera_poses(dataset_sparse / "images.bin")
     cameras_key = ctx.attempt_key("cameras.json")
     ctx.store.put_bytes(

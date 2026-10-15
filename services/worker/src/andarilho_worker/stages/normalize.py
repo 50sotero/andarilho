@@ -1,62 +1,47 @@
-"""``normalizing``: clean and recenter the exported splats; produce the render asset.
+"""``normalizing``: the canonical frame from COLMAP's camera poses and sparse points.
 
-Transform chain (README section 9): the exported PLY is in Nerfstudio's
-dataparser frame (Z up, poses scaled into a unit cube). Recentering is *baked*
-into the splat positions (a pure translation needs no orientation/covariance/SH
-update). The rest is recorded as ``worldFromDecodedRender`` (column major,
-``THREE.Matrix4.fromArray`` compatible) and applied by the viewer at runtime: a
-proper rotation that levels the floor found under the camera path and turns Z up
-into Y up, a uniform scale that puts the cameras at a walking person's height
-(nominal meters), and a translation that puts that floor at y = 0
-(``geometry.frame``). Scale is ``estimated`` until a user measurement exists.
-Runs without a recorded camera path keep the plain Z-up -> Y-up rotation.
+Transform chain (README section 9): COLMAP's sparse model has its own world, with an
+arbitrary up and scale. ``frame.frame_from_sparse`` levels it so that +Y is up, turns the
+walls onto the X and Z axes, scales it so the cameras sit at a walking person's height
+(1.5 m, an estimate until the user measures a distance) and puts the floor at y = 0.
+The result is recorded as ``worldFromColmap`` (column major,
+``THREE.Matrix4.fromArray`` compatible). Points and poses are never rewritten: the
+texturing and viewer stages apply the matrix when they need the canonical world.
+Scale is ``estimated`` until a user measurement exists.
 
-The synthetic recipe instead renders a splat cloud directly in the canonical
-world frame from the bundled synthetic layout, so its matrix is identity.
+The stage streams the ``sparse/`` members of ``dataset.tar`` (the frames under
+``images/`` are never extracted) and writes ``evidence.json``: the reliable sparse
+points and the camera centres, in the canonical world, for the review editor to draw
+under the walls.
+
+The synthetic recipe has no capture. Its scene is the bundled two-room layout, already
+in the canonical world, so it writes no files and records no frame.
 """
 
 from __future__ import annotations
 
 import json
-import time
+import tarfile
 from importlib import resources
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from andarilho_worker.artifacts import MAX_RENDER_BYTES
 from andarilho_worker.errors import StageError
-from andarilho_worker.geometry.frame import (
-    CameraPath,
-    FrameEstimate,
-    colmap_to_export,
-    estimate_frame,
+from andarilho_worker.geometry.colmap import (
+    ColmapImage,
+    SparsePoints,
+    read_images_bin,
+    read_points3d_full,
 )
-from andarilho_worker.geometry.ply import (
-    CleanedPly,
-    PlyError,
-    clean_splat_ply_file,
-    write_splat_ply,
-)
-from andarilho_worker.geometry.synthetic import synthetic_splats
-from andarilho_worker.manifest import IDENTITY_MATRIX
-from andarilho_worker.recipes import render_argv
-from andarilho_worker.runner import ProcessFailed, ProcessTimeout, tool_available
+from andarilho_worker.geometry.frame import FrameEstimate, frame_from_sparse, reliable_points
 from andarilho_worker.stages.base import StageContext, StageResult, finish
 
-# Nerfstudio/COLMAP Z-up decoded frame -> Andarilho world (+Y up): (x, y, z) -> (x, z, -y)
-Z_UP_TO_Y_UP = [1.0, 0, 0, 0, 0, 0, -1.0, 0, 0, 1.0, 0, 0, 0, 0, 0, 1.0]
-MIN_SPLATS = 1000
-BOUNDS_SAMPLE = 2_000_000
-# SOG compression on the CPU (splat-transform's k-means, one core) is slow for the
-# higher spherical-harmonic bands, which the recipe drops first (renderShDegree). It
-# gets at most this long, and half the stage's remaining time, before the scene falls
-# back to its PLY.
-SOG_MAX_SECONDS = 900
-# Splatfacto's default; a recipe without renderShDegree keeps every band.
-TRAINED_SH_DEGREE = 3
-# Only confident splats place the floor: translucent ones are mostly floaters.
-FLOOR_MIN_OPACITY = 0.8
+# The evidence is drawn by the editor, which only needs the shape of the capture.
+EVIDENCE_POINTS = 5000
+EVIDENCE_DECIMALS = 3  # millimetres
+EVIDENCE_SCHEMA_VERSION = 1
 
 
 def synthetic_layout() -> dict[str, Any]:
@@ -70,139 +55,102 @@ def apply_matrix(m: list[float], points: np.ndarray) -> np.ndarray:
     return (homo @ mat.T)[:, :3]
 
 
-def camera_frame(ctx: StageContext, cleaned: CleanedPly) -> FrameEstimate | None:
-    """The canonical frame from the recorded camera path, or None for older runs."""
-    outputs = ctx.outputs()
-    if not outputs.get("camerasKey") or not outputs.get("dataparserTransformsKey"):
-        return None
-    record = json.loads(ctx.store.get_bytes(str(outputs["camerasKey"])))
-    dataparser = json.loads(ctx.store.get_bytes(str(outputs["dataparserTransformsKey"])))
+def _extract_sparse(ctx: StageContext, dataset_key: str) -> Path:
+    """Stream the dataset archive to scratch and extract only its ``sparse/`` members.
+
+    The archive can hold hundreds of megabytes of frames, which normalizing never needs.
+    The archive is removed once its model is out, so scratch use stays bounded.
+    """
+    if ctx.store.head(dataset_key) is None:
+        raise StageError("MISSING_INPUT", details={"missing": "dataset"})
+    archive = ctx.scratch / "dataset.tar"
+    ctx.store.download(dataset_key, archive)
+    work = ctx.scratch / "normalize"
+    work.mkdir(parents=True, exist_ok=True)
     try:
-        path = CameraPath.from_record(record["cameras"])
-        transform, scale = dataparser["transform"], float(dataparser["scale"])
-        exported = CameraPath(
-            colmap_to_export(path.centers, transform, scale, cleaned.center),
-            colmap_to_export(path.forwards, transform, scale, cleaned.center, directions=True),
-        )
-    except (KeyError, TypeError, ValueError) as exc:
-        raise StageError("EXPORT_INVALID", "The camera path could not be read.") from exc
-    if len(exported.centers) == 0 or not (scale > 0 and np.isfinite(exported.centers).all()):
-        raise StageError("EXPORT_INVALID", "The camera path could not be read.")
-    opaque = cleaned.positions[cleaned.opacity > FLOOR_MIN_OPACITY]
-    if len(opaque) < MIN_SPLATS:
-        opaque = cleaned.positions
-    return estimate_frame(opaque, exported, seed=int(ctx.params.get("seed", 0)))
+        with tarfile.open(archive) as tar:
+            members = [m for m in tar.getmembers() if m.isfile() and m.name.startswith("sparse/")]
+            tar.extractall(work, members=members, filter="data")
+    except (tarfile.TarError, EOFError) as exc:
+        raise StageError("CAMERA_REGISTRATION_FAILED") from exc
+    finally:
+        archive.unlink(missing_ok=True)
+    return work / "sparse" / "0"
+
+
+def _read_model(model: Path) -> tuple[list[ColmapImage], SparsePoints]:
+    try:
+        images = read_images_bin(model / "images.bin")
+        points = read_points3d_full(model / "points3D.bin")
+    except (OSError, ValueError) as exc:
+        raise StageError("CAMERA_REGISTRATION_FAILED") from exc
+    return images, points
+
+
+def _rounded(values: np.ndarray) -> list[list[float]]:
+    return np.round(values, EVIDENCE_DECIMALS).tolist()
+
+
+def capture_evidence(
+    frame: FrameEstimate, images: list[ColmapImage], points: SparsePoints, *, seed: int
+) -> tuple[bytes, int]:
+    """``evidence.json`` for the review editor, and the number of points it holds.
+
+    Points and camera centres are in the canonical world, in metres. The points are a
+    seeded subsample of the reliable ones, sorted back into their original order.
+    """
+    xyz = reliable_points(points)
+    if len(xyz) > EVIDENCE_POINTS:
+        chosen = np.random.default_rng(seed).choice(len(xyz), EVIDENCE_POINTS, replace=False)
+        xyz = xyz[np.sort(chosen)]
+    walk = sorted(images, key=lambda image: image.name)
+    centres = np.array([image.center() for image in walk], dtype=np.float64).reshape(-1, 3)
+    evidence = {
+        "schemaVersion": EVIDENCE_SCHEMA_VERSION,
+        "units": "m",
+        "points": _rounded(apply_matrix(frame.matrix, xyz)),
+        "cameras": _rounded(apply_matrix(frame.matrix, centres)),
+    }
+    blob = json.dumps(evidence, separators=(",", ":"), allow_nan=False).encode()
+    return blob, len(xyz)
 
 
 def run(ctx: StageContext) -> StageResult:
     if ctx.outputs().get("quality") == "synthetic":
-        blob = write_splat_ply(
-            synthetic_splats(synthetic_layout()), comments=["andarilho synthetic"]
-        )
-        key = ctx.attempt_key("scene.ply")
-        ctx.store.put_bytes(key, blob, "application/octet-stream")
         return finish(
             ctx,
-            {"splats": "synthetic", "bytes": len(blob)},
-            outputs={
-                "renderKey": key,
-                "renderFormat": "ply",
-                "worldFromDecodedRender": IDENTITY_MATRIX,
-                "scaleStatus": "user_measured",
-                "proposalBounds": None,
-            },
+            {"synthetic": True},
+            outputs={"scaleStatus": "user_measured", "proposalBounds": None},
         )
-    ply_key = str(ctx.output("plyKey"))
-    exported = ctx.store.head(ply_key)
-    if exported is None:
-        raise StageError("MISSING_INPUT", details={"missing": "exported splats"})
-    if exported.size > MAX_RENDER_BYTES:
-        raise StageError("BUDGET_EXHAUSTED", "The exported scene is too large to package.")
-    export = ctx.scratch / "export.ply"
-    # Streamed to scratch and cleaned chunk by chunk: exports can be several GiB.
-    ctx.store.download(ply_key, export)
-    work = ctx.scratch / "normalize"
-    work.mkdir(parents=True, exist_ok=True)
-    ply_path = work / "normalized.ply"
-    try:
-        cleaned = clean_splat_ply_file(
-            export, ply_path, comments=["andarilho normalized (recentered)"]
-        )
-    except PlyError as exc:
-        raise StageError("EXPORT_INVALID") from exc
-    export.unlink()  # the archive below replaces it; keep scratch use bounded
-    if cleaned.count < MIN_SPLATS:
-        raise StageError("EXPORT_INVALID", "Too few valid splats were produced.")
-    archive_key = ctx.attempt_key("normalized.ply")
-    ctx.store.put_file(archive_key, ply_path, "application/octet-stream")
-    render_key, render_format = archive_key, "ply"
-    compression: dict[str, Any] = {"format": "ply", "reason": "no compressor"}
-    if tool_available("splat-transform"):
-        sog_path = work / "scene.sog"
-        sh_degree = int(ctx.params.get("renderShDegree", TRAINED_SH_DEGREE))
-        budget = min(SOG_MAX_SECONDS, ctx.remaining_seconds() / 2)
-        started = time.monotonic()
-        try:
-            ctx.progress("Compressing the render asset.")
-            argv = render_argv(
-                "splat_transform", input=ply_path, sh_degree=sh_degree, output=sog_path
-            )
-            ctx.run(argv, timeout=budget)
-            render_key, render_format = ctx.attempt_key("scene.sog"), "sog"
-            ctx.store.put_file(render_key, sog_path, "application/octet-stream")
-            compression = {
-                "format": "sog",
-                "bytes": sog_path.stat().st_size,
-                "shDegree": sh_degree,
-            }
-        except (ProcessFailed, ProcessTimeout) as exc:
-            # Keep the PLY: larger to deliver, but a slow or failed compression never
-            # costs the user their reconstruction.
-            reason = "timeout" if isinstance(exc, ProcessTimeout) else "failed"
-            compression = {"format": "ply", "reason": reason}
-        compression["seconds"] = round(time.monotonic() - started, 1)
+    ctx.progress("Reading the camera poses and sparse points.")
+    model = _extract_sparse(ctx, str(ctx.output("datasetKey")))
+    images, points = _read_model(model)
+    seed = int(ctx.params.get("seed", 0))
     ctx.progress("Finding the floor and the walking height.")
-    frame = camera_frame(ctx, cleaned)
+    try:
+        frame = frame_from_sparse(points, images, seed=seed)
+    except ValueError as exc:
+        raise StageError("CAMERA_REGISTRATION_FAILED") from exc
+    blob, evidence_points = capture_evidence(frame, images, points, seed=seed)
+    evidence_key = ctx.attempt_key("evidence.json")
+    ctx.store.put_bytes(evidence_key, blob, "application/json")
     result: dict[str, Any] = {
-        "splats": cleaned.count,
-        "dropped": cleaned.dropped,
-        "recenteredBy": cleaned.center,
-        "compression": compression,
+        "frame": frame.summary(),
+        "sparsePoints": int(len(points.xyz)),
+        "cameras": len(images),
+        "evidencePoints": evidence_points,
     }
     outputs: dict[str, Any] = {
-        "renderKey": render_key,
-        "renderFormat": render_format,
-        "archivePlyKey": archive_key,
+        "worldFromColmap": frame.matrix,
         "scaleStatus": "estimated",
-    }
-    if frame is not None:
-        result["frame"] = frame.summary()
-        outputs |= {
-            "worldFromDecodedRender": frame.matrix,
-            "proposalBounds": {
-                "minXZ": frame.min_xz,
-                "maxXZ": frame.max_xz,
-                "floorY": 0.0,
-                "height": frame.height,
-            },
-            "proposalSpawn": {"feet": frame.spawn_feet, "yawRadians": frame.spawn_yaw},
-            "frameWarnings": frame.warnings,
-        }
-        return finish(ctx, result, outputs=outputs)
-    # Percentile bounds from an evenly strided sample keep this step small for huge clouds.
-    sample = cleaned.positions[:: max(1, cleaned.count // BOUNDS_SAMPLE)]
-    world = apply_matrix(Z_UP_TO_Y_UP, sample)
-    lo = np.percentile(world, 5, axis=0)
-    hi = np.percentile(world, 95, axis=0)
-    floor_y = float(np.percentile(world[:, 1], 2))
-    ceiling = float(np.percentile(world[:, 1], 98))
-    outputs |= {
-        "worldFromDecodedRender": Z_UP_TO_Y_UP,
         "proposalBounds": {
-            "minXZ": [float(lo[0]), float(lo[2])],
-            "maxXZ": [float(hi[0]), float(hi[2])],
-            "floorY": floor_y,
-            "height": max(2.2, min(4.0, ceiling - floor_y)),
+            "minXZ": frame.min_xz,
+            "maxXZ": frame.max_xz,
+            "floorY": 0.0,
+            "height": frame.height,
         },
+        "proposalSpawn": {"feet": frame.spawn_feet, "yawRadians": frame.spawn_yaw},
+        "frameWarnings": frame.warnings,
+        "evidenceKey": evidence_key,
     }
     return finish(ctx, result, outputs=outputs)

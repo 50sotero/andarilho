@@ -64,14 +64,6 @@ CATALOG: dict[str, tuple[str, str]] = {
         "The packaged scene did not pass validation.",
         "Adjust the layout so the spawn point is clear and on a floor, then save again.",
     ),
-    "TRAINING_FAILED": (
-        "The visual representation could not be trained.",
-        "Retry later or record the place again.",
-    ),
-    "EXPORT_INVALID": (
-        "The exported scene was incomplete.",
-        "Retry the run.",
-    ),
     "ARTIFACT_CONFLICT": (
         "A scene file already exists with different content.",
         "Retry the run to create a new revision.",

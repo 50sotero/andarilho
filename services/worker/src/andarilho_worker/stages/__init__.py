@@ -12,7 +12,6 @@ from andarilho_worker.stages import (
     prepare,
     propose_geometry,
     reconstruct,
-    train,
     validate,
     validate_scene,
 )
@@ -22,7 +21,6 @@ STAGES: dict[str, Stage] = {
     "validating": validate.run,
     "preparing": prepare.run,
     "camera_reconstruction": reconstruct.run,
-    "training": train.run,
     "normalizing": normalize.run,
     "geometry_proposal": propose_geometry.run,
     "packaging": package_scene.run,
