@@ -20,6 +20,7 @@ import type { IntakePolicy, MediaKind, RunQuality, Upload } from "@/lib/api/type
 import { loadResumeRecord, pruneResumeRecords, removeResumeRecord } from "@/lib/upload-resume";
 import { usePolling } from "@/lib/use-polling";
 import { CaptureGuidance } from "./CaptureGuidance";
+import { SceneAnalysisNotice, sceneAnalysisNoticeShown } from "./SceneAnalysisNotice";
 import {
   ACCEPT,
   DEFAULT_INTAKE_POLICY,
@@ -541,6 +542,11 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
             </p>
           </div>
         </div>
+
+        {/* The variable is named literally here so that Next.js can inline it into the bundle. */}
+        <SceneAnalysisNotice
+          shown={sceneAnalysisNoticeShown(process.env.NEXT_PUBLIC_AI_SCENE_ANALYSIS)}
+        />
 
         <div aria-live="polite" className="mt-4 space-y-2 text-sm">
           {candidates.length > 0 ? (

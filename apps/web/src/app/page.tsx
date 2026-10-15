@@ -13,8 +13,8 @@ const STEPS: readonly [string, string][] = [
     "The video's camera path places the rooms, and the walls, floor and ceiling are coloured from its frames. If a capture cannot be connected, you get a clear reason and a suggested fix.",
   ],
   [
-    "Review",
-    "Confirm scale and orientation, and trace the walkable floor, walls, doors and obstacles.",
+    "Adjust (optional)",
+    "We place rooms, doors and furniture automatically; adjust anything you like afterwards.",
   ],
   [
     "Walk",

@@ -177,14 +177,14 @@ export function ProjectDetails({ projectId }: { projectId: string }) {
           <h2 className="text-lg font-semibold">Scene</h2>
           {detail.scene ? (
             <div className="mt-2 flex flex-wrap gap-2">
-              {canEdit ? (
-                <Link href={`${base}/review`} className={linkButtonClass}>
-                  Review layout
-                </Link>
-              ) : null}
-              <Link href={`${base}/view`} className={linkButtonClass}>
+              <Link href={`${base}/view`} className={primaryLinkClass}>
                 Walk privately
               </Link>
+              {canEdit ? (
+                <Link href={`${base}/review`} className={linkButtonClass}>
+                  Adjust layout
+                </Link>
+              ) : null}
             </div>
           ) : (
             <p className="mt-1 text-sm">A scene appears after processing succeeds.</p>

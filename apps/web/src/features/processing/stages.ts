@@ -6,6 +6,7 @@ export const STAGES = [
   { id: "preparing", label: "Preparing frames" },
   { id: "camera_reconstruction", label: "Recovering camera positions" },
   { id: "normalizing", label: "Finding the floor and walls" },
+  { id: "scene_analysis", label: "Recognising rooms, doors and furniture" },
   { id: "geometry_proposal", label: "Proposing walkable geometry" },
   { id: "texturing", label: "Texturing the model from the video" },
   { id: "packaging", label: "Packaging the scene" },
@@ -95,13 +96,17 @@ export interface RunActions {
   cancel: boolean;
   retry: boolean;
   newCapture: boolean;
+  /** Walk the finished scene (the primary action). */
+  walk: boolean;
+  /** Adjust the automatic layout (secondary). */
   review: boolean;
 }
 
 /**
  * The run controls to show a member. Cancelling, retrying, uploading a new capture
- * and reviewing all need owner or editor rights (the API answers 403 otherwise), so
- * read-only members follow progress without actions that would be refused.
+ * and adjusting the layout all need owner or editor rights (the API answers 403
+ * otherwise), so read-only members follow progress without actions that would be
+ * refused. A finished scene is walkable as it is, so walking it is offered first.
  */
 export function runActions(
   run: Pick<Run, "status" | "error" | "cancelRequested">,
@@ -112,6 +117,7 @@ export function runActions(
     cancel: canEdit && !isTerminalRun(run.status) && !run.cancelRequested,
     retry: canEdit && canRetryRun(run),
     newCapture: canEdit && run.status === "failed",
+    walk: canEdit && run.status === "succeeded",
     review: canEdit && run.status === "succeeded",
   };
 }
