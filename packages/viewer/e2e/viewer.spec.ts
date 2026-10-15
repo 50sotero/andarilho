@@ -130,6 +130,62 @@ test("ignores movement keys after leaving walk mode", async ({ page }) => {
   expect(horizontalDistance((await settledFeet(page))!, before)).toBeLessThan(0.01);
 });
 
+test("draws the textured model, not a blank canvas", async ({ page }) => {
+  // Two animation frames after "ready": the frame loop has drawn the scene at least once.
+  await page.evaluate(
+    () =>
+      new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))),
+  );
+  // The element screenshot includes whatever sits over the canvas, and the dev page's hint
+  // text would count as variance on a blank frame, so it is hidden for the capture.
+  await page.locator("#hint").evaluate((hint: HTMLElement) => {
+    hint.style.display = "none";
+  });
+  const png = await page.locator("#stage canvas").screenshot();
+  const stats = await page.evaluate(
+    async (dataUrl) => {
+      // Decoded in the browser, so no PNG library is needed; pixels are sampled on a grid.
+      const image = new Image();
+      image.src = dataUrl;
+      await image.decode();
+      const surface = document.createElement("canvas");
+      surface.width = image.naturalWidth;
+      surface.height = image.naturalHeight;
+      const context = surface.getContext("2d", { willReadFrequently: true })!;
+      context.drawImage(image, 0, 0);
+      const { data, width, height } = context.getImageData(0, 0, surface.width, surface.height);
+      let samples = 0;
+      let sum = 0;
+      let sumSquares = 0;
+      let clear = 0;
+      for (let y = 0; y < height; y += 5) {
+        for (let x = 0; x < width; x += 5) {
+          const i = (y * width + x) * 4;
+          const r = data[i]!;
+          const g = data[i + 1]!;
+          const b = data[i + 2]!;
+          const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          samples += 1;
+          sum += luminance;
+          sumSquares += luminance * luminance;
+          // The renderer clears to black, so a frame that drew nothing is all clear pixels.
+          if (Math.max(r, g, b) <= 2) clear += 1;
+        }
+      }
+      const mean = sum / samples;
+      return {
+        luminanceStdDev: Math.sqrt(sumSquares / samples - mean * mean),
+        clearFraction: clear / samples,
+      };
+    },
+    `data:image/png;base64,${png.toString("base64")}`,
+  );
+  // A textured frame varies across its pixels and has no clear ones; a blank frame has
+  // no variance and only clear (black) pixels.
+  expect(stats.luminanceStdDev).toBeGreaterThan(10);
+  expect(stats.clearFraction).toBeLessThan(0.5);
+});
+
 test("builds walkable collision from the layout in the browser", async ({ page }) => {
   await page.locator("#collision").selectOption("layout");
   await expect(page.locator("#status")).toContainText("ready (walkable");

@@ -1,12 +1,4 @@
 import type { DeliveryEnvelope, Layout, SceneManifest } from "@andarilho/scene-contract";
-import { decomposeRenderTransform } from "./render/transform";
-import type { RenderFormat } from "./render/spark-scene";
-
-/**
- * Render formats the viewer can draw: splat files (drawn by Spark) or a textured
- * GLB (drawn by three.js). The generated contract only lists the splat formats.
- */
-export type ViewerRenderFormat = RenderFormat | "glb";
 
 /**
  * Viewer-side checks of the persistent manifest and the short-lived delivery
@@ -15,12 +7,32 @@ export type ViewerRenderFormat = RenderFormat | "glb";
  * movement (non-finite numbers, wrong frames, mismatched revisions).
  */
 
+/** The render format the viewer draws: the textured layout model, a binary glTF. */
+export type ViewerRenderFormat = SceneManifest["assets"]["render"]["format"];
+
+/** Shown to the viewer of a scene made before manifest 2.0 (the textured model). */
+export const OUTDATED_SCENE_MESSAGE =
+  "This scene was made by an older version of Andarilho. Process the capture again to view it.";
+
+/**
+ * A manifest with schemaVersion 1.0, written before the textured model. Its render
+ * asset cannot be drawn, and the fix is to process the capture again, so the message
+ * is user-facing rather than a list of validation issues.
+ */
+export class OutdatedSceneError extends Error {
+  constructor() {
+    super(OUTDATED_SCENE_MESSAGE);
+    this.name = "OutdatedSceneError";
+  }
+}
+
 /** Viewer input: a validated delivery envelope, or explicit URLs in dev/fixture mode. */
 export type ViewerSource =
   | { kind: "delivery"; envelope: DeliveryEnvelope }
   | {
       kind: "urls";
       manifest: SceneManifest;
+      /** The textured GLB (the scene's render asset). */
       renderUrl: string;
       /** World-space collision GLB URL. */
       collisionUrl?: string | null;
@@ -49,16 +61,15 @@ const finiteTuple = (v: unknown, n: number): boolean =>
 export function sceneManifestIssues(manifest: SceneManifest): string[] {
   const issues: string[] = [];
   if (!manifest || typeof manifest !== "object") return ["manifest is missing"];
-  if (manifest.schemaVersion !== "1.0") issues.push("unsupported manifest schemaVersion");
+  // Read as unknown: the contract type admits only "2.0", but a manifest is untrusted input.
+  const schemaVersion: unknown = manifest.schemaVersion;
+  if (schemaVersion !== "2.0") issues.push("unsupported manifest schemaVersion");
+  if (manifest.renderMode !== "mesh") issues.push("renderMode must be mesh");
+  if (manifest.assets?.render?.format !== "glb") issues.push("render asset must be a GLB");
   if (manifest.units !== "m") issues.push("units must be meters");
   if (manifest.upAxis !== "+Y") issues.push("upAxis must be +Y");
   if (manifest.cameraForward !== "-Z") issues.push("cameraForward must be -Z");
   if (manifest.geometrySpace !== "world") issues.push("geometrySpace must be world");
-  try {
-    decomposeRenderTransform(manifest.worldFromDecodedRender);
-  } catch (error) {
-    issues.push(error instanceof Error ? error.message : "invalid worldFromDecodedRender");
-  }
   const b = manifest.bounds;
   if (!b || !finiteTuple(b.min, 3) || !finiteTuple(b.max, 3)) {
     issues.push("bounds must be finite");
@@ -125,6 +136,10 @@ export class ViewerInputError extends Error {
 
 /** Validates the source and normalizes it into the URLs the engine loads. */
 export function resolveViewerSource(source: ViewerSource, nowMs = Date.now()): ResolvedSource {
+  // Checked first: an outdated manifest has no fields this viewer can validate.
+  const manifest = source.kind === "delivery" ? source.envelope?.manifest : source.manifest;
+  const schemaVersion: unknown = manifest?.schemaVersion;
+  if (schemaVersion === "1.0") throw new OutdatedSceneError();
   if (source.kind === "delivery") {
     const issues = deliveryEnvelopeIssues(source.envelope, nowMs);
     if (issues.length > 0) throw new ViewerInputError(issues);
@@ -149,7 +164,7 @@ export function resolveViewerSource(source: ViewerSource, nowMs = Date.now()): R
   return {
     manifest: source.manifest,
     renderUrl: source.renderUrl,
-    renderFormat: source.manifest.assets?.render?.format ?? "ply",
+    renderFormat: source.manifest.assets.render.format,
     collisionUrl: source.collisionUrl ?? null,
     collisionSha256: null,
     layout: source.layout ?? null,

@@ -9,8 +9,6 @@ const fixturesDir = fileURLToPath(new URL("../scene-contract/fixtures", import.m
 const BUNDLE_TYPES: Record<string, string> = {
   ".json": "application/json",
   ".glb": "model/gltf-binary",
-  ".ply": "application/octet-stream",
-  ".sog": "application/octet-stream",
 };
 
 /**
@@ -51,10 +49,11 @@ export default defineConfig({
       allow: [packageDir, fixturesDir],
     },
   },
-  assetsInclude: ["**/*.ply", "**/*.glb", "**/*.sog", "**/*.spz"],
+  // The textured model and the collision mesh are imported as URLs (`?url`).
+  assetsInclude: ["**/*.glb"],
   optimizeDeps: {
-    // Rapier's compat build inlines its WASM; Spark ships its own workers/WASM.
-    exclude: ["@dimforge/rapier3d-compat", "@sparkjsdev/spark"],
+    // Rapier's compat build inlines its WASM, so Vite must not pre-bundle it.
+    exclude: ["@dimforge/rapier3d-compat"],
   },
   build: {
     target: "es2022",

@@ -7,7 +7,7 @@ import { meshBounds } from "../types";
  * Collision GLBs are a product contract (README section 9): vertex positions are
  * baked in canonical world coordinates and every node transform is identity.
  * This reader validates that contract and rejects anything else instead of
- * guessing or applying the splat render transform.
+ * guessing at a transform to apply.
  */
 
 const GLB_MAGIC = 0x46546c67; // "glTF"

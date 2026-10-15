@@ -15,11 +15,10 @@ import {
 } from "three";
 
 /**
- * Textured-mesh bridge (layout texturing). A GLB whose geometry and textures
- * were baked by the worker is drawn with plain three.js, next to the Spark splat
- * bridge (spark-scene.ts); the engine picks one per render format. The scene has
- * no lights, so every material is unlit: anything that is not already a
- * MeshBasicMaterial is replaced by one that keeps its colour map.
+ * Render scene for the textured layout model. The GLB's geometry and textures
+ * were baked by the worker, so it is drawn with plain three.js in world space.
+ * The scene has no lights, so every material is unlit: anything that is not
+ * already a MeshBasicMaterial is replaced by one that keeps its colour map.
  */
 
 export interface MeshSceneOptions {

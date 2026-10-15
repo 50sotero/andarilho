@@ -2,6 +2,8 @@ import type { SceneManifest } from "@andarilho/scene-contract";
 import { PerspectiveCamera, Scene, WebGLRenderer } from "three";
 import { createCollisionOverlay, type CollisionOverlay } from "./debug/overlay";
 import {
+  OUTDATED_SCENE_MESSAGE,
+  OutdatedSceneError,
   resolveViewerSource,
   sha256Hex,
   ViewerInputError,
@@ -33,7 +35,6 @@ import {
   type QualityProfileName,
 } from "./render/quality";
 import type { MeshSceneHandle } from "./render/mesh-scene";
-import type { RenderFormat, SparkSceneHandle } from "./render/spark-scene";
 import { layoutToCollisionMesh } from "./review/floorplan";
 import type { Aabb, CollisionMesh, Vec2, Vec3 } from "./types";
 import {
@@ -70,16 +71,6 @@ export interface CollisionWorldLike {
   dispose(): void;
 }
 
-export interface CreateSparkSceneArgs {
-  renderer: RendererLike;
-  scene: Scene;
-  url: string;
-  format: RenderFormat;
-  worldFromDecodedRender: readonly number[];
-  splatBudget: number;
-  onProgress: (fraction: number | null) => void;
-}
-
 export interface CreateMeshSceneArgs {
   renderer: RendererLike;
   scene: Scene;
@@ -100,7 +91,6 @@ export interface CreateCollisionWorldArgs {
 export interface ViewerDependencies {
   isWebGL2Available(): boolean;
   createRenderer(): RendererLike;
-  createSparkScene(args: CreateSparkSceneArgs): Promise<SparkSceneHandle> | SparkSceneHandle;
   createMeshScene(args: CreateMeshSceneArgs): Promise<MeshSceneHandle> | MeshSceneHandle;
   initRapier(): Promise<RapierModule>;
   createCollisionWorld(args: CreateCollisionWorldArgs): CollisionWorldLike;
@@ -143,26 +133,12 @@ async function defaultFetchBytes(url: string, signal: AbortSignal): Promise<Arra
 }
 
 /**
- * Resolves engine dependencies. Spark, the GLTF loader and Rapier (large,
- * browser/WASM-heavy) are imported lazily; nothing touches WebGL until
- * createViewer runs.
+ * Resolves engine dependencies. The GLTF loader and Rapier (large, browser/WASM-heavy)
+ * are imported lazily; nothing touches WebGL until createViewer runs.
  */
 function resolveDependencies(partial: Partial<ViewerDependencies> | undefined): ViewerDependencies {
   return {
     isWebGL2Available: defaultIsWebGL2Available,
-    async createSparkScene(args) {
-      const { createSparkScene } = await import("./render/spark-scene");
-      return createSparkScene({
-        // The default renderer factory produces a real WebGLRenderer.
-        renderer: args.renderer as WebGLRenderer,
-        scene: args.scene,
-        url: args.url,
-        format: args.format,
-        worldFromDecodedRender: args.worldFromDecodedRender,
-        splatBudget: args.splatBudget,
-        onProgress: args.onProgress,
-      });
-    },
     async createMeshScene(args) {
       const { createMeshScene } = await import("./render/mesh-scene");
       return createMeshScene({
@@ -248,7 +224,7 @@ export interface ViewerHandle {
   getDiagnostics(): ViewerDiagnostics;
   /**
    * Stops the loop, removes listeners/observers, frees Rapier, the render scene
-   * (Spark or mesh) and WebGL, and removes the canvas.
+   * and WebGL, and removes the canvas.
    */
   dispose(): void;
 }
@@ -271,10 +247,9 @@ class DisposerStack {
 }
 
 function safeMessage(error: unknown, fallback: string): string {
+  if (error instanceof OutdatedSceneError) return OUTDATED_SCENE_MESSAGE;
   if (error instanceof ViewerInputError) return "The scene data is invalid.";
   if (error instanceof CollisionAssetError) return "The collision asset is invalid.";
-  if (error instanceof Error && error.name === "RenderTransformError")
-    return "The scene transform is invalid.";
   return fallback;
 }
 
@@ -315,7 +290,6 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
   let source: ResolvedSource | null = null;
   let player: PlayerConfig | null = null;
   let renderer: RendererLike | null = null;
-  let sparkScene: SparkSceneHandle | null = null;
   let meshScene: MeshSceneHandle | null = null;
   /**
    * Bumped by each context-loss recovery. A render load that started under an older
@@ -349,7 +323,6 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
   const release = (): void => {
     resources.disposeAll();
     world = null;
-    sparkScene = null;
     meshScene = null;
     overlay = null;
     input = null;
@@ -376,7 +349,6 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
     const profile = QUALITY_PROFILES[name];
     const dpr = typeof window !== "undefined" ? window.devicePixelRatio : 1;
     renderer?.setPixelRatio(effectivePixelRatio(dpr, profile));
-    sparkScene?.setSplatBudget(profile.splatBudget);
     meshScene?.setMaxAnisotropy(profile.maxAnisotropy);
     resize();
     dispatch({ type: "quality", quality: name });
@@ -464,57 +436,32 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
    */
   const loadRender = async (epoch: number): Promise<void> => {
     if (!deps || !source || !renderer) return;
-    const format = source.renderFormat;
     const onProgress = (fraction: number | null): void => {
       if (!isSuperseded(epoch)) {
         dispatch({ type: "progress", progress: { renderFraction: fraction } });
       }
     };
-    if (format === "glb") {
-      // The textured GLB is world-space with identity nodes (the worker's textured
-      // model), so manifest.worldFromDecodedRender is not applied to it again.
-      const mesh = await deps.createMeshScene({
-        renderer,
-        scene,
-        url: source.renderUrl,
-        maxAnisotropy: QUALITY_PROFILES[qualityName].maxAnisotropy,
-        onProgress,
-      });
-      if (isSuperseded(epoch)) {
-        mesh.dispose();
-        return;
-      }
-      meshScene = mesh;
-      resources.push(() => {
-        if (meshScene === mesh) meshScene = null;
-        mesh.dispose();
-      });
-      // A quality change made while the scene was being created did not reach it.
-      mesh.setMaxAnisotropy(QUALITY_PROFILES[qualityName].maxAnisotropy);
-      await mesh.initialized;
-      return;
-    }
-    const handle = await deps.createSparkScene({
+    // The textured GLB is already in world space with identity nodes, so it is drawn
+    // as it is; the manifest carries no transform for it.
+    const mesh = await deps.createMeshScene({
       renderer,
       scene,
       url: source.renderUrl,
-      format,
-      worldFromDecodedRender: source.manifest.worldFromDecodedRender,
-      splatBudget: QUALITY_PROFILES[qualityName].splatBudget,
+      maxAnisotropy: QUALITY_PROFILES[qualityName].maxAnisotropy,
       onProgress,
     });
     if (isSuperseded(epoch)) {
-      // Nothing awaits this scene, so its failed load is not reported as unhandled.
-      void handle.initialized.catch(() => undefined);
-      handle.dispose();
+      mesh.dispose();
       return;
     }
-    sparkScene = handle;
+    meshScene = mesh;
     resources.push(() => {
-      if (sparkScene === handle) sparkScene = null;
-      handle.dispose();
+      if (meshScene === mesh) meshScene = null;
+      mesh.dispose();
     });
-    await handle.initialized;
+    // A quality change made while the scene was being created did not reach it.
+    mesh.setMaxAnisotropy(QUALITY_PROFILES[qualityName].maxAnisotropy);
+    await mesh.initialized;
   };
 
   const loadCollisionMesh = async (): Promise<CollisionMesh | null> => {
@@ -666,7 +613,8 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
         fail({
           code: "invalid-input",
           message: safeMessage(error, "The scene data is invalid."),
-          recoverable: true,
+          // A new envelope cannot make an outdated scene drawable, so retrying is pointless.
+          recoverable: !(error instanceof OutdatedSceneError),
         });
         return;
       }
@@ -808,8 +756,6 @@ export function createViewer(options: CreateViewerOptions): ViewerHandle {
     const epoch = ++renderEpoch;
     dispatch({ type: "load-start" });
     try {
-      sparkScene?.dispose();
-      sparkScene = null;
       meshScene?.dispose();
       meshScene = null;
       await loadRender(epoch);

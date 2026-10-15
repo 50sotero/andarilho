@@ -17,7 +17,6 @@
   "dependencies": {
     "@andarilho/scene-contract": "workspace:*",
     "@dimforge/rapier3d-compat": "0.21.0",
-    "@sparkjsdev/spark": "2.3.1",
     "three": "0.180.0"
   },
   "devDependencies": {

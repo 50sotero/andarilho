@@ -3,13 +3,12 @@
  *
  * `createViewer` is browser-only (call it from a client component after mount).
  * The other exports are pure modules that are safe to import on the server and
- * in Node tests. Spark and Rapier are loaded lazily by the engine.
+ * in Node tests. The GLTF loader and Rapier are loaded lazily by the engine.
  */
 
 export {
   createViewer,
   type CreateViewerOptions,
-  type CreateSparkSceneArgs,
   type CreateMeshSceneArgs,
   type CreateCollisionWorldArgs,
   type CollisionWorldLike,
@@ -35,6 +34,8 @@ export {
 } from "./viewer-state";
 
 export {
+  OUTDATED_SCENE_MESSAGE,
+  OutdatedSceneError,
   deliveryEnvelopeIssues,
   isAllowedUrl,
   resolveViewerSource,
@@ -129,12 +130,6 @@ export {
   type QualityProfileName,
 } from "./render/quality";
 
-export {
-  decomposeRenderTransform,
-  RenderTransformError,
-  type RenderTransform,
-} from "./render/transform";
-export type { RenderFormat, SparkSceneHandle } from "./render/spark-scene";
 export type { MeshSceneHandle, MeshSceneOptions } from "./render/mesh-scene";
 
 export {

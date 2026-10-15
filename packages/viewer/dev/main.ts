@@ -12,7 +12,7 @@ import type { Layout, SceneManifest } from "@andarilho/scene-contract";
 import layoutJson from "@andarilho/scene-contract/fixtures/synthetic-two-room.layout.json";
 import manifestJson from "@andarilho/scene-contract/fixtures/synthetic-two-room.manifest.json";
 import collisionUrl from "@andarilho/scene-contract/fixtures/synthetic-two-room.collision.glb?url";
-import renderUrl from "@andarilho/scene-contract/fixtures/synthetic-two-room.splat.ply?url";
+import renderUrl from "@andarilho/scene-contract/fixtures/synthetic-two-room.model.glb?url";
 import { createViewer, isQualityProfileName, type ViewerHandle, type ViewerState } from "../src";
 
 interface DevScene {

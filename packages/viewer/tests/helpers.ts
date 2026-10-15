@@ -25,25 +25,24 @@ export function loadManifest(): SceneManifest {
 /** Minimal valid manifest for the synthetic two-room layout (used when the fixture is absent). */
 export function syntheticManifest(overrides: Partial<SceneManifest> = {}): SceneManifest {
   return {
-    schemaVersion: "1.0",
+    schemaVersion: "2.0",
     sceneId: "fixture-scene",
     sceneRevisionId: "fixture-revision",
     revision: 1,
     runId: "fixture-run",
-    renderMode: "gaussian",
+    renderMode: "mesh",
     units: "m",
     upAxis: "+Y",
     cameraForward: "-Z",
     scaleStatus: "user_measured",
-    worldFromDecodedRender: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
     geometrySpace: "world",
     bounds: { min: [-4.2, -0.1, -2.7], max: [4.2, 2.8, 2.7] },
     spawn: { feet: [2, 0, 0], yawRadians: Math.PI / 2, floorId: "floor-0" },
     floors: [{ id: "floor-0", elevation: 0 }],
     assets: {
       render: {
-        key: "tenants/fixture-project/scenes/fixture-revision/scene.ply",
-        format: "ply",
+        key: "tenants/fixture-project/scenes/fixture-revision/model.glb",
+        format: "glb",
         bytes: 1,
         sha256: "0".repeat(64),
       },

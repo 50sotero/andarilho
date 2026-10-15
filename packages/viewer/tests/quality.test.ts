@@ -16,11 +16,9 @@ const IPAD_DESKTOP_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15";
 
 describe("quality profiles", () => {
-  it("caps DPR at 1.0 mobile and 1.5 desktop with README budgets", () => {
+  it("caps DPR at 1.0 mobile and 1.5 desktop", () => {
     expect(QUALITY_PROFILES.mobile.maxDpr).toBe(1.0);
     expect(QUALITY_PROFILES.desktop.maxDpr).toBe(1.5);
-    expect(QUALITY_PROFILES.mobile.splatBudget).toBe(750_000);
-    expect(QUALITY_PROFILES.desktop.splatBudget).toBe(1_500_000);
     expect(QUALITY_PROFILES.low.maxDpr).toBeLessThan(1);
     expect(effectivePixelRatio(3, QUALITY_PROFILES.mobile)).toBe(1);
     expect(effectivePixelRatio(2, QUALITY_PROFILES.desktop)).toBe(1.5);

@@ -1,39 +1,19 @@
+import type { DeliveryEnvelope, SceneManifest } from "@andarilho/scene-contract";
 import { describe, expect, it } from "vitest";
-import { deliveryEnvelopeIssues, resolveViewerSource, sceneManifestIssues } from "../src/manifest";
-import { decomposeRenderTransform, RenderTransformError } from "../src/render/transform";
+import {
+  deliveryEnvelopeIssues,
+  OUTDATED_SCENE_MESSAGE,
+  OutdatedSceneError,
+  resolveViewerSource,
+  sceneManifestIssues,
+} from "../src/manifest";
 import { canWalk, transition, type ViewerState } from "../src/viewer-state";
 import { hasFixture, loadManifest, syntheticManifest } from "./helpers";
 
-describe("worldFromDecodedRender", () => {
-  it("decomposes a column-major rotation + translation + uniform scale", () => {
-    const c = Math.cos(0.5);
-    const s = Math.sin(0.5);
-    const k = 2;
-    // Rotation about +Y by 0.5 rad, scale 2, translation (1, 2, 3), column-major.
-    const m = [c * k, 0, -s * k, 0, 0, k, 0, 0, s * k, 0, c * k, 0, 1, 2, 3, 1];
-    const t = decomposeRenderTransform(m);
-    expect(t.scale).toBeCloseTo(2);
-    expect(t.position.toArray()).toEqual([1, 2, 3]);
-    expect(t.quaternion.y).toBeCloseTo(Math.sin(0.25));
-  });
-
-  it("rejects reflections, non-uniform scale, shear and projective rows", () => {
-    const id = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
-    const reflect = [...id];
-    reflect[0] = -1;
-    expect(() => decomposeRenderTransform(reflect)).toThrow(/reflection/);
-    const stretch = [...id];
-    stretch[5] = 2;
-    expect(() => decomposeRenderTransform(stretch)).toThrow(/uniform/);
-    const shear = [...id];
-    shear[4] = 0.5;
-    expect(() => decomposeRenderTransform(shear)).toThrow(RenderTransformError);
-    const projective = [...id];
-    projective[3] = 0.1;
-    expect(() => decomposeRenderTransform(projective)).toThrow(/affine/);
-    expect(() => decomposeRenderTransform([1, 2, 3])).toThrow(/16/);
-  });
-});
+/** A manifest as the worker wrote it before the textured model (schemaVersion 1.0). */
+function v1Manifest(): SceneManifest {
+  return { ...syntheticManifest(), schemaVersion: "1.0" } as unknown as SceneManifest;
+}
 
 describe("manifest and envelope checks", () => {
   it("accepts the synthetic manifest", () => {
@@ -49,6 +29,23 @@ describe("manifest and envelope checks", () => {
     expect(issues).toEqual(
       expect.arrayContaining(["geometrySpace must be world", "spawn is outside the scene bounds"]),
     );
+  });
+
+  it("rejects a render mode or render asset other than the textured GLB", () => {
+    const base = syntheticManifest();
+    const issues = sceneManifestIssues({
+      ...base,
+      renderMode: "gaussian" as "mesh",
+      assets: { ...base.assets, render: { ...base.assets.render, format: "ply" as "glb" } },
+    });
+    expect(issues).toEqual(
+      expect.arrayContaining(["renderMode must be mesh", "render asset must be a GLB"]),
+    );
+  });
+
+  it("rejects an unknown manifest schema version", () => {
+    const future = { ...syntheticManifest(), schemaVersion: "3.0" as "2.0" };
+    expect(sceneManifestIssues(future)).toEqual(["unsupported manifest schemaVersion"]);
   });
 
   it("rejects mismatched revisions and missing render URLs", () => {
@@ -72,10 +69,10 @@ describe("manifest and envelope checks", () => {
     const r = resolveViewerSource({
       kind: "urls",
       manifest: syntheticManifest(),
-      renderUrl: "/fixtures/scene.ply",
+      renderUrl: "/fixtures/scene.glb",
       collisionUrl: "/fixtures/collision.glb",
     });
-    expect(r.renderFormat).toBe("ply");
+    expect(r.renderFormat).toBe("glb");
     expect(r.collisionUrl).toBe("/fixtures/collision.glb");
     expect(() =>
       resolveViewerSource({
@@ -86,12 +83,50 @@ describe("manifest and envelope checks", () => {
     ).toThrow();
   });
 
+  it("refuses a scene made before the textured model, with the user-facing message", () => {
+    expect(OUTDATED_SCENE_MESSAGE).toBe(
+      "This scene was made by an older version of Andarilho. Process the capture again to view it.",
+    );
+    const source = { kind: "urls" as const, manifest: v1Manifest(), renderUrl: "/fixtures/a.glb" };
+    expect(() => resolveViewerSource(source)).toThrow(OutdatedSceneError);
+    expect(() => resolveViewerSource(source)).toThrow(OUTDATED_SCENE_MESSAGE);
+  });
+
+  it("refuses an outdated delivery envelope with the same message", () => {
+    const envelope: DeliveryEnvelope = {
+      sceneRevisionId: "fixture-revision",
+      manifestSha256: "0".repeat(64),
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      manifest: v1Manifest(),
+      assetUrls: {
+        render: {
+          url: "https://cdn.example.test/scene.glb?sig=1",
+          sha256: "0".repeat(64),
+          bytes: 1,
+          format: "glb",
+        },
+      },
+    };
+    expect(() => resolveViewerSource({ kind: "delivery", envelope })).toThrow(
+      OUTDATED_SCENE_MESSAGE,
+    );
+  });
+
+  it("reports a 1.0 manifest as an unsupported schema version to the checks", () => {
+    expect(sceneManifestIssues(v1Manifest())).toEqual(["unsupported manifest schemaVersion"]);
+  });
+
   it.skipIf(!hasFixture("synthetic-two-room.manifest.json"))("accepts the fixture manifest", () => {
     const manifest = loadManifest();
+    expect(manifest.schemaVersion).toBe("2.0");
+    expect(manifest.assets.render.key).toMatch(/model\.glb$/);
     expect(sceneManifestIssues(manifest)).toEqual([]);
-    expect(manifest.worldFromDecodedRender).toEqual([
-      1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1,
-    ]);
+    const resolved = resolveViewerSource({
+      kind: "urls",
+      manifest,
+      renderUrl: "/fixtures/synthetic-two-room.model.glb",
+    });
+    expect(resolved.renderFormat).toBe("glb");
   });
 });
 
