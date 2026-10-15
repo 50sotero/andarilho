@@ -185,8 +185,11 @@ def test_import_requests_are_validated(import_client, auth):
     pid = create_project(import_client, auth)["id"]
     url = f"/v1/projects/{pid}/imports"
     base = {"kind": "matterport_embed", "modelId": MODEL, "permissionConfirmed": True}
+    # The permission attestation is required and must be affirmed, whatever the client.
     assert import_client.post(url, json={**base, "permissionConfirmed": False},
                               headers=auth()).status_code == 422  # fmt: skip
+    unattested = {k: v for k, v in base.items() if k != "permissionConfirmed"}
+    assert import_client.post(url, json=unattested, headers=auth()).status_code == 422
     assert import_client.post(url, json={**base, "modelId": "../../x"},
                               headers=auth()).status_code == 422  # fmt: skip
     bad_listing = import_client.post(
