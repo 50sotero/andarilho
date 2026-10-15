@@ -2,7 +2,14 @@
 
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
-import { Button, Card, ErrorNotice, StatusBadge, primaryLinkClass } from "@/components/ui";
+import {
+  Button,
+  Card,
+  ErrorNotice,
+  StatusBadge,
+  linkButtonClass,
+  primaryLinkClass,
+} from "@/components/ui";
 import { api, newIdempotencyKey } from "@/lib/api/client";
 import { friendlyFromErrorBody, toFriendlyError, type FriendlyError } from "@/lib/api/errors";
 import type { JobDetail, JobEvent, ProjectDetail, Run } from "@/lib/api/types";
@@ -221,7 +228,10 @@ export function ProcessingView({
             <p>Cancellation requested. Stopping work...</p>
           ) : null}
           {run.status === "succeeded" ? (
-            <p>Processing finished. Review the scale, floor and walls before walking or sharing.</p>
+            <p>
+              Processing finished. The scene is ready to walk. Adjust the walls, doors or furniture
+              afterwards if the automatic placement got something wrong.
+            </p>
           ) : null}
           {run.status === "cancelled" ? <p>This run was cancelled.</p> : null}
         </div>
@@ -281,9 +291,14 @@ export function ProcessingView({
               Upload a new capture
             </Link>
           ) : null}
+          {actions.walk ? (
+            <Link href={`${base}/view`} className={primaryLinkClass}>
+              Walk the scene
+            </Link>
+          ) : null}
           {actions.review ? (
-            <Link href={`${base}/review`} className={primaryLinkClass}>
-              Review the scene
+            <Link href={`${base}/review`} className={linkButtonClass}>
+              Adjust layout
             </Link>
           ) : null}
         </div>

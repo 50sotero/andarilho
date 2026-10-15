@@ -203,7 +203,7 @@ export function SharePanel({
         </div>
       ) : approvedRevisionId === null ? (
         <p className="text-sm text-stone-700 dark:text-stone-300">
-          Approve a scene revision in Review before publishing it.
+          Approve a scene revision on the Adjust layout page before publishing it.
         </p>
       ) : sceneError ? (
         <ErrorNotice error={sceneError} onRetry={onRetryScene} />

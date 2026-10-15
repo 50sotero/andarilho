@@ -153,8 +153,22 @@ describe("run actions", () => {
     expect(runActions({ ...running, cancelRequested: true }, "owner").cancel).toBe(false);
   });
 
+  it("offers walking a finished scene first, with adjusting the layout second", () => {
+    for (const role of ["owner", "editor"] as const) {
+      expect(runActions(succeeded, role)).toMatchObject({ walk: true, review: true });
+      expect(runActions(running, role)).toMatchObject({ walk: false, review: false });
+      expect(runActions(failed, role)).toMatchObject({ walk: false, review: false });
+    }
+  });
+
   it("shows read-only members no action the API would refuse", () => {
-    const none = { cancel: false, retry: false, newCapture: false, review: false };
+    const none = {
+      cancel: false,
+      retry: false,
+      newCapture: false,
+      walk: false,
+      review: false,
+    };
     for (const run of [running, failed, succeeded]) {
       expect(runActions(run, "viewer")).toEqual(none);
       expect(runActions(run, undefined)).toEqual(none);
@@ -188,12 +202,22 @@ describe("processing helpers", () => {
       "preparing",
       "camera_reconstruction",
       "normalizing",
+      "scene_analysis",
       "geometry_proposal",
       "texturing",
       "packaging",
       "scene_validation",
     ]);
     expect(stageLabel("texturing")).toBe("Texturing the model from the video");
+  });
+
+  it("shows the scene analysis stage between normalizing and the proposal", () => {
+    expect(stageLabel("scene_analysis")).toBe("Recognising rooms, doors and furniture");
+    const run = {
+      jobs: [{ id: "1", stage: "scene_analysis", state: "running" }],
+    } as unknown as Run;
+    expect(stageStates(run).scene_analysis).toBe("active");
+    expect(stageStates(run).geometry_proposal).toBe("pending");
   });
 });
 
