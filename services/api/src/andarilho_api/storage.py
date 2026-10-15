@@ -10,8 +10,9 @@ are display metadata only:
   (``CopySourceIfMatch`` on the completed object's ETag). No client upload
   grant ever targets this key. Capture sets and jobs reference only these keys
   (plus ``storage_version`` when bucket versioning is enabled).
-* ``tenants/{project_id}/runs/{run_id}/attempts/{stage}/{fence}/...`` - worker
-  attempt outputs.
+* ``tenants/{project_id}/runs/{run_id}/attempts/{stage}/{job_id}/{fence}/...`` -
+  worker attempt outputs; an attempt that does not succeed is deleted by its worker
+  or swept by the job's next attempt.
 * ``tenants/{project_id}/scenes/{scene_revision_id}/...`` - viewer derivatives
   (render/collision/poster/manifest) written by the worker.
 

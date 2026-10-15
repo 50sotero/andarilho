@@ -340,6 +340,52 @@ def _transient_stage(ctx):
     raise TransientError()
 
 
+def _writing_transient_stage(ctx):
+    ctx.store.put_bytes(ctx.attempt_key("partial.bin"), b"partial")
+    _transient_stage(ctx)
+
+
+def _writing_sleeping_stage(ctx):
+    ctx.store.put_bytes(ctx.attempt_key("partial.bin"), b"partial")
+    _sleeping_stage(ctx)
+
+
+def test_failed_attempts_delete_their_objects(db, seed, store, settings):
+    sup = Supervisor(db, store, settings, stages={**STAGES, "validating": _writing_transient_stage},
+                     delay_fn=lambda attempt: 0.0)  # fmt: skip
+    pid = seed.project()
+    run_id, _ = seed.run(pid, max_attempts=3)
+    assert [d[1] for d in drain(db, sup)] == ["retry_wait", "retry_wait", "failed"]
+    # Each retried attempt and the final failed one removed what it wrote.
+    assert store.list_keys(f"tenants/{pid}/runs/{run_id}/attempts/") == []
+
+
+def test_a_new_attempt_sweeps_what_a_replaced_one_left(db, seed, store, settings):
+    sup = Supervisor(db, store, settings, stages={**STAGES, "validating": _writing_sleeping_stage})
+    pid = seed.project()
+    run_id, _ = seed.run(pid)
+    job = queue.claim(db, "worker-test", "cpu")
+
+    def bump():
+        time.sleep(1.0)
+        seed.exec("UPDATE jobs SET fencing_token = fencing_token + 1, state = 'queued', "
+                  "lease_owner = NULL, lease_expires_at = NULL WHERE id = %s", job.id)  # fmt: skip
+
+    threading.Thread(target=bump, daemon=True).start()
+    assert sup.execute(job) == "lost"
+    attempts = f"tenants/{pid}/runs/{run_id}/attempts/"
+    # A worker that lost its lease stops writing, deletes included.
+    assert store.list_keys(attempts) == [f"{attempts}validating/{job.id}/1/partial.bin"]
+    retry = queue.claim(db, "worker-test", "cpu")
+    assert retry is not None and retry.fencing_token == 3
+    replacement = Supervisor(
+        db, store, settings, stages={**STAGES, "validating": _transient_stage},
+        delay_fn=lambda attempt: 0.0,
+    )  # fmt: skip
+    assert replacement.execute(retry) == "retry_wait"
+    assert store.list_keys(attempts) == []
+
+
 def test_transient_failures_exhaust_retries(db, seed, store, settings):
     sup = Supervisor(db, store, settings, stages={**STAGES, "validating": _transient_stage},
                      delay_fn=lambda attempt: 0.0)  # fmt: skip

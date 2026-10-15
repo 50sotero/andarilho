@@ -18,7 +18,7 @@ from typing import Any
 import psycopg
 
 from andarilho_worker import queue
-from andarilho_worker.artifacts import ObjectStore
+from andarilho_worker.artifacts import ObjectStore, attempt_prefix
 from andarilho_worker.db import Database
 from andarilho_worker.errors import (
     Cancelled,
@@ -293,9 +293,19 @@ class Supervisor:
         def used() -> float:
             return time.monotonic() - started
 
+        self._sweep_earlier_attempts(job)
         try:
-            result = stage_fn(ctx)
-            token.raise_if_cancelled()
+            try:
+                result = stage_fn(ctx)
+                token.raise_if_cancelled()
+            except (Deferred, LeaseLost):
+                raise
+            except Exception:
+                # No output references an attempt that did not succeed. A worker that
+                # lost its lease leaves this to the attempt that replaced it.
+                if not token.lease_lost:
+                    self._discard_attempt(job, job.fencing_token)
+                raise
             queue.complete_job(
                 self.db,
                 job,
@@ -334,6 +344,27 @@ class Supervisor:
         except Exception:
             log.exception("job %s failed unexpectedly", job.id)
             return self._retry(job, error_body("INTERNAL_ERROR", retryable=True), used())
+
+    def _sweep_earlier_attempts(self, job: ClaimedJob) -> None:
+        """Delete what earlier attempts of this job left (a crashed worker, a lost lease
+        or a failed delete): only the current fence can still succeed, and nothing reads
+        an earlier fence's objects. A worker that crashes on the job's last attempt
+        leaves its objects until the project is deleted."""
+        if not job.run_id:
+            return
+        for fence in range(1, job.fencing_token):
+            self._discard_attempt(job, fence)
+
+    def _discard_attempt(self, job: ClaimedJob, fence: int) -> None:
+        """Best effort: a failure leaves the objects for the next attempt's sweep."""
+        if not job.run_id:
+            return
+        prefix = attempt_prefix(job.project_id, job.run_id, job.stage, job.id, fence)
+        try:
+            self.store.delete_prefix(prefix)
+            self.store.abort_multipart_uploads(prefix)
+        except Exception:
+            log.warning("job %s: could not delete attempt %s's objects", job.id, fence)
 
     def _retry(self, job: ClaimedJob, body: dict[str, Any], used: float) -> str:
         try:
