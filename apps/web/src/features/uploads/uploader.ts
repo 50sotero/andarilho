@@ -429,6 +429,9 @@ export class MultipartUpload {
       if (!isRetryable(error)) this.forgetCreationKey();
       throw error;
     }
+    // Known at once, before anything below can fail (the file may no longer be readable):
+    // a file removed without a record still gets its upload aborted (discard).
+    this.emit({ uploadId: data.upload.id, resumed: false });
     const record: UploadResumeRecord = {
       version: RESUME_RECORD_VERSION,
       uploadId: data.upload.id,
@@ -452,7 +455,6 @@ export class MultipartUpload {
     // back rather than creating another that also takes quota.
     this.creationKey = null;
     if (saveResumeRecord(record, this.storage)) this.clearSavedCreationKey();
-    this.emit({ uploadId: record.uploadId, resumed: false });
     return record;
   }
 
