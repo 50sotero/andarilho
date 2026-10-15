@@ -431,6 +431,37 @@ def test_photos_a_succeeded_run_never_read_can_be_removed(client, auth, db, incl
     assert client.delete(f"/v1/uploads/{photo}", headers=auth()).status_code == expected
 
 
+@pytest.mark.parametrize("include_photos", [False, True])
+def test_retrying_after_removing_a_photo_the_run_never_read(client, auth, db, include_photos):
+    pid = create_project(client, auth)["id"]
+    video = verified_upload(db, pid)
+    photo = verified_upload(db, pid, kind="photo")
+    cs = client.post(
+        f"/v1/projects/{pid}/capture-sets", json={"uploadIds": [video, photo]}, headers=auth()
+    )
+    started = client.post(
+        f"/v1/projects/{pid}/runs",
+        json={
+            "captureSetId": cs.json()["id"],
+            "quality": "preview",
+            "includeSupplementaryPhotos": include_photos,
+        },
+        headers=auth(**{"Idempotency-Key": f"key-start-{include_photos}"}),
+    )
+    run = db.get(ReconstructionRun, uuid.UUID(started.json()["runId"]))
+    run.status = "failed"
+    db.commit()
+    # A failed run keeps none of its inputs.
+    assert client.delete(f"/v1/uploads/{photo}", headers=auth()).status_code == 204
+    retry = client.post(
+        f"/v1/runs/{run.id}/retry",
+        json={},
+        headers=auth(**{"Idempotency-Key": f"key-retry-{include_photos}"}),
+    )
+    # Only a run that reads the photo needs it back.
+    assert retry.status_code == (409 if include_photos else 202), retry.text
+
+
 def test_deleting_a_removed_upload_requeues_failed_cleanup(client, auth, db):
     pid = create_project(client, auth)["id"]
     video = verified_upload(db, pid)

@@ -55,6 +55,19 @@ def constraint_name(exc: IntegrityError) -> str | None:
     return getattr(diag, "constraint_name", None)
 
 
+def run_inputs(
+    inputs: list[dict[str, Any]], include_supplementary_photos: bool
+) -> list[dict[str, Any]]:
+    """The capture-set inputs a run reads.
+
+    A video run without supplementary photos never reads its photos: the worker's
+    validation drops them, and the upload removal rule lets them be removed.
+    """
+    if include_supplementary_photos or not any(i.get("mediaKind") == "video" for i in inputs):
+        return list(inputs)
+    return [i for i in inputs if i.get("mediaKind") != "photo"]
+
+
 def submit_run(
     db: Session,
     settings: Settings,
@@ -79,7 +92,10 @@ def submit_run(
     if active is not None:
         raise active_run_exists()
 
-    upload_ids = {uuid.UUID(str(item["uploadId"])) for item in capture_set.inputs}
+    upload_ids = {
+        uuid.UUID(str(item["uploadId"]))
+        for item in run_inputs(capture_set.inputs, include_supplementary_photos)
+    }
     if capture_set.floor_plan_upload_id is not None:
         upload_ids.add(capture_set.floor_plan_upload_id)
     if upload_ids:
