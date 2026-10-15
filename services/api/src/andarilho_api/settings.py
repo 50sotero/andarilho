@@ -22,6 +22,9 @@ GIB = 1024 * MIB
 # them, so any selection the published intake policy allows fits in a capture set.
 CAPTURE_SET_MAX_INPUTS = 400
 RUN_MAX_VIDEOS = 8
+# The API freezes each completed upload with one server-side copy, which S3 (and
+# MinIO) perform only up to 5 GiB, so no single file may be larger.
+S3_SINGLE_COPY_MAX_BYTES = 5 * GIB
 
 # Values that only ever appear in examples or local development.
 _EXAMPLE_MARKERS = (
@@ -61,9 +64,9 @@ class Settings(BaseSettings):
 
     # Intake limits (README section 2). Configurable starting limits.
     upload_max_total_bytes: int = Field(default=2 * GIB, gt=0)
-    upload_max_video_bytes: int | None = Field(default=None, gt=0)
-    upload_max_photo_bytes: int = Field(default=50 * MIB, gt=0)
-    upload_max_floor_plan_bytes: int = Field(default=20 * MIB, gt=0)
+    upload_max_video_bytes: int | None = Field(default=None, gt=0, le=S3_SINGLE_COPY_MAX_BYTES)
+    upload_max_photo_bytes: int = Field(default=50 * MIB, gt=0, le=S3_SINGLE_COPY_MAX_BYTES)
+    upload_max_floor_plan_bytes: int = Field(default=20 * MIB, gt=0, le=S3_SINGLE_COPY_MAX_BYTES)
     upload_max_photos: int = Field(default=300, gt=0, le=CAPTURE_SET_MAX_INPUTS - RUN_MAX_VIDEOS)
     upload_part_size: int = Field(default=16 * MIB, ge=5 * MIB, le=5 * GIB)
     upload_max_parts: int = Field(default=1000, ge=1, le=10000)
@@ -104,7 +107,9 @@ class Settings(BaseSettings):
 
     @property
     def video_max_bytes(self) -> int:
-        return self.upload_max_video_bytes or self.upload_max_total_bytes
+        """Per video: its own limit, else the project total, never above one copy."""
+        limit = self.upload_max_video_bytes or self.upload_max_total_bytes
+        return min(limit, S3_SINGLE_COPY_MAX_BYTES)
 
     @property
     def synthetic_recipe_enabled(self) -> bool:

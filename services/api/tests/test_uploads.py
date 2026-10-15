@@ -140,6 +140,15 @@ def test_intake_policy_publishes_the_deployment_limits(client, auth, app):
     }
 
 
+def test_no_upload_is_larger_than_one_storage_copy(client, auth, app):
+    app.state.settings.upload_max_total_bytes = 8 * 1024 * MIB
+    policy = client.get("/v1/intake-policy", headers=auth()).json()
+    assert policy["maxVideoBytes"] == 5 * 1024 * MIB
+    pid = create_project(client, auth)["id"]
+    assert _init(client, auth, pid, size=5 * 1024 * MIB + 1).status_code == 413
+    assert _init(client, auth, pid, size=5 * 1024 * MIB).status_code == 201
+
+
 def test_photo_count_limit(client, auth, db, app):
     app.state.settings.upload_max_photos = 2
     pid = create_project(client, auth)["id"]

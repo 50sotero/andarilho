@@ -11,7 +11,13 @@ from alembic.config import Config
 from pydantic import ValidationError
 
 from andarilho_api.domain.recipes import RECIPES
-from andarilho_api.settings import CAPTURE_SET_MAX_INPUTS, RUN_MAX_VIDEOS, Settings
+from andarilho_api.settings import (
+    CAPTURE_SET_MAX_INPUTS,
+    GIB,
+    RUN_MAX_VIDEOS,
+    S3_SINGLE_COPY_MAX_BYTES,
+    Settings,
+)
 
 PROD = {
     "app_env": "production",
@@ -40,6 +46,19 @@ def test_photo_limit_leaves_room_for_videos_in_a_capture_set():
     assert Settings(app_env="development", upload_max_photos=most).upload_max_photos == most
     with pytest.raises(ValidationError):
         Settings(app_env="development", upload_max_photos=most + 1)
+
+
+def test_no_single_file_may_exceed_one_storage_copy():
+    # A project total above the copy limit still allows several files, not a bigger one.
+    roomy = Settings(app_env="development", upload_max_total_bytes=10 * GIB)
+    assert roomy.video_max_bytes == S3_SINGLE_COPY_MAX_BYTES
+    for field in (
+        "upload_max_video_bytes",
+        "upload_max_photo_bytes",
+        "upload_max_floor_plan_bytes",
+    ):
+        with pytest.raises(ValidationError):
+            Settings(app_env="development", **{field: S3_SINGLE_COPY_MAX_BYTES + 1})
 
 
 def test_production_accepts_real_values_and_forces_synthetic_off():
