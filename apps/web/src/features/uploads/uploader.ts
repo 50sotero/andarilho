@@ -6,15 +6,18 @@
  * - PUTs parts directly to storage with bounded concurrency (3 by default) and
  *   reads the ETag response header (storage CORS must expose it).
  * - Retries failed parts with exponential backoff and jitter.
- * - Persists upload id, fingerprint, completed parts/ETags and expiry locally,
- *   so the same file can resume after a reload once the user re-selects it.
+ * - Persists upload id, fingerprint, content sample, completed parts/ETags and
+ *   expiry locally, so the same file can resume after a reload once the user
+ *   re-selects it. A file whose sampled bytes differ starts a new upload.
  * - Supports pause (abort in-flight requests) and resume (call start() again).
  */
 import { ApiError } from "@/lib/api/errors";
 import type { ApiClient } from "@/lib/api/client";
 import type { MediaKind, Upload } from "@/lib/api/types";
 import {
+  RESUME_RECORD_VERSION,
   clearCreationKey,
+  contentSample,
   creationKey,
   fileFingerprint,
   getDefaultStorage,
@@ -301,10 +304,17 @@ export class MultipartUpload {
       this.discardRecord();
     }
 
-    const saved = loadResumeRecord(this.projectId, this.file, {
+    let saved = loadResumeRecord(this.projectId, this.file, {
       storage: this.storage,
       now: this.now(),
     });
+    // Name, size and date only find the record: another file can share all three, and
+    // reusing its upload would keep the old bytes or mix the two files.
+    if (saved && (await contentSample(this.file, saved.partSize)) !== saved.sample) {
+      removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+      saved = null;
+    }
+    if (signal.aborted) throw new UploadAbortedError();
     if (saved) {
       try {
         const { data } = await this.api.getUpload(saved.uploadId, signal);
@@ -359,10 +369,12 @@ export class MultipartUpload {
     }
     this.forgetCreationKey();
     const record: UploadResumeRecord = {
-      version: 1,
+      version: RESUME_RECORD_VERSION,
       uploadId: data.upload.id,
       projectId: this.projectId,
       fingerprint: this.fingerprint,
+      // Empty where it cannot be computed: the record then stays in this session only.
+      sample: (await contentSample(this.file, data.partSize)) ?? "",
       partSize: data.partSize,
       partCount: data.partCount,
       completedParts: [],

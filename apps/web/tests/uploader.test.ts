@@ -11,6 +11,8 @@ import {
 } from "@/features/uploads/uploader";
 import { createLimiter } from "@/features/uploads/limiter";
 import {
+  RESUME_RECORD_VERSION,
+  contentSample,
   fileFingerprint,
   loadResumeRecord,
   resumeKey,
@@ -21,13 +23,13 @@ import { MemoryStorage } from "./memory-storage";
 const PART = 100;
 const FUTURE = new Date(Date.now() + 24 * 3600 * 1000).toISOString();
 
-function fakeFile(size: number, name = "walk.mp4"): UploadableFile {
+function fakeFile(size: number, name = "walk.mp4", fill = 0): UploadableFile {
   return {
     name,
     size,
     lastModified: 1_700_000_000_000,
     type: "video/mp4",
-    slice: (start, end) => new Blob([new Uint8Array(end - start)]),
+    slice: (start, end) => new Blob([new Uint8Array(end - start).fill(fill)]),
   };
 }
 
@@ -308,10 +310,11 @@ describe("MultipartUpload", () => {
     const file = fakeFile(size);
     saveResumeRecord(
       {
-        version: 1,
+        version: RESUME_RECORD_VERSION,
         uploadId: "u-gone",
         projectId: "p1",
         fingerprint: fileFingerprint(file),
+        sample: (await contentSample(file, PART))!,
         partSize: PART,
         partCount: 2,
         completedParts: [{ partNumber: 1, etag: '"x"' }],
@@ -337,10 +340,11 @@ describe("MultipartUpload", () => {
     const file = fakeFile(size);
     saveResumeRecord(
       {
-        version: 1,
+        version: RESUME_RECORD_VERSION,
         uploadId: "u-done",
         projectId: "p1",
         fingerprint: fileFingerprint(file),
+        sample: (await contentSample(file, PART))!,
         partSize: PART,
         partCount: 2,
         completedParts: [{ partNumber: 1, etag: '"x"' }],
@@ -367,6 +371,79 @@ describe("MultipartUpload", () => {
     expect(api.completeUpload).not.toHaveBeenCalled();
     expect(putPart).not.toHaveBeenCalled();
     expect(storage.getItem(resumeKey("p1", fileFingerprint(file)))).toBeNull();
+  });
+
+  it("starts a new upload for another file with the same name, size and date", async () => {
+    const size = 3 * PART;
+    const storage = new MemoryStorage();
+    const first = fakeFile(size, "walk.mp4", 1);
+    saveResumeRecord(
+      {
+        version: RESUME_RECORD_VERSION,
+        uploadId: "u-old",
+        projectId: "p1",
+        fingerprint: fileFingerprint(first),
+        sample: (await contentSample(first, PART))!,
+        partSize: PART,
+        partCount: 3,
+        completedParts: [{ partNumber: 1, etag: '"x"' }],
+        expiresAt: FUTURE,
+      },
+      storage,
+    );
+    // The same identity, different bytes: its upload must be neither reused nor mixed.
+    const other = fakeFile(size, "walk.mp4", 2);
+    expect(loadResumeRecord("p1", other, { storage })?.uploadId).toBe("u-old");
+    const { api } = fakeApi(size);
+    const uploaded: number[] = [];
+    const upload = new MultipartUpload("p1", other, "video", "video/mp4", {
+      api,
+      putPart: async (url) => {
+        uploaded.push(partOf(url));
+        return `"e${partOf(url)}"`;
+      },
+      storage,
+    });
+    const result = await upload.start();
+    expect(result.id).toBe("u-new");
+    expect(api.getUpload).not.toHaveBeenCalled();
+    expect(api.createUpload).toHaveBeenCalledTimes(1);
+    expect(uploaded.sort()).toEqual([1, 2, 3]);
+    expect(upload.state.resumed).toBe(false);
+  });
+
+  it("does not take an upload the server completed for another file as done", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const first = fakeFile(size, "walk.mp4", 1);
+    saveResumeRecord(
+      {
+        version: RESUME_RECORD_VERSION,
+        uploadId: "u-done",
+        projectId: "p1",
+        fingerprint: fileFingerprint(first),
+        sample: (await contentSample(first, PART))!,
+        partSize: PART,
+        partCount: 2,
+        completedParts: [],
+        expiresAt: FUTURE,
+      },
+      storage,
+    );
+    const { api } = fakeApi(size, {
+      getUpload: vi.fn(async () => ({
+        data: { upload: uploadRecord("u-done", "uploaded_unverified"), completedParts: [] },
+        etag: null,
+      })),
+    });
+    const upload = new MultipartUpload("p1", fakeFile(size, "walk.mp4", 2), "video", "video/mp4", {
+      api,
+      putPart: async (url) => `"e${partOf(url)}"`,
+      storage,
+    });
+    expect((await upload.start()).id).toBe("u-new");
+    expect(api.getUpload).not.toHaveBeenCalled();
+    expect(api.completeUpload).toHaveBeenCalledWith("u-new");
   });
 
   it("can resume in the same session after pause without re-initializing", async () => {

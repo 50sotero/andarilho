@@ -2,14 +2,19 @@
  * Local resume state for multipart uploads (README section 7, step 4).
  *
  * The browser cannot reopen a file after reload, so the user re-selects it;
- * we match it to a persisted record by a fingerprint built from the file's
- * name, size and lastModified (a hint, not a content hash). Storage access is
- * always wrapped in try/catch: private windows and blocked storage must not
- * break uploading, they only disable resume.
+ * we find its persisted record by a fingerprint built from the file's name,
+ * size and lastModified. That is only a hint: another file can share all
+ * three, so the record also holds a hash of sampled bytes (`contentSample`),
+ * and the uploader reuses the upload only when the re-selected file's sample
+ * matches. Storage access is always wrapped in try/catch: private windows and
+ * blocked storage must not break uploading, they only disable resume.
  */
 
 export const RESUME_STORAGE_PREFIX = "andarilho:upload:";
-export const RESUME_RECORD_VERSION = 1;
+/** Version 2 added `sample`; older records cannot be checked, so they are dropped. */
+export const RESUME_RECORD_VERSION = 2;
+/** Bytes hashed at the start and the middle of every part, and at the end of the file. */
+export const SAMPLE_BYTES = 16 * 1024;
 
 export interface FileIdentity {
   name: string;
@@ -27,6 +32,8 @@ export interface UploadResumeRecord {
   uploadId: string;
   projectId: string;
   fingerprint: string;
+  /** `contentSample` of the file at this record's part size. */
+  sample: string;
   partSize: number;
   partCount: number;
   completedParts: CompletedPartRecord[];
@@ -44,6 +51,50 @@ export interface KeyValueStorage {
 
 export function fileFingerprint(file: FileIdentity): string {
   return `v1:${file.size}:${file.lastModified}:${encodeURIComponent(file.name)}`;
+}
+
+/** The part of a file `contentSample` reads. */
+export interface SampledFile {
+  size: number;
+  slice(start: number, end: number): Blob;
+}
+
+/**
+ * SHA-256 (hex) of `SAMPLE_BYTES` at the start and the middle of every part
+ * and at the end of the file, with the size and part size. Every part a
+ * resumed upload keeps is sampled, so a different file with the same name,
+ * size and date is caught without reading it all (at most a few MiB for the
+ * largest upload). Null where Web Crypto is unavailable (an insecure origin);
+ * resume is then off.
+ */
+export async function contentSample(file: SampledFile, partSize: number): Promise<string | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || !(partSize > 0)) return null;
+  const windows: [number, number][] = [];
+  const add = (start: number) => {
+    const from = Math.max(0, Math.min(start, file.size - 1));
+    windows.push([from, Math.min(from + SAMPLE_BYTES, file.size)]);
+  };
+  const partCount = Math.ceil(file.size / partSize);
+  for (let n = 1; n <= partCount; n += 1) {
+    const [start, end] = partRange(n, partSize, file.size);
+    add(start);
+    add(start + Math.floor((end - start) / 2));
+  }
+  add(file.size - SAMPLE_BYTES);
+  const header = new TextEncoder().encode(`v1:${file.size}:${partSize}:`);
+  const chunks = await Promise.all(
+    windows.map(async ([start, end]) => new Uint8Array(await file.slice(start, end).arrayBuffer())),
+  );
+  const joined = new Uint8Array(header.length + chunks.reduce((n, c) => n + c.length, 0));
+  joined.set(header, 0);
+  let offset = header.length;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.length;
+  }
+  const digest = new Uint8Array(await subtle.digest("SHA-256", joined));
+  return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
 export function resumeKey(projectId: string, fingerprint: string): string {
@@ -71,6 +122,7 @@ export function parseResumeRecord(raw: unknown): UploadResumeRecord | null {
   if (typeof r.uploadId !== "string" || !r.uploadId) return null;
   if (typeof r.projectId !== "string" || !r.projectId) return null;
   if (typeof r.fingerprint !== "string" || !r.fingerprint) return null;
+  if (typeof r.sample !== "string" || !r.sample) return null;
   if (!isPositiveInt(r.partSize) || !isPositiveInt(r.partCount)) return null;
   if (typeof r.expiresAt !== "string" || Number.isNaN(Date.parse(r.expiresAt))) return null;
   if (!Array.isArray(r.completedParts)) return null;
@@ -91,6 +143,7 @@ export function parseResumeRecord(raw: unknown): UploadResumeRecord | null {
     uploadId: r.uploadId,
     projectId: r.projectId,
     fingerprint: r.fingerprint,
+    sample: r.sample,
     partSize: r.partSize,
     partCount: r.partCount,
     completedParts: parts,
@@ -109,7 +162,8 @@ export function saveResumeRecord(
   record: UploadResumeRecord,
   storage: KeyValueStorage | null = getDefaultStorage(),
 ): boolean {
-  if (!storage) return false;
+  // A record without a content sample could not be checked against the file on resume.
+  if (!storage || !record.sample) return false;
   try {
     storage.setItem(resumeKey(record.projectId, record.fingerprint), JSON.stringify(record));
     return true;
@@ -133,7 +187,8 @@ export function removeResumeRecord(
 
 /**
  * Loads a record for this project/file. Corrupted, mismatched or expired
- * records are deleted and ignored.
+ * records are deleted and ignored. The file's identity only finds the record:
+ * check its `sample` against the file (`contentSample`) before reusing it.
  */
 export function loadResumeRecord(
   projectId: string,

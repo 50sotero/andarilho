@@ -2,7 +2,10 @@ import { describe, expect, it } from "vitest";
 import {
   CREATION_KEY_TTL_MS,
   EXPIRY_SAFETY_MARGIN_MS,
+  RESUME_RECORD_VERSION,
+  SAMPLE_BYTES,
   clearCreationKey,
+  contentSample,
   creationKey,
   fileFingerprint,
   loadResumeRecord,
@@ -23,10 +26,11 @@ const file = { name: "walk through.mp4", size: 40 * MiB, lastModified: 1_700_000
 
 function record(overrides: Partial<UploadResumeRecord> = {}): UploadResumeRecord {
   return {
-    version: 1,
+    version: RESUME_RECORD_VERSION,
     uploadId: "upload-1",
     projectId: "project-1",
     fingerprint: fileFingerprint(file),
+    sample: "ab".repeat(32),
     partSize: 16 * MiB,
     partCount: 3,
     completedParts: [{ partNumber: 1, etag: '"a"' }],
@@ -52,7 +56,69 @@ describe("fileFingerprint", () => {
   });
 });
 
+/** A file of `size` bytes, each `fill`, except `changed` bytes set to 255. */
+function bytesFile(size: number, fill = 7, changed: number[] = []) {
+  const bytes = new Uint8Array(size).fill(fill);
+  for (const at of changed) bytes[at] = 255;
+  return { size, slice: (start: number, end: number) => new Blob([bytes.slice(start, end)]) };
+}
+
+describe("contentSample", () => {
+  const PART = 4 * SAMPLE_BYTES;
+  const size = 3 * PART + 100;
+
+  it("is a stable SHA-256 hex digest of the same bytes", async () => {
+    const sample = await contentSample(bytesFile(size), PART);
+    expect(sample).toMatch(/^[0-9a-f]{64}$/);
+    expect(await contentSample(bytesFile(size), PART)).toBe(sample);
+  });
+
+  it("changes when a part's start, its middle or the file's end differs", async () => {
+    const base = await contentSample(bytesFile(size), PART);
+    for (const at of [0, PART, 2 * PART + PART / 2, size - 1]) {
+      expect(await contentSample(bytesFile(size, 7, [at]), PART)).not.toBe(base);
+    }
+    expect(await contentSample(bytesFile(size, 8), PART)).not.toBe(base);
+  });
+
+  it("depends on the part size, which decides what a resumed upload keeps", async () => {
+    const file = bytesFile(size);
+    expect(await contentSample(file, PART)).not.toBe(await contentSample(file, 2 * PART));
+  });
+
+  it("reads only samples, not the whole file", async () => {
+    const big = 64 * 1024 * 1024;
+    let read = 0;
+    const file = {
+      size: big,
+      slice: (start: number, end: number) => {
+        read += end - start;
+        return new Blob([new Uint8Array(end - start)]);
+      },
+    };
+    expect(await contentSample(file, 16 * 1024 * 1024)).not.toBeNull();
+    expect(read).toBeLessThanOrEqual(9 * SAMPLE_BYTES);
+  });
+});
+
 describe("persistence", () => {
+  it("drops records written before the content sample", () => {
+    const storage = new MemoryStorage();
+    const { sample: _omitted, ...old } = record();
+    storage.setItem(
+      resumeKey("project-1", fileFingerprint(file)),
+      JSON.stringify({ ...old, version: 1 }),
+    );
+    expect(loadResumeRecord("project-1", file, { storage, now: NOW })).toBeNull();
+    expect(storage.length).toBe(0);
+  });
+
+  it("does not save a record without a content sample", () => {
+    const storage = new MemoryStorage();
+    expect(saveResumeRecord(record({ sample: "" }), storage)).toBe(false);
+    expect(storage.length).toBe(0);
+  });
+
   it("round-trips a record", () => {
     const storage = new MemoryStorage();
     const rec = record();
