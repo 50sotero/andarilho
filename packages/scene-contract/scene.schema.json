@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://andarilho.dev/schemas/scene/1.0.json",
-  "x-schema-version": "1.0",
+  "$id": "https://andarilho.dev/schemas/scene/2.0.json",
+  "x-schema-version": "2.0",
   "$defs": {
     "Bounds": {
       "additionalProperties": false,
@@ -242,6 +242,7 @@
     },
     "RenderAsset": {
       "additionalProperties": false,
+      "description": "The textured layout model (binary glTF, unlit materials, world space).",
       "properties": {
         "key": {
           "maxLength": 512,
@@ -260,11 +261,7 @@
           "type": "string"
         },
         "format": {
-          "enum": [
-            "sog",
-            "spz",
-            "ply"
-          ],
+          "const": "glb",
           "title": "Format",
           "type": "string"
         }
@@ -341,7 +338,7 @@
   "description": "Persistent scene manifest. Contains object keys, never signed URLs or tokens.",
   "properties": {
     "schemaVersion": {
-      "const": "1.0",
+      "const": "2.0",
       "title": "Schemaversion",
       "type": "string"
     },
@@ -366,7 +363,7 @@
       "type": "string"
     },
     "renderMode": {
-      "const": "gaussian",
+      "const": "mesh",
       "title": "Rendermode",
       "type": "string"
     },
@@ -392,15 +389,6 @@
       ],
       "title": "Scalestatus",
       "type": "string"
-    },
-    "worldFromDecodedRender": {
-      "items": {
-        "type": "number"
-      },
-      "maxItems": 16,
-      "minItems": 16,
-      "title": "Worldfromdecodedrender",
-      "type": "array"
     },
     "geometrySpace": {
       "const": "world",
@@ -446,7 +434,6 @@
     "upAxis",
     "cameraForward",
     "scaleStatus",
-    "worldFromDecodedRender",
     "geometrySpace",
     "bounds",
     "spawn",

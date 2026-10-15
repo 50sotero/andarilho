@@ -2,7 +2,7 @@
 
 Writes into packages/scene-contract/fixtures/:
   synthetic-two-room.collision.glb  collision geometry (world coordinates, identity nodes)
-  synthetic-two-room.splat.ply      tiny deterministic 3DGS splat PLY (world frame)
+  synthetic-two-room.model.glb      textured layout model (procedural textures, world frame)
   synthetic-two-room.manifest.json  persistent scene manifest referencing both
 
 Run from the repository root:
@@ -20,10 +20,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from andarilho_worker.geometry.glb import write_textured_glb
 from andarilho_worker.geometry.layout import collision_glb
-from andarilho_worker.geometry.ply import write_splat_ply
-from andarilho_worker.geometry.synthetic import synthetic_splats
-from andarilho_worker.manifest import IDENTITY_MATRIX, asset_entry, build_manifest, scene_prefix
+from andarilho_worker.geometry.texture import procedural_texture_layout
+from andarilho_worker.manifest import asset_entry, build_manifest, scene_prefix
 from andarilho_worker.validation import loads_strict, validate_scene
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -65,9 +65,7 @@ def build() -> dict[str, bytes]:
     layout_bytes = (FIXTURES / f"{STEM}.layout.json").read_bytes()
     layout = loads_strict(layout_bytes)
     glb = collision_glb(layout)
-    ply = write_splat_ply(
-        synthetic_splats(layout), comments=["andarilho synthetic two-room fixture (world frame)"]
-    )
+    model = write_textured_glb(procedural_texture_layout(layout))
     prefix = scene_prefix(PROJECT, REVISION)
     manifest = build_manifest(
         scene_id="fixture-scene",
@@ -76,10 +74,9 @@ def build() -> dict[str, bytes]:
         run_id="fixture-run",
         layout=layout,
         layout_revision=1,
-        render=asset_entry(prefix + "scene.ply", ply, "ply"),
+        render=asset_entry(prefix + "model.glb", model, "glb"),
         collision=asset_entry(prefix + "collision.glb", glb, "glb"),
         poster=None,
-        world_from_decoded_render=IDENTITY_MATRIX,
         scale_status="user_measured",
         geometry_source="synthetic_fixture",
         recipe_digest="synthetic-fixture-v1",
@@ -91,13 +88,13 @@ def build() -> dict[str, bytes]:
             "warnings": ["Synthetic fixture: no capture was reconstructed."],
         },
     )
-    blobs = {prefix + "scene.ply": ply, prefix + "collision.glb": glb}
+    blobs = {prefix + "model.glb": model, prefix + "collision.glb": glb}
     findings = validate_scene(manifest, lambda key: blobs[key], project_id=PROJECT, layout=layout)
     if findings:
         raise SystemExit("fixture failed validation: " + "; ".join(f.message for f in findings))
     return {
         f"{STEM}.collision.glb": glb,
-        f"{STEM}.splat.ply": ply,
+        f"{STEM}.model.glb": model,
         f"{STEM}.manifest.json": (format_json(manifest) + "\n").encode(),
     }
 

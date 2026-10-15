@@ -23,13 +23,13 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from andarilho_worker.errors import StageError, TransientError
+from andarilho_worker.geometry.glb import MAX_GLB_BYTES
 
 _KEY = re.compile(r"^tenants/[A-Za-z0-9_-]+/[A-Za-z0-9._/-]+$")
 MAX_INLINE_BYTES = 256 * 1024 * 1024
-# Render assets (splat PLY/SOG) may be far larger than other inline objects: a
-# 20-million-splat PLY with full spherical harmonics is about 4.6 GiB. The bound is
-# S3's single-PUT limit, which the conditional create in ``put_immutable`` relies on.
-MAX_RENDER_BYTES = 5 * 1024**3
+# The render asset is the textured layout model (GLB with JPEG atlases). Validation
+# parses it whole, so it shares the GLB reader's own cap.
+MAX_RENDER_BYTES = MAX_GLB_BYTES
 # A scene poster is one WebP still; packaging reads it into memory.
 MAX_POSTER_BYTES = 4 * 1024 * 1024
 

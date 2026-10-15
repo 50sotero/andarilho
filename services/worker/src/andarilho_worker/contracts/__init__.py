@@ -9,7 +9,8 @@ from typing import Any
 
 from jsonschema import Draft202012Validator
 
-SCHEMA_VERSION = "1.0"
+SCHEMA_VERSION = "2.0"  # the scene manifest
+LAYOUT_SCHEMA_VERSION = "1.0"
 
 
 @cache

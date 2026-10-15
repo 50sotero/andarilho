@@ -28,6 +28,7 @@ sys.path.insert(0, str(ROOT / "services" / "api" / "src"))
 from pydantic.json_schema import models_json_schema  # noqa: E402
 
 from andarilho_api.schemas.scene import (  # noqa: E402
+    LAYOUT_SCHEMA_VERSION,
     SCHEMA_VERSION,
     DeliveryEnvelope,
     Layout,
@@ -66,12 +67,12 @@ def worker_recipes() -> dict[str, Any]:
     }
 
 
-def standalone_schema(model: type, schema_id: str) -> dict[str, Any]:
+def standalone_schema(model: type, name: str, version: str) -> dict[str, Any]:
     schema = model.model_json_schema(by_alias=True, ref_template="#/$defs/{model}")
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": schema_id,
-        "x-schema-version": SCHEMA_VERSION,
+        "$id": f"https://andarilho.dev/schemas/{name}/{version}.json",
+        "x-schema-version": version,
         **schema,
     }
 
@@ -126,7 +127,11 @@ def inline_object(schema: dict[str, Any], indent: str = "") -> str:
 
 
 def typescript(defs: dict[str, Any]) -> str:
-    out = [HEADER, f'export const SCHEMA_VERSION = "{SCHEMA_VERSION}";\n']
+    out = [
+        HEADER,
+        f'export const SCHEMA_VERSION = "{SCHEMA_VERSION}";',
+        f'export const LAYOUT_SCHEMA_VERSION = "{LAYOUT_SCHEMA_VERSION}";\n',
+    ]
     for name in sorted(defs):
         schema = defs[name]
         doc = schema.get("description")
@@ -140,8 +145,8 @@ def typescript(defs: dict[str, Any]) -> str:
 
 
 def render() -> dict[Path, str]:
-    manifest = standalone_schema(SceneManifest, "https://andarilho.dev/schemas/scene/1.0.json")
-    layout = standalone_schema(Layout, "https://andarilho.dev/schemas/layout/1.0.json")
+    manifest = standalone_schema(SceneManifest, "scene", SCHEMA_VERSION)
+    layout = standalone_schema(Layout, "layout", LAYOUT_SCHEMA_VERSION)
     _, combined = models_json_schema(
         [(SceneManifest, "validation"), (Layout, "validation"), (DeliveryEnvelope, "validation")],
         by_alias=True,

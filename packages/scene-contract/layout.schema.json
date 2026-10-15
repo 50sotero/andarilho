@@ -5,7 +5,7 @@
   "$defs": {
     "Calibration": {
       "additionalProperties": false,
-      "description": "User-confirmed metric calibration.\n\n``render_scale`` is the cumulative uniform scale, about the world origin,\napplied to the run's original render frame. It is absolute rather than\nrelative to the previous revision, so re-saving a layout never compounds it.",
+      "description": "User-confirmed metric calibration.\n\n``render_scale`` is the cumulative uniform scale, about the world origin, applied\nto the run's estimated frame (its camera poses and capture evidence). It is\nabsolute rather than relative to the previous revision, so re-saving a layout\nnever compounds it.",
       "properties": {
         "method": {
           "const": "known_distance",

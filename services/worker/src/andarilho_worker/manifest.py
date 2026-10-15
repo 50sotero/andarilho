@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +63,6 @@ def build_manifest(
     render: Mapping[str, Any],
     collision: Mapping[str, Any],
     poster: Mapping[str, Any] | None,
-    world_from_decoded_render: Sequence[float],
     scale_status: str,
     geometry_source: str,
     recipe_digest: str,
@@ -81,12 +80,11 @@ def build_manifest(
         "sceneRevisionId": scene_revision_id,
         "revision": revision,
         "runId": run_id,
-        "renderMode": "gaussian",
+        "renderMode": "mesh",
         "units": "m",
         "upAxis": "+Y",
         "cameraForward": "-Z",
         "scaleStatus": scale_status,
-        "worldFromDecodedRender": [_clean_number(v) for v in world_from_decoded_render],
         "geometrySpace": "world",
         "bounds": {
             "min": [_clean_number(v) for v in bounds["min"]],

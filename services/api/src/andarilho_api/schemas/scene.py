@@ -13,7 +13,10 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
-SCHEMA_VERSION = "1.0"
+# The manifest and the layout are versioned separately. Manifest 2.0 replaced the
+# Gaussian-splat render (1.0) with a textured mesh; the layout format is unchanged.
+SCHEMA_VERSION = "2.0"
+LAYOUT_SCHEMA_VERSION = "1.0"
 
 Id = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
@@ -74,7 +77,9 @@ class Asset(Contract):
 
 
 class RenderAsset(Asset):
-    format: Literal["sog", "spz", "ply"]
+    """The textured layout model (binary glTF, unlit materials, world space)."""
+
+    format: Literal["glb"]
 
 
 class CollisionAsset(Asset):
@@ -128,17 +133,16 @@ class Provenance(Contract):
 class SceneManifest(Contract):
     """Persistent scene manifest. Contains object keys, never signed URLs or tokens."""
 
-    schema_version: Literal["1.0"]
+    schema_version: Literal["2.0"]
     scene_id: Id
     scene_revision_id: Id
     revision: Annotated[int, Field(ge=1)]
     run_id: Id
-    render_mode: Literal["gaussian"]
+    render_mode: Literal["mesh"]
     units: Literal["m"]
     up_axis: Literal["+Y"]
     camera_forward: Literal["-Z"]
     scale_status: Literal["user_measured", "estimated"]
-    world_from_decoded_render: Matrix4
     geometry_space: Literal["world"]
     bounds: Bounds
     spawn: Spawn
@@ -168,30 +172,7 @@ class SceneManifest(Contract):
                 prefix = parts[1]
             elif parts[1] != prefix:
                 raise ValueError("every asset key must belong to the same project prefix")
-        _check_similarity_matrix(self.world_from_decoded_render)
         return self
-
-
-def _check_similarity_matrix(m: list[float]) -> None:
-    """Accept only rotation + translation + positive uniform scale (column-major)."""
-    if abs(m[3]) > 1e-9 or abs(m[7]) > 1e-9 or abs(m[11]) > 1e-9 or abs(m[15] - 1) > 1e-9:
-        raise ValueError("worldFromDecodedRender must be an affine matrix")
-    cols = [m[0:3], m[4:7], m[8:11]]
-    norms = [sum(c * c for c in col) ** 0.5 for col in cols]
-    scale = norms[0]
-    if scale <= 0 or any(abs(n - scale) > 1e-6 * max(1.0, scale) for n in norms):
-        raise ValueError("worldFromDecodedRender must use a positive uniform scale")
-    a, b, c = ([v / scale for v in col] for col in cols)
-    for x, y in ((a, b), (a, c), (b, c)):
-        if abs(sum(i * j for i, j in zip(x, y, strict=True))) > 1e-6:
-            raise ValueError("worldFromDecodedRender rotation must be orthogonal")
-    det = (
-        a[0] * (b[1] * c[2] - b[2] * c[1])
-        - b[0] * (a[1] * c[2] - a[2] * c[1])
-        + c[0] * (a[1] * b[2] - a[2] * b[1])
-    )
-    if det <= 0:
-        raise ValueError("worldFromDecodedRender must not contain a reflection")
 
 
 # ---------------------------------------------------------------------------
@@ -262,9 +243,10 @@ class LayoutSpawn(Contract):
 class Calibration(Contract):
     """User-confirmed metric calibration.
 
-    ``render_scale`` is the cumulative uniform scale, about the world origin,
-    applied to the run's original render frame. It is absolute rather than
-    relative to the previous revision, so re-saving a layout never compounds it.
+    ``render_scale`` is the cumulative uniform scale, about the world origin, applied
+    to the run's estimated frame (its camera poses and capture evidence). It is
+    absolute rather than relative to the previous revision, so re-saving a layout
+    never compounds it.
     """
 
     method: Literal["known_distance"]

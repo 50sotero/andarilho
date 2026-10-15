@@ -16,13 +16,24 @@ import numpy as np
 
 from andarilho_worker.contracts import SCHEMA_VERSION, scene_validator
 from andarilho_worker.geometry.collide import capsule_clearance
-from andarilho_worker.geometry.glb import GlbError, read_glb
+from andarilho_worker.geometry.glb import (
+    MAX_GLB_BYTES,
+    GlbError,
+    inspect_textured_glb,
+    read_glb,
+)
 from andarilho_worker.geometry.layout import Finding, floor_supports, validate_layout
-from andarilho_worker.geometry.ply import MAX_HEADER_BYTES, PlyError, parse_header
+from andarilho_worker.geometry.ply import MAX_HEADER_BYTES
 from andarilho_worker.geometry.polygon import point_in_polygon
 
 BOUNDS_TOLERANCE = 1e-3
 SPAWN_FLOOR_TOLERANCE = 0.1
+# The textured model: a layout has hundreds of triangles, so these leave wide headroom
+# while keeping a phone's GPU memory bounded (README section 11).
+MAX_RENDER_TRIANGLES = 200_000
+MAX_RENDER_TEXTURE_SIDE = 4096
+# Rendered surfaces follow the layout; the margin absorbs float32 rounding.
+RENDER_BOUNDS_MARGIN = 0.05
 
 
 def canonical_json(value: Any) -> bytes:
@@ -60,25 +71,6 @@ def _non_finite(value: Any, path: str = "") -> str | None:
             found = _non_finite(v, f"{path}/{i}")
             if found:
                 return found
-    return None
-
-
-def similarity_matrix_problem(m: Sequence[float]) -> str | None:
-    """Accept only rotation + translation + positive uniform scale (column-major)."""
-    if len(m) != 16:
-        return "matrix must have 16 entries"
-    if abs(m[3]) > 1e-9 or abs(m[7]) > 1e-9 or abs(m[11]) > 1e-9 or abs(m[15] - 1) > 1e-9:
-        return "worldFromDecodedRender must be affine"
-    cols = [np.array(m[0:3]), np.array(m[4:7]), np.array(m[8:11])]
-    norms = [float(np.linalg.norm(c)) for c in cols]
-    scale = norms[0]
-    if scale <= 1e-12 or any(abs(n - scale) > 1e-6 * max(1.0, scale) for n in norms):
-        return "worldFromDecodedRender must use a positive uniform scale"
-    a, b, c = (col / scale for col in cols)
-    if max(abs(a @ b), abs(a @ c), abs(b @ c)) > 1e-6:
-        return "worldFromDecodedRender rotation must be orthogonal"
-    if float(np.linalg.det(np.column_stack([a, b, c]))) <= 0:
-        return "worldFromDecodedRender must not contain a reflection"
     return None
 
 
@@ -130,9 +122,6 @@ def validate_manifest(
         findings.append(Finding("ASSET_PREFIX", "asset keys must share one project prefix"))
     if project_id is not None and projects and projects != {project_id}:
         findings.append(Finding("ASSET_PREFIX", "asset keys are outside this project's prefix"))
-    problem = similarity_matrix_problem(manifest["worldFromDecodedRender"])
-    if problem:
-        findings.append(Finding("MATRIX", problem))
     nav = manifest["navigation"]
     radius, height = nav.get("playerRadius", 0.25), nav.get("playerHeight", 1.7)
     if height <= 2 * radius or nav.get("eyeHeight", 1.6) > height:
@@ -196,23 +185,27 @@ def _floor_under(nodes, feet: Sequence[float], tolerance: float = 0.05) -> bool:
     return False
 
 
-def check_render_asset(data: bytes, fmt: str) -> list[Finding]:
-    """Check a render asset from its leading bytes (at least the PLY header or magic)."""
-    if fmt == "ply":
-        try:
-            parse_header(data)
-        except (PlyError, UnicodeDecodeError) as exc:
-            return [Finding("RENDER_ASSET", f"render PLY rejected: {exc}")]
-        return []
-    if fmt in ("sog", "spz"):
-        # Bundled SOG is a zip archive; SPZ is gzip-compressed.
-        magic = data[:4]
-        if fmt == "sog" and magic != b"PK\x03\x04":
-            return [Finding("RENDER_ASSET", "render SOG is not a bundled archive")]
-        if fmt == "spz" and magic[:2] != b"\x1f\x8b":
-            return [Finding("RENDER_ASSET", "render SPZ is not gzip data")]
-        return []
-    return [Finding("RENDER_ASSET", "unknown render format")]
+def check_render_asset(data: bytes, fmt: str, manifest: Mapping[str, Any]) -> list[Finding]:
+    """Check the textured model: a self-contained, unlit GLB inside the scene's bounds."""
+    if fmt != "glb":
+        return [Finding("RENDER_ASSET", "unknown render format")]
+    try:
+        summary = inspect_textured_glb(data)
+    except (GlbError, KeyError, IndexError, ValueError) as exc:
+        return [Finding("RENDER_ASSET", f"render model rejected: {exc}")]
+    findings: list[Finding] = []
+    if not summary["unlit"]:
+        findings.append(Finding("RENDER_ASSET", "render model materials must be unlit"))
+    if summary["triangles"] > MAX_RENDER_TRIANGLES:
+        findings.append(Finding("RENDER_ASSET", "render model has too many triangles"))
+    if any(max(size) > MAX_RENDER_TEXTURE_SIDE for size in summary["images"]):
+        findings.append(Finding("RENDER_ASSET", "render model texture is too large"))
+    lo = np.array(manifest["bounds"]["min"]) - RENDER_BOUNDS_MARGIN
+    hi = np.array(manifest["bounds"]["max"]) + RENDER_BOUNDS_MARGIN
+    low, high = np.array(summary["bounds"]["min"]), np.array(summary["bounds"]["max"])
+    if np.any(low < lo) or np.any(high > hi):
+        findings.append(Finding("RENDER_ASSET", "render model lies outside the scene bounds"))
+    return findings
 
 
 POSTER_MAGIC = {"png": (0, b"\x89PNG"), "jpeg": (0, b"\xff\xd8\xff"), "webp": (8, b"WEBP")}
@@ -254,8 +247,8 @@ def validate_scene(
     """Full validation: manifest semantics, asset hashes/bytes, GLB and spawn checks.
 
     ``fetch`` returns an asset's bytes or a local file holding them; files are
-    hashed in a stream and only the render asset's header is read, so a
-    multi-GiB render asset is never held in memory.
+    hashed in a stream. The render model is parsed whole, so it is read only when
+    it is within ``MAX_GLB_BYTES``.
     """
     findings = validate_manifest(manifest, project_id=project_id)
     if findings:
@@ -263,6 +256,7 @@ def validate_scene(
     if layout is not None:
         findings += validate_layout(layout)
     sources: dict[str, bytes | Path] = {}
+    sizes: dict[str, int] = {}
     for name, asset in manifest["assets"].items():
         if asset is None:
             continue
@@ -277,9 +271,15 @@ def validate_scene(
         if sha256 != asset["sha256"]:
             findings.append(Finding("ASSET_SHA256", f"{name} sha256 does not match"))
         sources[name] = source
+        sizes[name] = size
     if "render" in sources:
-        render_format = manifest["assets"]["render"]["format"]
-        findings += check_render_asset(_head(sources["render"]), render_format)
+        render = sources["render"]
+        if sizes["render"] > MAX_GLB_BYTES:
+            findings.append(Finding("RENDER_ASSET", "render model is too large"))
+        else:
+            data = render.read_bytes() if isinstance(render, Path) else render
+            render_format = manifest["assets"]["render"]["format"]
+            findings += check_render_asset(data, render_format, manifest)
     if "poster" in sources:
         poster_format = manifest["assets"]["poster"]["format"]
         findings += check_poster_asset(_head(sources["poster"]), poster_format)
