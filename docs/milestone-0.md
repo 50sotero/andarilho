@@ -70,6 +70,44 @@ multi-room, doors, 3D furniture) addresses this. Live verification of wave 3
 waits for credit on the OpenCode account, which currently answers HTTP 402
 (insufficient account funds).
 
+### Wave 3 on run 9's data, without the model
+
+Two smoke runs on run 9's dataset tested wave 3 on real geometry.
+
+**Live call.** With `--analysis`, the stage chose 12 keyframes (347 KB of
+JPEG) and called the model, which answered 402 again. As designed, the run went
+on with `analysisStatus: unavailable` (reason `no_credit`) and a quality warning.
+The proposal stayed one room, and its east side now reaches 0.97 m further, to
+the wall evidence beyond the walk (`extendedSides`). The bundle validates.
+
+**Stand-in reply.** With `--analysis-reply`, the model's place was taken by a
+reply **written by hand** from those 12 keyframes. It is not output from
+DeepSeek or any model, and it says nothing about the model's quality. It names
+one room and 5 objects, and boxes each object and door the way the prompt asks:
+
+- shoe bench, coat stand, lamp on a pedestal and shoe rack, all on the floor;
+- a wall shelf, which is not placed, because only floor objects are;
+- the open door on the right and the closed entrance door.
+
+| Measure          | Result                                                                                                                                            |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Proposal         | one room, 6.3 m x 1.76 m, south side snapped, east side extended 0.97 m                                                                           |
+| Furniture        | 4 placed, 0 dropped: bench and coat stand against the end wall, lamp against the right wall, shoe rack against the left wall by the entrance door |
+| Doors            | 1 of 2: a closed 0.6 m panel near the end-wall corner; the open side door, seen only at a steep angle, was not placed                             |
+| Texture coverage | architecture 63 %, furniture 34 % (the rest of the furniture keeps its drawn colors)                                                              |
+| Bundle           | validates, walkable, no console errors in the viewer                                                                                              |
+
+From the spawn, the viewer shows the hall much as frame 0 does. Up close, two
+problems remain:
+
+- the furniture boxes are crude, and video texture smears background colors onto
+  them where the placement is off;
+- the shoe rack, whose bottom edge only one keyframe shows, came out at half its
+  drawn size.
+
+Both point to the grounding's known weak spots: steep views and cut-off bottom
+edges. The live model run should be judged against them.
+
 ## Capture
 
 One permitted handheld phone walkthrough of an apartment, received through
