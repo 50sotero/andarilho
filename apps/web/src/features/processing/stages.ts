@@ -5,9 +5,9 @@ export const STAGES = [
   { id: "validating", label: "Checking inputs" },
   { id: "preparing", label: "Preparing frames" },
   { id: "camera_reconstruction", label: "Recovering camera positions" },
-  { id: "training", label: "Training the visual scene" },
-  { id: "normalizing", label: "Cleaning and normalizing" },
+  { id: "normalizing", label: "Finding the floor and walls" },
   { id: "geometry_proposal", label: "Proposing walkable geometry" },
+  { id: "texturing", label: "Texturing the model from the video" },
   { id: "packaging", label: "Packaging the scene" },
   { id: "scene_validation", label: "Validating the scene" },
 ] as const;
@@ -73,8 +73,10 @@ export function formatElapsed(ms: number): string {
 }
 
 /**
- * Failures caused by the capture itself: retrying the same inputs would fail the
- * same way (and spend GPU time), so the user is sent to record a new capture.
+ * Failures that a retry of the same run cannot fix: the capture itself is at fault,
+ * or the scene predates the current pipeline and only processing the capture again
+ * produces one it can show. Retrying would fail the same way (and spend GPU time),
+ * so the user is sent to record a new capture or process it again.
  */
 const CAPTURE_FAILURE_CODES = new Set([
   "INSUFFICIENT_OVERLAP",
@@ -85,6 +87,7 @@ const CAPTURE_FAILURE_CODES = new Set([
   "UNSUPPORTED_MEDIA",
   "INSUFFICIENT_INPUTS",
   "INPUT_NOT_VERIFIED",
+  "SCENE_OUTDATED",
 ]);
 
 /** Whether to offer "retry with the same inputs" for a finished run. */

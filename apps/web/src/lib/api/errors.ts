@@ -175,6 +175,10 @@ const ERROR_COPY: Record<string, { title: string; action: string }> = {
     title: "The capture is too blurry",
     action: "Move more slowly and use better light.",
   },
+  SCENE_OUTDATED: {
+    title: "This scene was made by an older version",
+    action: "Process the capture again to get a scene the current version can show.",
+  },
   UPLOAD_INCOMPLETE: {
     title: "The upload isn't finished",
     action: "Resume the upload; missing parts will be sent again.",

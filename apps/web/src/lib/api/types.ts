@@ -237,11 +237,19 @@ export interface SceneDetail {
   }[];
   /** Private, short-lived link to the run's floor plan (owners/editors only). */
   floorPlan: FloorPlanLink | null;
+  /** Private, short-lived link to the run's capture evidence (owners/editors only). */
+  captureEvidence: CaptureEvidenceLink | null;
 }
 
 export interface FloorPlanLink {
   uploadId: string;
   contentType: string;
+  url: string;
+  expiresAt: string;
+}
+
+/** Short-lived link to the capture evidence file: sparse points and camera positions. */
+export interface CaptureEvidenceLink {
   url: string;
   expiresAt: string;
 }

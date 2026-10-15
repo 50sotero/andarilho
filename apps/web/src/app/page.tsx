@@ -10,7 +10,7 @@ const STEPS: readonly [string, string][] = [
   ["Upload", "Files go straight to private storage and can resume if your connection drops."],
   [
     "Process",
-    "Camera positions are recovered and the visual scene is trained. If a capture cannot be connected, you get a clear reason and a suggested fix.",
+    "The video's camera path places the rooms, and the walls, floor and ceiling are coloured from its frames. If a capture cannot be connected, you get a clear reason and a suggested fix.",
   ],
   [
     "Review",
@@ -72,8 +72,9 @@ export default function HomePage() {
         </h2>
         <p>
           Andarilho does not invent rooms it never saw. Missing surfaces, mirrors, glass, moving
-          people and blank walls can make reconstruction ambiguous. Measurements are only shown as
-          real when you confirmed a physical distance.
+          people and blank walls can make reconstruction ambiguous. Parts the video never saw stay
+          plain grey rather than being invented. Measurements are only shown as real when you
+          confirmed a physical distance.
         </p>
       </section>
     </div>

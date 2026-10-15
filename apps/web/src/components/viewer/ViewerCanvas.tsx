@@ -39,7 +39,7 @@ function toEngineView(state: EngineState): EngineView {
         kind: "loading",
         renderFraction: state.progress.renderFraction,
         steps: [
-          { label: "Visual scene", status: state.progress.render },
+          { label: "3D model", status: state.progress.render },
           { label: "Collision geometry", status: state.progress.collision },
           { label: "Physics", status: state.progress.physics },
           { label: "Safe starting point", status: state.progress.spawn },

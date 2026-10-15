@@ -90,6 +90,19 @@ describe("toFriendlyError", () => {
     expect(friendly.suggestedAction).toMatch(/cancel/i);
   });
 
+  it("explains a scene made before the current pipeline and says to process it again", () => {
+    const friendly = friendlyFromErrorBody({
+      code: "SCENE_OUTDATED",
+      message: "This scene was made by an older version.",
+      retryable: false,
+      suggestedAction: null,
+      requestId: "r2",
+    });
+    expect(friendly.title).toBe("This scene was made by an older version");
+    expect(friendly.suggestedAction).toMatch(/process the capture again/i);
+    expect(friendly.retryable).toBe(false);
+  });
+
   it("handles unknown codes, network errors and arbitrary values", () => {
     expect(
       toFriendlyError(new ApiError(500, { code: "WEIRD", message: "x", retryable: true })).title,

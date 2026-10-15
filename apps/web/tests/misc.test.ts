@@ -13,6 +13,8 @@ import {
   formatStageProgress,
   nextEventCursor,
   runActions,
+  STAGES,
+  stageLabel,
   stageStates,
 } from "@/features/processing/stages";
 import { expiryFromDays } from "@/features/sharing/SharePanel";
@@ -87,7 +89,7 @@ describe("layout geometry", () => {
     expect(scaled.walls![0]!.thickness).toBeCloseTo(0.2);
     expect(scaled.walls![0]!.height).toBeCloseTo(layout.walls![0]!.height * 2);
     expect(scaled.calibration).toEqual({ method: "known_distance", renderScale: 2 });
-    // Calibration is cumulative and absolute, so the splats are never rescaled twice.
+    // Calibration is cumulative and absolute, so the camera poses are never rescaled twice.
     expect(scaleLayout(scaled, 1.5).calibration?.renderScale).toBeCloseTo(3);
   });
   it("adds openings inside walls and removes a wall's openings with it", () => {
@@ -104,17 +106,35 @@ describe("run retry offer", () => {
       status: "failed" as const,
       error: { code, message: "", retryable: false, suggestedAction: null, requestId: "r" },
     });
-    expect(canRetryRun(failed("TRAINING_FAILED"))).toBe(true);
+    expect(canRetryRun(failed("TRANSIENT_FAILURE"))).toBe(true);
     expect(canRetryRun(failed("WORKER_LOST"))).toBe(true);
     expect(canRetryRun(failed("DISCONNECTED_CAPTURE"))).toBe(false);
     expect(canRetryRun({ status: "cancelled", error: null })).toBe(true);
     expect(canRetryRun({ status: "succeeded", error: null })).toBe(false);
   });
+
+  it("does not retry a scene made before the current pipeline", () => {
+    const outdated = {
+      status: "failed" as const,
+      error: {
+        code: "SCENE_OUTDATED",
+        message: "",
+        retryable: false,
+        suggestedAction: null,
+        requestId: "r",
+      },
+    };
+    expect(canRetryRun(outdated)).toBe(false);
+    expect(runActions({ ...outdated, cancelRequested: false }, "owner")).toMatchObject({
+      retry: false,
+      newCapture: true,
+    });
+  });
 });
 
 describe("run actions", () => {
   const error = {
-    code: "TRAINING_FAILED",
+    code: "TRANSIENT_FAILURE",
     message: "",
     retryable: false,
     suggestedAction: null,
@@ -159,7 +179,21 @@ describe("processing helpers", () => {
     const states = stageStates(run);
     expect(states.validating).toBe("done");
     expect(states.preparing).toBe("active");
-    expect(states.training).toBe("pending");
+    expect(states.texturing).toBe("pending");
+  });
+
+  it("lists the stages in pipeline order, with texturing after the proposal", () => {
+    expect(STAGES.map((s) => s.id)).toEqual([
+      "validating",
+      "preparing",
+      "camera_reconstruction",
+      "normalizing",
+      "geometry_proposal",
+      "texturing",
+      "packaging",
+      "scene_validation",
+    ]);
+    expect(stageLabel("texturing")).toBe("Texturing the model from the video");
   });
 });
 

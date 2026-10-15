@@ -1,7 +1,8 @@
 "use client";
 
-import { useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { useMemo, useRef, type KeyboardEvent, type PointerEvent } from "react";
 import type { Layout } from "@/lib/api/types";
+import { evidenceOnPlan, evidenceScale, type CaptureEvidence } from "./capture-evidence";
 import { pointAlong, round, type Point, type ViewBox } from "./geometry";
 import { describeSelection, movePoint, pointOf, type Selection } from "./layout-edit";
 
@@ -35,8 +36,13 @@ export function LayoutCanvas({
   onChange,
   showOverlay,
   underlay = null,
+  evidence = null,
+  showEvidence = false,
 }: {
   underlay?: PlanUnderlay | null;
+  /** The capture's points and camera path; drawn under the walls while showEvidence is on. */
+  evidence?: CaptureEvidence | null;
+  showEvidence?: boolean;
   layout: Layout;
   viewBox: ViewBox;
   selection: Selection | null;
@@ -49,6 +55,11 @@ export function LayoutCanvas({
   const scale = Math.max(viewBox.width, viewBox.height);
   const handleR = scale / 90;
   const stroke = scale / 400;
+  const renderScale = evidenceScale(layout.calibration);
+  const evidencePlan = useMemo(
+    () => (evidence && showEvidence ? evidenceOnPlan(evidence, renderScale) : null),
+    [evidence, showEvidence, renderScale],
+  );
 
   function toWorld(event: PointerEvent): Point | null {
     const svg = svgRef.current;
@@ -138,6 +149,7 @@ export function LayoutCanvas({
     return <circle {...common} cx={p[0]} cy={p[1]} r={r} />;
   }
 
+  const cameraStart: Point | null = evidencePlan?.cameraPath[0] ?? null;
   const walls = layout.walls ?? [];
   const wallById = new Map(walls.map((w) => [w.id, w]));
   const spawn: Point = [layout.spawn.feet[0], layout.spawn.feet[2]];
@@ -202,6 +214,35 @@ export function LayoutCanvas({
           />
         )),
       )}
+
+      {/* Drawn on the floor and under the walls. It is never a pointer target, so it
+          cannot get in the way of editing. */}
+      {evidencePlan ? (
+        <g data-layer="capture-evidence" aria-hidden="true" pointerEvents="none">
+          {evidencePlan.cameraPath.length > 1 ? (
+            <polyline
+              points={evidencePlan.cameraPath.map((p) => p.join(",")).join(" ")}
+              fill="none"
+              stroke="#7c3aed"
+              strokeWidth={stroke * 2}
+              strokeDasharray={`${stroke * 6} ${stroke * 4}`}
+            />
+          ) : null}
+          {evidencePlan.points.map((p, i) => (
+            <circle key={i} cx={p[0]} cy={p[1]} r={stroke * 2} fill="#0284c7" fillOpacity={0.7} />
+          ))}
+          {cameraStart ? (
+            <circle
+              cx={cameraStart[0]}
+              cy={cameraStart[1]}
+              r={handleR * 0.6}
+              fill="#7c3aed"
+              stroke="#ffffff"
+              strokeWidth={stroke}
+            />
+          ) : null}
+        </g>
+      ) : null}
 
       {(layout.obstacles ?? []).map((ob, oi) => (
         <polygon

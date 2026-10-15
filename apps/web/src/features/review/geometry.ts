@@ -145,7 +145,8 @@ export function layoutProblems(layout: Layout): LayoutProblem[] {
 
 /**
  * Uniformly scales every coordinate and height about the world origin and records
- * the cumulative calibration, so the worker scales the splats by the same amount.
+ * the cumulative calibration. The worker scales the run's camera poses by the same
+ * amount, which keeps the texture aligned with the calibrated layout.
  */
 export function scaleLayout(layout: Layout, factor: number): Layout {
   if (!(factor > 0) || !Number.isFinite(factor)) return layout;

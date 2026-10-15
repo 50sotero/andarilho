@@ -213,7 +213,7 @@ export function ProcessingView({
           {!terminal && job ? (
             <p className="text-stone-600 dark:text-stone-400">
               This stage has been running for {formatElapsed(now - Date.parse(job.createdAt))}.
-              Training time varies with the capture; no estimate is shown because it would not be
+              Processing time varies with the capture; no estimate is shown because it would not be
               reliable.
             </p>
           ) : null}

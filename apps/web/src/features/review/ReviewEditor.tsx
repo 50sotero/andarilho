@@ -21,6 +21,7 @@ import {
 } from "./geometry";
 import { AlignmentPanel } from "./AlignmentPanel";
 import { underlayFromFit } from "./alignment";
+import { loadCaptureEvidence, type CaptureEvidence } from "./capture-evidence";
 import { LayoutCanvas, type PlanUnderlay } from "./LayoutCanvas";
 import {
   addLandmark,
@@ -469,7 +470,13 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   const [busy, setBusy] = useState(false);
   const [envelope, setEnvelope] = useState<DeliveryEnvelope | null>(null);
   const [underlay, setUnderlay] = useState<PlanUnderlay | null>(null);
+  const [evidence, setEvidence] = useState<CaptureEvidence | null>(null);
+  const [showEvidence, setShowEvidence] = useState(true);
+  // The scene whose evidence was requested: the evidence does not change for a run, so
+  // later polls only renew its link and do not download it again.
+  const evidenceSceneRef = useRef<string | null>(null);
   const overlayId = useId();
+  const evidenceId = useId();
   // The revision whose layout the canvas shows. Approval is only offered for it, so
   // a revision saved elsewhere can never be approved against a stale canvas.
   const [shownRevisionId, setShownRevisionId] = useState<string | null>(null);
@@ -492,6 +499,11 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   const adoptScene = useCallback(
     (data: SceneDetail, resetLayout: boolean) => {
       setScene(data);
+      // A missing, expired or failed download leaves no layer and no error.
+      if (data.captureEvidence && evidenceSceneRef.current !== data.scene.id) {
+        evidenceSceneRef.current = data.scene.id;
+        void loadCaptureEvidence(data.captureEvidence).then(setEvidence);
+      }
       const rev = data.revision;
       if (!rev) return;
       if (resetLayout) {
@@ -803,6 +815,17 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
               />
               <label htmlFor={overlayId}>Highlight collision</label>
             </span>
+            {evidence ? (
+              <span className="flex items-center gap-1 text-sm">
+                <input
+                  id={evidenceId}
+                  type="checkbox"
+                  checked={showEvidence}
+                  onChange={(e) => setShowEvidence(e.target.checked)}
+                />
+                <label htmlFor={evidenceId}>Capture evidence</label>
+              </span>
+            ) : null}
           </div>
           <LayoutCanvas
             layout={layout}
@@ -814,11 +837,16 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
             underlay={
               underlay && scene?.floorPlan ? { ...underlay, url: scene.floorPlan.url } : null
             }
+            evidence={evidence}
+            showEvidence={showEvidence}
           />
           <p className="mt-2 text-xs text-stone-600 dark:text-stone-400">
             Grid squares are 1 m in the layout&apos;s units. Teal: walkable floor; black: walls;
             white gaps: openings; yellow: obstacles; purple: landmarks; red: starting point and
             facing direction.
+            {evidence && showEvidence
+              ? " Blue dots and the dashed purple line are the capture's points and camera path."
+              : ""}
             {revision.manifest?.scaleStatus === "estimated"
               ? " Scale is estimated: confirm a known distance before relying on measurements."
               : ""}
