@@ -2,13 +2,13 @@
 
 Reads the exact immutable key/version, checks the file signature against the
 declared media kind (MP4/MOV ``ftyp``, JPEG, PNG, PDF), rejects any
-SVG/HTML/archive/executable content, decodes images and probes videos with
-FFmpeg/FFprobe when available, walks PDF page trees in a bounded subprocess
-(rejecting encrypted, empty or oversized PDFs), computes the SHA-256 of the
-complete object and marks
-the upload ``verified`` or ``rejected``. The final update is conditional on
-``status = 'uploaded_unverified'`` and an active project, inside the fenced
-completion transaction.
+SVG/HTML/archive/executable content, decodes images and probes and decodes
+videos with FFmpeg/FFprobe when available (rejecting empty, over-long, corrupt
+or truncated videos), walks PDF page trees in a bounded subprocess (rejecting
+encrypted, empty or oversized PDFs), computes the SHA-256 of the complete
+object and marks the upload ``verified`` or ``rejected``. The final update is
+conditional on ``status = 'uploaded_unverified'`` and an active project, inside
+the fenced completion transaction.
 """
 
 from __future__ import annotations
@@ -23,9 +23,11 @@ from andarilho_worker.errors import StageError, TransientError
 from andarilho_worker.media import (
     ALLOWED,
     MAX_IMAGE_PIXELS,
+    MAX_VIDEO_SECONDS,
     jpeg_dimensions,
     parse_ffprobe,
     png_dimensions,
+    progress_frames,
     sniff,
 )
 from andarilho_worker.recipes import render_argv
@@ -36,6 +38,10 @@ MAX_INSPECT_BYTES = 8 * 1024**3
 PDF_MAX_BYTES = 64 * 1024**2
 # Wall-clock bound for one image decode or PDF walk (normally well under a second).
 CONTENT_CHECK_SECONDS = 120
+# A video decode may take up to twice the video's duration, within this ceiling.
+VIDEO_DECODE_MAX_SECONDS = 900
+# A video decoding fewer of its declared frames than this was cut short.
+MIN_DECODED_FRACTION = 0.95
 
 
 class Rejected(Exception):  # noqa: N818
@@ -63,6 +69,29 @@ def _inspect_pdf(ctx: StageContext, local: Any) -> dict[str, Any]:
     if not report.get("ok"):
         raise Rejected("UNSUPPORTED_MEDIA", str(report.get("reason") or "PDF is not supported"))
     return {"pages": int(report["pages"]), "hasJavaScript": bool(report["hasJavaScript"])}
+
+
+def _decode_video(ctx: StageContext, local: Any, probe: dict[str, Any]) -> dict[str, Any]:
+    """Decode every frame once, so a corrupt or truncated video is rejected now
+    rather than in preparation, after a run was submitted."""
+    if not tool_available("ffmpeg"):
+        return {"decoded": False}  # preparation decodes it with FFmpeg before use
+    progress = ctx.scratch / "decode-progress.txt"
+    seconds = min(
+        VIDEO_DECODE_MAX_SECONDS, max(CONTENT_CHECK_SECONDS, 2 * probe["durationSeconds"])
+    )
+    try:
+        ctx.run(render_argv("ffmpeg_decode_video", input=local, progress=progress), timeout=seconds)
+    except ProcessTimeout:
+        # A slow decode is no evidence of a bad file; preparation decodes it again.
+        return {"decoded": False}
+    except ProcessFailed as exc:
+        raise Rejected("INVALID_MEDIA", "video could not be decoded") from exc
+    decoded = progress_frames(progress.read_text(encoding="utf-8")) if progress.exists() else 0
+    declared = probe.get("frameCount") or round(probe["durationSeconds"] * probe["frameRate"])
+    if decoded == 0 or decoded < MIN_DECODED_FRACTION * declared:
+        raise Rejected("INVALID_MEDIA", "video is truncated")
+    return {"decoded": True, "decodedFrames": decoded}
 
 
 def _inspect(ctx: StageContext, upload: dict[str, Any]) -> dict[str, Any]:
@@ -124,7 +153,11 @@ def _inspect(ctx: StageContext, upload: dict[str, Any]) -> dict[str, Any]:
                 raise Rejected("INVALID_MEDIA", "video could not be probed") from exc
             if probe["codec"] not in ("h264", "hevc"):
                 raise Rejected("UNSUPPORTED_MEDIA", "unsupported video codec")
+            # The same bounds preparation applies, so such a file is never selectable.
+            if not 0 < probe["durationSeconds"] <= MAX_VIDEO_SECONDS:
+                raise Rejected("INVALID_MEDIA", "video is empty or too long")
             meta.update(probe, probed=True)
+            meta.update(_decode_video(ctx, local, probe))
         else:
             meta["probed"] = False  # preparation probes again with FFprobe before use
     return {"sha256": sha256, "bytes": actual, "metadata": meta}

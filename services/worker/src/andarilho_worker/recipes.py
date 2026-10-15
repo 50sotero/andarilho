@@ -57,6 +57,14 @@ ARGV: dict[str, tuple[str, ...]] = {
         "-err_detect", "explode", "-i", "{input}", "-map", "0:v:0", "-frames:v", "1",
         "-f", "null", "-",
     ),
+    # Upload inspection: decode every frame of a video once. A corrupt stream makes
+    # the decoder fail (-xerror); a file cut at a packet boundary decodes cleanly
+    # but stops early, which the final "frame=" count in {progress} shows.
+    "ffmpeg_decode_video": (
+        "ffmpeg", "-hide_banner", "-nostdin", "-loglevel", "error", "-xerror",
+        "-i", "{input}", "-map", "0:v:0", "-an", "-sn", "-dn", "-f", "null",
+        "-progress", "{progress}", "-stats_period", "5", "-nostats", "-",
+    ),
     # Upload inspection: walk a floor-plan PDF's page tree (see pdf_inspect.py).
     # {python} is the worker's own interpreter.
     "pdf_inspect": ("{python}", "-I", "-m", "andarilho_worker.pdf_inspect", "{input}"),

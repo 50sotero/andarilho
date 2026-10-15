@@ -572,6 +572,70 @@ def test_inspection_skips_already_decided_upload(db, seed, store, sup):
     assert seed.one("SELECT status FROM uploads WHERE id = %s", uid)["status"] == "rejected"
 
 
+class VideoRunner:
+    """Stands in for FFprobe and the inspection decode of one H.264 video."""
+
+    def __init__(self, *, duration: float = 10.0, declared: int = 300, decoded: int = 300,
+                 corrupt: bool = False) -> None:  # fmt: skip
+        self.duration, self.declared, self.decoded, self.corrupt = (
+            duration, declared, decoded, corrupt,
+        )  # fmt: skip
+        self.calls: list[list[str]] = []
+
+    def run(self, argv, *, timeout, check_cancelled=None, **kw):
+        argv = [str(a) for a in argv]
+        self.calls.append(argv)
+        if argv[0] == "ffprobe":
+            stream = {"codec_type": "video", "codec_name": "h264", "width": 1920,
+                      "height": 1080, "duration": str(self.duration),
+                      "avg_frame_rate": "30/1", "nb_frames": str(self.declared)}  # fmt: skip
+            out = json.dumps({"streams": [stream], "format": {"duration": str(self.duration)}})
+            return RunResult(tuple(argv), 0, out, "", 0.01)
+        if self.corrupt:
+            failed = RunResult(tuple(argv), 1, "", "", 0.01)
+            raise ProcessFailed("ffmpeg exited with status 1", failed)
+        progress = Path(argv[argv.index("-progress") + 1])
+        lines = ["frame=1", "progress=continue", f"frame={self.decoded}", "progress=end"]
+        progress.write_text("\n".join(lines) + "\n")
+        return RunResult(tuple(argv), 0, "", "", 0.01)
+
+
+@pytest.mark.parametrize(
+    "runner,status,reason",
+    [
+        (VideoRunner(), "verified", None),
+        # Cut at a packet boundary: decodes cleanly but stops halfway.
+        (VideoRunner(decoded=149), "rejected", "video is truncated"),
+        (VideoRunner(corrupt=True), "rejected", "video could not be decoded"),
+        (VideoRunner(duration=0.0, declared=0), "rejected", "video is empty or too long"),
+        (VideoRunner(duration=31 * 60.0), "rejected", "video is empty or too long"),
+    ],
+)
+def test_inspection_decodes_videos_within_the_supported_duration(
+    db, seed, store, settings, monkeypatch, runner, status, reason
+):
+    monkeypatch.setattr(inspect_mod, "tool_available", lambda name: True)
+    sup = Supervisor(db, store, settings, runner=runner)
+    pid = seed.project()
+    uid = make_upload(seed, store, pid, MP4, "video")
+    assert drain(db, sup) == [("upload_inspection", "succeeded")]
+    row = seed.one("SELECT status, rejection_code, media_metadata FROM uploads WHERE id = %s",
+                   uid)  # fmt: skip
+    assert row["status"] == status
+    decodes = [c for c in runner.calls if c[0] == "ffmpeg"]
+    if status == "verified":
+        assert row["media_metadata"]["decoded"] is True
+        assert row["media_metadata"]["decodedFrames"] == 300
+    else:
+        assert row["rejection_code"] == "INVALID_MEDIA"
+        assert row["media_metadata"]["rejectionReason"] == reason
+    if reason == "video is empty or too long":
+        assert decodes == []  # never decoded
+    else:
+        (decode,) = decodes
+        assert "-xerror" in decode and "-progress" in decode and decode[-1] == "-"
+
+
 # ---------------------------------------------------------------------------
 # Project cleanup
 # ---------------------------------------------------------------------------

@@ -111,8 +111,20 @@ def parse_ffprobe(stdout: str) -> dict[str, Any]:
         "width": int(video.get("width") or 0),
         "height": int(video.get("height") or 0),
         "durationSeconds": round(duration, 3),
+        # Frames the container declares (0 when it does not say).
+        "frameCount": int(video.get("nb_frames") or 0),
         "frameRate": round(fps, 3),
         "rotation": rotation,
         "hasAudio": any(s.get("codec_type") == "audio" for s in streams),
         "startTime": float(fmt.get("start_time") or 0),
     }
+
+
+def progress_frames(text: str) -> int:
+    """The last ``frame=`` count in FFmpeg ``-progress`` output (0 when there is none)."""
+    frames = 0
+    for line in text.splitlines():
+        key, _, value = line.partition("=")
+        if key.strip() == "frame" and value.strip().isdigit():
+            frames = int(value.strip())
+    return frames
