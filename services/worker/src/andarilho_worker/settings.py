@@ -82,6 +82,10 @@ class Settings:
     retry_base_seconds: float = 30.0
     retry_max_seconds: float = 900.0
     cleanup_reconcile_horizon_seconds: int = 900
+    # DaysAfterInitiation of the bucket's abort-incomplete-multipart lifecycle rule. The
+    # cleanups keep an aborted upload's ID until that rule has run (artifacts.
+    # multipart_expiry), so it must not be shorter than the rule's.
+    multipart_abort_days: int = 2
     # Scene analysis (scene_analysis stage), off unless AI_SCENE_ANALYSIS is set. The key is
     # read from the file OPENCODE_API_KEY_FILE names at each call; it is never logged. The
     # timeout and the reply budget have their own variables (AI_SCENE_TIMEOUT_SECONDS and
@@ -123,6 +127,7 @@ class Settings:
             local_store_dir=Path(local_dir) if local_dir else None,
             app_env=env.get("APP_ENV", "development"),
             max_scratch_bytes=_int(env, "WORKER_MAX_SCRATCH_BYTES", 50 * 1024**3),
+            multipart_abort_days=_int(env, "MULTIPART_ABORT_DAYS", 2),
             ai_scene_analysis=_flag(env, "AI_SCENE_ANALYSIS"),
             ai_base_url=_text(env, "AI_BASE_URL") or DEFAULT_AI_BASE_URL,
             ai_model=_text(env, "AI_MODEL") or DEFAULT_AI_MODEL,
@@ -134,6 +139,8 @@ class Settings:
                 env, "AI_SCENE_MAX_OUTPUT_TOKENS", DEFAULT_AI_SCENE_MAX_OUTPUT_TOKENS
             ),
         )
+        if settings.multipart_abort_days < 1:
+            raise ValueError("MULTIPART_ABORT_DAYS must be at least 1")
         if settings.ai_max_output_tokens < 1:
             raise ValueError("AI_SCENE_MAX_OUTPUT_TOKENS must be at least 1")
         if settings.app_env == "production":

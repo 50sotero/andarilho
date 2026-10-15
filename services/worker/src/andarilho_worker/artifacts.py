@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -38,6 +39,27 @@ def check_key(key: str) -> str:
     if not _KEY.match(key) or ".." in key.split("/") or "//" in key:
         raise ValueError(f"invalid object key {key!r}")
     return key
+
+
+DAY_SECONDS = 86400.0
+# How often an aborted multipart upload whose ID is kept (multipart_expiry) is checked
+# again for a part that landed late.
+MULTIPART_RECHECK_SECONDS = 6 * 3600.0
+
+
+def multipart_expiry(initiated: float, abort_days: int) -> float:
+    """When the bucket's abort-incomplete-multipart rule has surely ended an upload.
+
+    A part upload has no time limit of its own: its URL only has to be used before it
+    expires, and a large part on a slow connection can take hours. The one limit storage
+    enforces is that rule, which aborts an upload ``abort_days`` after its initiation
+    (time since the Unix epoch, in seconds), so no upload can be completed later than
+    that. S3 rounds the time up to the next midnight UTC and runs the abort some time
+    after it, so a day is added. MinIO's own stale-upload expiry, a day by default, comes
+    well before.
+    """
+    due = initiated + abort_days * DAY_SECONDS
+    return (math.floor(due / DAY_SECONDS) + 2) * DAY_SECONDS
 
 
 # Where ``preparing`` stores its frames inside its attempt prefix. camera_reconstruction
@@ -79,7 +101,7 @@ class ObjectStore(Protocol):
     def list_keys(self, prefix: str) -> list[str]: ...
     def delete_prefix(self, prefix: str) -> int: ...
     def abort_multipart_uploads(self, prefix: str) -> int: ...
-    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]: ...
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str, float]]: ...
     def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
     def count_multipart_parts(self, key: str, upload_id: str) -> int: ...
 
@@ -99,6 +121,9 @@ class LocalObjectStore:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
         self.multipart_uploads: dict[str, str] = {}  # upload id -> key (simulated)
+        # Initiation times (seconds since the epoch) of simulated uploads; one not given
+        # here was initiated long ago.
+        self.multipart_initiated: dict[str, float] = {}
         # Parts stored for an upload id (simulated). An abort removes them, but a part in
         # flight can land after it, as in S3; tests add such a part here.
         self.stored_parts: dict[str, int] = {}
@@ -183,13 +208,15 @@ class LocalObjectStore:
 
     def abort_multipart_uploads(self, prefix: str) -> int:
         doomed = self.list_multipart_uploads(prefix)
-        for key, uid in doomed:
+        for key, uid, _ in doomed:
             self.abort_multipart_upload(key, uid)
         return len(doomed)
 
-    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]:
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str, float]]:
         return sorted(
-            (key, uid) for uid, key in self.multipart_uploads.items() if key.startswith(prefix)
+            (key, uid, self.multipart_initiated.get(uid, 0.0))
+            for uid, key in self.multipart_uploads.items()
+            if key.startswith(prefix)
         )
 
     def abort_multipart_upload(self, key: str, upload_id: str) -> None:
@@ -410,13 +437,14 @@ class S3ObjectStore:
             raise self._wrap(exc) from exc
         return aborted
 
-    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]:
-        """The ``(key, upload id)`` of every multipart upload in progress under ``prefix``."""
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str, float]]:
+        """The ``(key, upload id, initiation time)`` of every multipart upload in progress
+        under ``prefix``; the time is in seconds since the epoch."""
         check_key(prefix.rstrip("/") + "/x")
         try:
             paginator = self.client.get_paginator("list_multipart_uploads")
             return [
-                (upload["Key"], upload["UploadId"])
+                (upload["Key"], upload["UploadId"], upload["Initiated"].timestamp())
                 for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix)
                 for upload in page.get("Uploads", [])
             ]

@@ -7,6 +7,7 @@ import struct
 import tarfile
 from collections import Counter
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -649,6 +650,52 @@ class _StubMultipartS3:
                     yield {"Parts": [{"PartNumber": n} for n in numbers]}
 
         return Paginator()
+
+
+def test_s3_lists_multipart_uploads_with_their_initiation_times():
+    from andarilho_worker.artifacts import S3ObjectStore
+
+    initiated = datetime(2026, 10, 14, 9, 30, tzinfo=UTC)
+
+    class Client:
+        def get_paginator(self, name):
+            assert name == "list_multipart_uploads"
+
+            class Paginator:
+                def paginate(self, Bucket, Prefix):  # noqa: N803 - boto3 names
+                    yield {"Uploads": [{"Key": Prefix + "u1", "UploadId": "mp-1",
+                                        "Initiated": initiated}]}  # fmt: skip
+                    yield {}
+
+            return Paginator()
+
+    store = S3ObjectStore("b", Client())
+    assert store.list_multipart_uploads("tenants/p1/staging/") == [
+        ("tenants/p1/staging/u1", "mp-1", initiated.timestamp())
+    ]
+
+
+def test_multipart_expiry_waits_for_the_bucket_rule_and_its_daily_run():
+    from andarilho_worker.artifacts import DAY_SECONDS, multipart_expiry
+
+    initiated = datetime(2026, 10, 14, 9, 30, tzinfo=UTC).timestamp()
+    # Two days later is 16 October, 09:30; S3 rounds up to the next midnight UTC and
+    # aborts some time after it, so the ID is kept until a day past that midnight.
+    expected = datetime(2026, 10, 18, tzinfo=UTC).timestamp()
+    assert multipart_expiry(initiated, 2) == expected
+    assert multipart_expiry(initiated, 1) == expected - DAY_SECONDS
+    midnight = datetime(2026, 10, 14, tzinfo=UTC).timestamp()
+    assert multipart_expiry(midnight, 2) == datetime(2026, 10, 18, tzinfo=UTC).timestamp()
+
+
+def test_multipart_abort_days_is_read_and_must_be_positive():
+    from andarilho_worker.settings import Settings
+
+    env = {"DATABASE_URL": "postgresql+psycopg://u:p@localhost:5432/db"}
+    assert Settings.from_env(env).multipart_abort_days == 2
+    assert Settings.from_env({**env, "MULTIPART_ABORT_DAYS": "7"}).multipart_abort_days == 7
+    with pytest.raises(ValueError, match="MULTIPART_ABORT_DAYS"):
+        Settings.from_env({**env, "MULTIPART_ABORT_DAYS": "0"})
 
 
 def test_s3_multipart_checks_treat_a_gone_upload_as_empty_and_fail_on_outages():
