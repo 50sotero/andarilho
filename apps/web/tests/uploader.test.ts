@@ -81,6 +81,7 @@ function fakeApi(fileSize: number, overrides: Partial<UploaderApi> = {}) {
       data: { upload: uploadRecord(uploadId, "uploaded_unverified") },
       etag: null,
     })),
+    abortUpload: vi.fn(async () => ({ data: undefined, etag: null })),
     ...overrides,
   };
   return { api: api as unknown as UploaderApi & typeof api, batches, partCount };
@@ -569,6 +570,99 @@ describe("MultipartUpload", () => {
     await upload.start();
     expect(api.createUpload).toHaveBeenCalledTimes(2);
     expect(upload.state.phase).toBe("completed");
+  });
+
+  it("keeps a paused upload the server still accepts during the expiry margin", async () => {
+    const size = 3 * PART;
+    const { api } = fakeApi(size, {
+      getUpload: vi.fn(async (uploadId: string) => ({
+        data: {
+          upload: uploadRecord(uploadId),
+          completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
+        },
+        etag: null,
+      })),
+    });
+    let clock = Date.now();
+    let block = true;
+    let upload: MultipartUpload | null = null;
+    const putPart = vi.fn<PutPart>(async (url, _b, signal) => {
+      if (block && partOf(url) === 2) {
+        upload!.pause();
+        if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+      }
+      return `"e${partOf(url)}"`;
+    });
+    upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+      api,
+      putPart,
+      storage: null,
+      concurrency: 1,
+      now: () => clock,
+    });
+    await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+    // Four minutes before its expiry the record alone is no longer trusted, but the
+    // server still accepts the upload, which holds the project's quota: it is kept.
+    clock = Date.parse(FUTURE) - 4 * 60 * 1000;
+    block = false;
+    await upload.start();
+    expect(api.getUpload).toHaveBeenCalledTimes(1);
+    expect(api.createUpload).toHaveBeenCalledTimes(1);
+    expect(upload.state.phase).toBe("completed");
+  });
+
+  it("aborts an upload whose creation answers after its file was removed", async () => {
+    const size = 3 * PART;
+    const server = fakeApi(size).api;
+    const storage = new MemoryStorage();
+    let upload: MultipartUpload | null = null;
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (...args: Parameters<UploaderApi["createUpload"]>) => {
+        upload!.discard({ abortOnServer: true }); // the user removes the row first
+        return server.createUpload(...args);
+      }),
+    });
+    const putPart = vi.fn<PutPart>(async (url) => `"e${partOf(url)}"`);
+    upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+      api,
+      putPart,
+      storage,
+    });
+    await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+    // Created once the row was gone: aborted, so it does not hold quota until it
+    // expires, and nothing that could find it again is kept.
+    expect(api.abortUpload).toHaveBeenCalledWith("u-new");
+    expect(putPart).not.toHaveBeenCalled();
+    expect(storage.length).toBe(0);
+    await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+    expect(api.createUpload).toHaveBeenCalledTimes(1);
+  });
+
+  it("aborts a removed file's unfinished upload only when asked", async () => {
+    const size = 3 * PART;
+    for (const abortOnServer of [true, false]) {
+      const { api } = fakeApi(size);
+      const storage = new MemoryStorage();
+      let upload: MultipartUpload | null = null;
+      const putPart: PutPart = async (url, _b, signal) => {
+        if (partOf(url) === 2) {
+          upload!.pause();
+          if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+        }
+        return `"e${partOf(url)}"`;
+      };
+      upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+        api,
+        putPart,
+        storage,
+        concurrency: 1,
+      });
+      await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+      expect(storage.length).toBe(1); // the resume record
+      upload.discard({ abortOnServer });
+      expect(api.abortUpload).toHaveBeenCalledTimes(abortOnServer ? 1 : 0);
+      expect(storage.length).toBe(0);
+    }
   });
 
   it("never reuses part URLs signed for an upload it replaced", async () => {

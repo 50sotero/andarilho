@@ -52,7 +52,7 @@ export interface UploadableFile {
 
 export type UploaderApi = Pick<
   ApiClient,
-  "createUpload" | "getUpload" | "requestPartUrls" | "completeUpload"
+  "createUpload" | "getUpload" | "requestPartUrls" | "completeUpload" | "abortUpload"
 >;
 
 export class StoragePutError extends Error {
@@ -187,6 +187,8 @@ export class MultipartUpload {
   private urlCacheUploadId: string | null = null;
   // Idempotency-Key of a creation that has not had a definite answer yet.
   private creationKey: string | null = null;
+  // Set by discard(): an upload created after it is aborted (when asked) and never kept.
+  private discarded: { abortOnServer: boolean } | null = null;
 
   constructor(
     projectId: string,
@@ -240,6 +242,7 @@ export class MultipartUpload {
   /** Starts or resumes. Resolves with the completed upload (status uploaded_unverified). */
   start(): Promise<Upload> {
     if (this.running) return this.running;
+    if (this.discarded) return Promise.reject(new UploadAbortedError());
     const controller = new AbortController();
     this.controller = controller;
     this.running = this.run(controller.signal).finally(() => {
@@ -252,6 +255,27 @@ export class MultipartUpload {
   /** Aborts in-flight requests. Completed parts are kept; call start() to resume. */
   pause(): void {
     this.controller?.abort();
+  }
+
+  /**
+   * Stops for good and forgets the upload, for a file the user removed. With
+   * `abortOnServer` the upload is aborted best-effort (expiry and cleanup reconcile a
+   * failure), including one whose creation is still awaiting its answer: it is aborted
+   * once its ID arrives, so it does not keep holding the project's quota.
+   */
+  discard(options: { abortOnServer: boolean }): void {
+    this.discarded = options;
+    this.pause();
+    const uploadId = this.record?.uploadId ?? this.progress.uploadId;
+    this.record = null;
+    this.resetUrlCache(null);
+    removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+    this.forgetCreationKey();
+    if (options.abortOnServer && uploadId) this.abortQuietly(uploadId);
+  }
+
+  private abortQuietly(uploadId: string) {
+    this.api.abortUpload(uploadId).catch(() => undefined);
   }
 
   private async run(signal: AbortSignal): Promise<Upload> {
@@ -301,21 +325,25 @@ export class MultipartUpload {
   private async initialize(
     signal: AbortSignal,
   ): Promise<UploadResumeRecord | { completedUpload: Upload }> {
-    if (this.record) {
-      // Resuming within the same page session, unless the upload expired meanwhile.
-      if (!isExpired(this.record, this.now())) return this.record;
-      this.discardRecord();
-    }
-
-    let saved = loadResumeRecord(this.projectId, this.identity, {
-      storage: this.storage,
-      now: this.now(),
-    });
-    // Name, size and date only find the record: another file can share all three, and
-    // reusing its upload would keep the old bytes or mix the two files.
-    if (saved && (await contentSample(this.file, saved.partSize)) !== saved.sample) {
-      removeResumeRecord(this.projectId, this.fingerprint, this.storage);
-      saved = null;
+    const inSession = this.record;
+    let saved: UploadResumeRecord | null;
+    if (inSession) {
+      // Resuming within the same page session. Near its expiry the server decides: the
+      // upload holds the project's quota until it lets the upload go, so a replacement
+      // could be refused while this one still takes parts.
+      if (!isExpired(inSession, this.now())) return inSession;
+      saved = inSession;
+    } else {
+      saved = loadResumeRecord(this.projectId, this.identity, {
+        storage: this.storage,
+        now: this.now(),
+      });
+      // Name, size and date only find the record: another file can share all three, and
+      // reusing its upload would keep the old bytes or mix the two files.
+      if (saved && (await contentSample(this.file, saved.partSize)) !== saved.sample) {
+        removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+        saved = null;
+      }
     }
     if (signal.aborted) throw new UploadAbortedError();
     if (saved) {
@@ -324,7 +352,8 @@ export class MultipartUpload {
         if (COMPLETED_STATUSES.has(data.upload.status)) {
           return { completedUpload: data.upload };
         }
-        if (data.upload.status === "initiated") {
+        const open = Date.parse(data.upload.expiresAt) > this.now();
+        if (data.upload.status === "initiated" && open) {
           // The server's part listing is authoritative; local ETags fill gaps only.
           const serverParts: CompletedPartRecord[] = data.completedParts.map((p) => ({
             partNumber: p.partNumber,
@@ -345,7 +374,8 @@ export class MultipartUpload {
           if (isRetryable(error)) throw error;
         }
       }
-      removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+      if (inSession) this.discardRecord();
+      else removeResumeRecord(this.projectId, this.fingerprint, this.storage);
     }
 
     // A lost response may hide an upload the server created: a retry with the same
@@ -382,6 +412,12 @@ export class MultipartUpload {
       completedParts: [],
       expiresAt: data.upload.expiresAt,
     };
+    if (this.discarded) {
+      // The file was removed while the upload was being created: nothing may keep it.
+      if (this.discarded.abortOnServer) this.abortQuietly(record.uploadId);
+      this.forgetCreationKey();
+      throw new UploadAbortedError();
+    }
     // This session now holds the upload in its record. Until a saved record can find it
     // after a reload, the stored creation key does: sending it again gets this same upload
     // back rather than creating another that also takes quota.

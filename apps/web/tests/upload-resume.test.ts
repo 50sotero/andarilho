@@ -8,6 +8,7 @@ import {
   contentSample,
   creationKey,
   fileFingerprint,
+  isExpired,
   loadResumeRecord,
   partRange,
   pruneResumeRecords,
@@ -191,17 +192,19 @@ describe("persistence", () => {
     expect(loadResumeRecord("project-1", file, { storage, now: NOW })).toBeNull();
   });
 
-  it("ignores and removes expired records, including within the safety margin", () => {
+  it("ignores and removes expired records, but keeps one within the safety margin", () => {
     const storage = new MemoryStorage();
     saveResumeRecord(record({ expiresAt: new Date(NOW - 1000).toISOString() }), storage);
     expect(loadResumeRecord("project-1", file, { storage, now: NOW })).toBeNull();
     expect(storage.length).toBe(0);
 
-    saveResumeRecord(
-      record({ expiresAt: new Date(NOW + EXPIRY_SAFETY_MARGIN_MS - 1000).toISOString() }),
-      storage,
-    );
-    expect(loadResumeRecord("project-1", file, { storage, now: NOW })).toBeNull();
+    // The server may still accept it, and it holds quota: the uploader asks the server.
+    const nearExpiry = record({
+      expiresAt: new Date(NOW + EXPIRY_SAFETY_MARGIN_MS - 1000).toISOString(),
+    });
+    saveResumeRecord(nearExpiry, storage);
+    expect(loadResumeRecord("project-1", file, { storage, now: NOW })).not.toBeNull();
+    expect(isExpired(nearExpiry, NOW)).toBe(true);
   });
 
   it("deduplicates and sorts completed parts", () => {

@@ -17,12 +17,7 @@ import { UploadList, type UploadRowView } from "@/features/uploads/UploadList";
 import { api, newIdempotencyKey } from "@/lib/api/client";
 import { toFriendlyError, type FriendlyError } from "@/lib/api/errors";
 import type { IntakePolicy, MediaKind, RunQuality, Upload } from "@/lib/api/types";
-import {
-  loadResumeRecord,
-  pruneResumeRecords,
-  removeResumeRecord,
-  uploadIdentity,
-} from "@/lib/upload-resume";
+import { loadResumeRecord, pruneResumeRecords, uploadIdentity } from "@/lib/upload-resume";
 import { usePolling } from "@/lib/use-polling";
 import { CaptureGuidance } from "./CaptureGuidance";
 import { SceneAnalysisNotice, sceneAnalysisNoticeShown } from "./SceneAnalysisNotice";
@@ -72,8 +67,8 @@ function readVideoDuration(file: File): Promise<number | null> {
  * (409), so the row stays until it confirms. That includes a completion still in
  * flight or just finished, before the row has seen the new status: if completion
  * wins, the file is being checked. An unfinished or rejected upload is aborted
- * best-effort (expiry and cleanup reconcile it); a row the server never saw is only
- * dropped locally.
+ * best-effort (expiry and cleanup reconcile it), and so is one still being created
+ * when its row goes, once its ID arrives (`MultipartUpload.discard`).
  */
 export function removalMode(
   serverStatus: UploadRowView["serverStatus"],
@@ -393,11 +388,12 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
         setError(toFriendlyError(err));
         return;
       }
-    } else if (mode === "best-effort") {
-      api.abortUpload(uploadId!).catch(() => undefined);
     }
-    uploader?.pause();
-    if (uploader) removeResumeRecord(projectId, uploader.fingerprint);
+    // An unfinished upload, or one still being created when the row goes, is aborted
+    // best-effort: once created, it would hold the project's quota until it expired.
+    const abortOnServer = mode === "best-effort" || mode === "local";
+    if (uploader) uploader.discard({ abortOnServer });
+    else if (mode === "best-effort") api.abortUpload(uploadId!).catch(() => undefined);
     uploadersRef.current.delete(id);
     setRows((prev) => prev.filter((r) => r.id !== id));
     if (row?.serverStatus !== "verified") setAnnouncement(`${row?.name ?? "File"} removed.`);

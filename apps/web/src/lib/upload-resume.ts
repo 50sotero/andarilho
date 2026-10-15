@@ -175,11 +175,23 @@ export function parseResumeRecord(raw: unknown): UploadResumeRecord | null {
   };
 }
 
-/** Records within this margin of expiry are treated as expired (time to finish uploading). */
+/**
+ * Within this margin of its expiry a record is no longer trusted on its own: the
+ * uploader asks the server whether the upload still takes parts.
+ */
 export const EXPIRY_SAFETY_MARGIN_MS = 5 * 60 * 1000;
 
+/** True near or past the record's expiry: the server must confirm the upload. */
 export function isExpired(record: UploadResumeRecord, now: number = Date.now()): boolean {
   return Date.parse(record.expiresAt) - EXPIRY_SAFETY_MARGIN_MS <= now;
+}
+
+/**
+ * True once the record's expiry has passed. Until then the server may still accept the
+ * upload, and the upload holds the project's quota, so a replacement could be refused.
+ */
+export function hasLapsed(record: UploadResumeRecord, now: number = Date.now()): boolean {
+  return Date.parse(record.expiresAt) <= now;
 }
 
 export function saveResumeRecord(
@@ -244,7 +256,7 @@ export function loadResumeRecord(
     record.projectId !== projectId ||
     record.fingerprint !== fingerprint ||
     expectedParts !== record.partCount ||
-    isExpired(record, options.now)
+    hasLapsed(record, options.now)
   ) {
     removeResumeRecord(projectId, fingerprint, storage);
     return null;
@@ -378,7 +390,7 @@ export function pruneResumeRecords(
       } catch {
         record = null;
       }
-      if (!record || isExpired(record, now)) doomed.push(key);
+      if (!record || hasLapsed(record, now)) doomed.push(key);
     }
     for (const key of doomed) storage.removeItem(key);
   } catch {
