@@ -12,6 +12,7 @@ import os
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -65,19 +66,27 @@ def _training_run(db: Session, project_id: uuid.UUID) -> uuid.UUID:
     return run_id
 
 
-def _job(project_id: uuid.UUID, run_id: uuid.UUID, stage: str) -> Job:
+def _job(project_id: uuid.UUID, run_id: uuid.UUID, stage: str, state: str = "queued") -> Job:
+    running = state == "running"  # a running job holds a lease
     return Job(
         project_id=project_id,
         run_id=run_id,
         capability="cpu",
         stage=stage,
-        state="queued",
-        fencing_token=0,
+        state=state,
+        fencing_token=1 if running else 0,
+        lease_owner="worker-1" if running else None,
+        lease_expires_at=datetime.now(UTC) + timedelta(seconds=90) if running else None,
     )
 
 
-def _texturing(project_id: uuid.UUID, run_id: uuid.UUID) -> Job:
-    return _job(project_id, run_id, "texturing")
+def _texturing(project_id: uuid.UUID, run_id: uuid.UUID, state: str = "queued") -> Job:
+    return _job(project_id, run_id, "texturing", state)
+
+
+def _revision(engine) -> str:
+    with engine.connect() as conn:
+        return conn.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
 
 
 def _stages(engine) -> list[str]:
@@ -115,7 +124,7 @@ def test_downgrade_removes_texturing_jobs_and_keeps_training(database_url, engin
     with Session(engine) as db:
         project_id = _project(db)
         run_id = _training_run(db, project_id)
-        db.add(_texturing(project_id, run_id))
+        db.add(_texturing(project_id, run_id, "succeeded"))
         db.commit()
 
     with _alembic(database_url) as config:
@@ -154,13 +163,43 @@ def test_downgrade_to_0006_removes_scene_analysis_jobs_only(database_url, engine
     with Session(engine) as db:
         project_id = _project(db)
         run_id = _training_run(db, project_id)
-        db.add(_job(project_id, run_id, "scene_analysis"))
-        db.add(_texturing(project_id, run_id))
+        db.add(_job(project_id, run_id, "scene_analysis", "succeeded"))
+        db.add(_texturing(project_id, run_id, "succeeded"))
         db.commit()
 
     with _alembic(database_url) as config:
         command.downgrade(config, "0006")
         try:
             assert _stages(engine) == ["texturing", "training", "validating"]
+        finally:
+            command.upgrade(config, "head")
+
+
+@pytest.mark.parametrize(
+    ("stage", "target", "state"),
+    [
+        ("scene_analysis", "0006", "queued"),
+        ("scene_analysis", "0006", "running"),
+        ("texturing", "0005", "retry_wait"),
+    ],
+)
+def test_downgrade_refuses_while_a_job_of_the_removed_stage_can_still_run(
+    database_url, engine, stage, target, state
+):
+    # Deleting it would strand its run: still active, holding its reservation and the
+    # project's only active-run slot, with no job left to finish it.
+    with Session(engine) as db:
+        project_id = _project(db)
+        run_id = _training_run(db, project_id)
+        db.add(_job(project_id, run_id, stage, state))
+        db.commit()
+
+    with _alembic(database_url) as config:
+        try:
+            with pytest.raises(RuntimeError, match=f"{stage} job"):
+                command.downgrade(config, target)
+            # Nothing was rolled back: the schema and the job are as they were.
+            assert _revision(engine) == "0007"
+            assert stage in _stages(engine)
         finally:
             command.upgrade(config, "head")
