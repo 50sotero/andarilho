@@ -189,6 +189,31 @@ def test_maintenance_expires_abandoned_uploads_and_deletes_them_a_day_later(db, 
     assert queue.expire_uploads(db) == (0, 0)
 
 
+def idempotency_record(seed, project_id: str, expires_in: str) -> str:
+    key = str(uuid.uuid4())
+    seed.exec(
+        "INSERT INTO idempotency_records (id, project_id, operation, idempotency_key, subject, "
+        "request_hash, response_status, response_body, expires_at) VALUES (%s, %s, "
+        "'uploads.create', %s, 'user-1', %s, 201, '{}'::jsonb, now() + %s::interval)",
+        str(uuid.uuid4()), project_id, key, "0" * 64, expires_in,
+    )  # fmt: skip
+    return key
+
+
+def test_maintenance_purges_expired_idempotency_records_a_batch_at_a_time(db, seed):
+    # Clients send a fresh key with every request, so no lookup ever finds these again.
+    pid = seed.project()
+    live = idempotency_record(seed, pid, "1 hour")
+    for _ in range(3):
+        idempotency_record(seed, pid, "-1 minute")
+    assert queue.purge_idempotency_records(db, batch=2) == 2
+    assert queue.maintenance(db)["idempotencyPurged"] == 1
+    keys = [
+        r["idempotency_key"] for r in seed.all("SELECT idempotency_key FROM idempotency_records")
+    ]
+    assert keys == [live]
+
+
 def test_reaper_fails_when_attempts_exhausted(db, seed):
     pid = seed.project()
     run_id, _ = seed.run(pid, max_attempts=1)

@@ -888,7 +888,7 @@ For asynchronous work return `202 Accepted` with the run/job ID. Use `409 Confli
 
 ### Run submission
 
-Require an `Idempotency-Key` header and compare a canonical request hash. Persist the original accepted run/job response in the submission transaction and replay it for the same key/body. Reusing the key with a different body is a conflict. Only server-defined recipes/quality tiers are accepted; users cannot supply shell flags, arbitrary URLs, local paths, or Python configuration files.
+Require an `Idempotency-Key` header and compare a canonical request hash. Persist the original accepted run/job response in the submission transaction and replay it for the same key/body. Reusing the key with a different body is a conflict. Records expire after `IDEMPOTENCY_TTL_SECONDS` (at least a day), and the worker's maintenance deletes expired ones. Only server-defined recipes/quality tiers are accepted; users cannot supply shell flags, arbitrary URLs, local paths, or Python configuration files.
 
 ```json
 {

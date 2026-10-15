@@ -32,6 +32,8 @@ log = logging.getLogger(__name__)
 ARTIFACT_CLEANUP_DELAY_SECONDS = 300
 # An expired upload's row is deleted this long after its expiry (see expire_uploads).
 EXPIRED_UPLOAD_RETENTION_SECONDS = 24 * 3600
+# Expired idempotency records deleted per maintenance pass, so one pass stays short.
+IDEMPOTENCY_PURGE_BATCH = 1000
 # A cleanup that used up its attempts on temporary failures (a storage outage, lost
 # workers) is queued again, waiting twice as long each time up to a day, so an outage
 # longer than the retry window cannot leave its objects until the project is deleted.
@@ -1197,6 +1199,25 @@ def expire_uploads(db: Database) -> tuple[int, int]:
     return expired, deleted
 
 
+def purge_idempotency_records(db: Database, *, batch: int = IDEMPOTENCY_PURGE_BATCH) -> int:
+    """Delete up to ``batch`` idempotency records past their expiry; return how many.
+
+    The API deletes an expired record only when a request brings the same key back, and
+    clients send a new key with every upload creation and run, so without this the table
+    would keep every record until its project is deleted. An expired record is never
+    replayed (the API treats its key as fresh), so deleting it changes no response.
+    """
+    with db.transaction() as conn:
+        return conn.execute(
+            """
+            DELETE FROM idempotency_records WHERE id IN (
+              SELECT id FROM idempotency_records WHERE expires_at <= now()
+              LIMIT %s FOR UPDATE SKIP LOCKED)
+            """,
+            (batch,),
+        ).rowcount
+
+
 def maintenance(db: Database) -> dict[str, int]:
     reaped = reap_expired(db)
     expired, deleted = expire_uploads(db)
@@ -1206,4 +1227,5 @@ def maintenance(db: Database) -> dict[str, int]:
         "promoted": promote_retry_wait(db),
         "uploadsExpired": expired,
         "uploadsDeleted": deleted,
+        "idempotencyPurged": purge_idempotency_records(db),
     }
