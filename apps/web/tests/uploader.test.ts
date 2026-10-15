@@ -764,6 +764,7 @@ describe("MultipartUpload", () => {
         return { data: { upload: uploadRecord("u-1"), partSize: PART, partCount: 2 }, etag: null };
       }),
     });
+    // Each uploader is on a page of its own, as after a reload.
     const make = () =>
       new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
         api,
@@ -771,6 +772,7 @@ describe("MultipartUpload", () => {
         storage,
         maxAttempts: 1,
         sleep: noSleep,
+        heldCreationKeys: new Set(),
       });
     await expect(make().start()).rejects.toBeInstanceOf(TypeError);
     lose = false;
@@ -785,17 +787,74 @@ describe("MultipartUpload", () => {
     expect(keys[2]).not.toBe(keys[0]);
   });
 
-  it("keeps the creation key until the new upload's record is saved", async () => {
+  it("gives files that share a name, size and date keys of their own", async () => {
     const size = 2 * PART;
     const storage = new MemoryStorage();
+    const page = new Set<string>();
     const keys: (string | undefined)[] = [];
     const { api } = fakeApi(size, {
       createUpload: vi.fn(async (_p: string, _b: unknown, key?: string) => {
         keys.push(key);
+        const upload = uploadRecord(`u-${keys.length}`);
+        return { data: { upload, partSize: PART, partCount: 2 }, etag: null };
+      }),
+    });
+    const make = (fill: number) =>
+      new MultipartUpload("p1", fakeFile(size, "walk.mp4", fill), "video", "video/mp4", {
+        api,
+        putPart: async (url) => `"e${partOf(url)}"`,
+        storage,
+        sleep: noSleep,
+        heldCreationKeys: page,
+      });
+    // Different bytes behind one name, size and date, then the same file selected twice:
+    // one key would make the API answer them with one upload, and all would upload into it.
+    const uploads = await Promise.all([make(1), make(2), make(1), make(1)].map((u) => u.start()));
+    expect(new Set(keys).size).toBe(4);
+    expect(new Set(uploads.map((u) => u.id)).size).toBe(4);
+  });
+
+  it("replays a lost creation after a reload only for the same bytes", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const keys: (string | undefined)[] = [];
+    let lose = true;
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (_p: string, _b: unknown, key?: string) => {
+        keys.push(key);
+        if (lose) throw new TypeError("Failed to fetch");
         return { data: { upload: uploadRecord("u-1"), partSize: PART, partCount: 2 }, etag: null };
       }),
     });
-    let unreadable = true;
+    const make = (fill: number) =>
+      new MultipartUpload("p1", fakeFile(size, "walk.mp4", fill), "video", "video/mp4", {
+        api,
+        putPart: async (url) => `"e${partOf(url)}"`,
+        storage,
+        maxAttempts: 1,
+        sleep: noSleep,
+        heldCreationKeys: new Set(), // each on a page of its own, as after a reload
+      });
+    await expect(make(1).start()).rejects.toBeInstanceOf(TypeError);
+    lose = false;
+    await make(2).start(); // another file with the same name, size and date
+    expect(keys[1]).not.toBe(keys[0]);
+    await make(1).start(); // the same file: its saved key gets the lost upload back
+    expect(keys[2]).toBe(keys[0]);
+  });
+
+  it("keeps the creation key until the new upload's record is saved", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const keys: (string | undefined)[] = [];
+    let unreadable = false;
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (_p: string, _b: unknown, key?: string) => {
+        keys.push(key);
+        unreadable = keys.length === 1; // unreadable just after the first creation
+        return { data: { upload: uploadRecord("u-1"), partSize: PART, partCount: 2 }, etag: null };
+      }),
+    });
     const file = fakeFile(size);
     const make = () =>
       new MultipartUpload(
@@ -811,7 +870,13 @@ describe("MultipartUpload", () => {
         },
         "video",
         "video/mp4",
-        { api, putPart: async (url) => `"e${partOf(url)}"`, storage, sleep: noSleep },
+        {
+          api,
+          putPart: async (url) => `"e${partOf(url)}"`,
+          storage,
+          sleep: noSleep,
+          heldCreationKeys: new Set(), // a page of its own, as after a reload
+        },
       );
     await expect(make().start()).rejects.toBeInstanceOf(DOMException);
     unreadable = false;

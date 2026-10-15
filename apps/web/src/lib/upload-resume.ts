@@ -314,6 +314,20 @@ export const CREATION_STORAGE_PREFIX = "andarilho:upload-create:";
 export const CREATION_KEY_TTL_MS = 24 * 60 * 60 * 1000;
 const CREATION_KEY = /^[A-Za-z0-9._:-]{8,255}$/;
 
+/** The part size a file is sampled with before its upload, and its real part size, exist. */
+export const CREATION_SAMPLE_PART_SIZE = 16 * 1024 * 1024;
+
+/**
+ * What a file's pending creation key is saved under: its fingerprint and a sample of its
+ * bytes. Name, size and date are a weak identity that two different files can share,
+ * and one key would make the API answer both with the same upload, into which both
+ * would then upload. Without Web Crypto it is the fingerprint alone.
+ */
+export async function creationIdentity(file: SampledFile, fingerprint: string): Promise<string> {
+  const sample = await contentSample(file, CREATION_SAMPLE_PART_SIZE);
+  return sample ? `${fingerprint}:${sample}` : fingerprint;
+}
+
 function creationSlot(projectId: string, fingerprint: string): string {
   return `${CREATION_STORAGE_PREFIX}${projectId}:${fingerprint}`;
 }
