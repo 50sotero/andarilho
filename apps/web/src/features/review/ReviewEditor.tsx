@@ -441,6 +441,19 @@ function CalibrationPanel({
   );
 }
 
+/**
+ * True while the scene's revision is being validated and packaged: the current one,
+ * or (before validation makes it current) the first revision, listed only among
+ * the scene's revisions.
+ */
+export function revisionPending(
+  scene: Pick<SceneDetail, "revision" | "revisions"> | null,
+): boolean {
+  if (!scene) return false;
+  if (scene.revision) return scene.revision.validationState === "pending";
+  return scene.revisions.some((r) => r.validationState === "pending");
+}
+
 export function ReviewEditor({ projectId }: { projectId: string }) {
   const { detail, error: projectError } = useProject(projectId);
   const sceneId = detail?.scene?.id ?? null;
@@ -484,8 +497,12 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
       if (resetLayout) {
         showRevision(rev);
       } else if (rev.id !== shownRef.current && !dirtyRef.current) {
+        const replacing = shownRef.current !== null;
         showRevision(rev);
-        setStatus(`Showing revision ${rev.revision}, saved since you loaded this page.`);
+        // A first revision that just finished processing was not "saved since".
+        if (replacing) {
+          setStatus(`Showing revision ${rev.revision}, saved since you loaded this page.`);
+        }
       }
     },
     [showRevision],
@@ -533,15 +550,22 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   }, [sceneId, adoptScene]);
 
   // While a saved revision is being validated/packaged, poll the scene.
-  const pending = scene?.revision?.validationState === "pending";
+  const pending = revisionPending(scene);
   usePolling(
     async (signal) => {
       if (!sceneId) return { terminal: true };
       const result = await api.getScene(sceneId, signal);
       setEtag(result.etag);
       adoptScene(result.data, false);
-      const done = result.data.revision?.validationState !== "pending";
-      if (done) setStatus(`Revision ${result.data.revision?.revision ?? ""} validation finished.`);
+      const done = !revisionPending(result.data);
+      const finished = result.data.revision;
+      if (done) {
+        setStatus(
+          finished
+            ? `Revision ${finished.revision} validation finished.`
+            : "Validation finished without a revision to review.",
+        );
+      }
       return { terminal: done };
     },
     { enabled: Boolean(pending && sceneId), key: `${sceneId}:${scene?.revision?.id ?? ""}` },

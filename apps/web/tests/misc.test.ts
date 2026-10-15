@@ -7,6 +7,7 @@ import {
   scaleLayout,
 } from "@/features/review/geometry";
 import { addOpening, movePoint, removeSelected } from "@/features/review/layout-edit";
+import { revisionPending } from "@/features/review/ReviewEditor";
 import {
   canRetryRun,
   formatStageProgress,
@@ -218,6 +219,24 @@ describe("private walk before the run creates the scene", () => {
     expect(awaitingScene({ scene, runs: runs("running") })).toBe(false);
     expect(awaitingScene({ scene: null, runs: runs("failed", "cancelled") })).toBe(false);
     expect(awaitingScene(null)).toBe(false);
+  });
+});
+
+describe("review page while a revision validates", () => {
+  const rev = (validationState: string) => ({ id: "rev-1", revision: 1, validationState });
+  const sceneWith = (current: object | null, revisions: object[]) =>
+    ({ revision: current, revisions }) as unknown as SceneDetail;
+
+  it("waits for a first revision that validation has not made current yet", () => {
+    expect(revisionPending(sceneWith(null, [rev("pending")]))).toBe(true);
+    expect(revisionPending(sceneWith(rev("pending"), [rev("pending")]))).toBe(true);
+  });
+
+  it("stops once validation finished or nothing is pending", () => {
+    expect(revisionPending(sceneWith(rev("valid"), [rev("valid")]))).toBe(false);
+    expect(revisionPending(sceneWith(null, [rev("invalid")]))).toBe(false);
+    expect(revisionPending(sceneWith(null, []))).toBe(false);
+    expect(revisionPending(null)).toBe(false);
   });
 });
 
