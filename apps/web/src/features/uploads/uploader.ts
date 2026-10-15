@@ -256,8 +256,7 @@ export class MultipartUpload {
       if ("completedUpload" in initialized) {
         // The server already completed this upload (e.g. the completion response was
         // lost before a reload): treat it as done instead of uploading a duplicate.
-        removeResumeRecord(this.projectId, this.fingerprint, this.storage);
-        this.record = null;
+        this.forgetFinishedUpload();
         this.emit({ phase: "completed", uploadedBytes: this.file.size });
         return initialized.completedUpload;
       }
@@ -274,8 +273,7 @@ export class MultipartUpload {
       if (signal.aborted) throw new UploadAbortedError();
       this.emit({ phase: "completing" });
       const { data } = await this.api.completeUpload(record.uploadId);
-      removeResumeRecord(this.projectId, this.fingerprint, this.storage);
-      this.record = null;
+      this.forgetFinishedUpload();
       this.emit({ phase: "completed", uploadedBytes: this.file.size });
       return data.upload;
     } catch (error) {
@@ -367,7 +365,6 @@ export class MultipartUpload {
       if (!isRetryable(error)) this.forgetCreationKey();
       throw error;
     }
-    this.forgetCreationKey();
     const record: UploadResumeRecord = {
       version: RESUME_RECORD_VERSION,
       uploadId: data.upload.id,
@@ -380,7 +377,13 @@ export class MultipartUpload {
       completedParts: [],
       expiresAt: data.upload.expiresAt,
     };
-    saveResumeRecord(record, this.storage);
+    // This session now holds the upload in its record. Until a saved record can find it
+    // after a reload, the stored creation key does: sending it again gets this same upload
+    // back rather than creating another that also takes quota.
+    this.creationKey = null;
+    if (saveResumeRecord(record, this.storage)) {
+      clearCreationKey(this.projectId, this.fingerprint, this.storage);
+    }
     this.emit({ uploadId: record.uploadId, resumed: false });
     return record;
   }
@@ -394,6 +397,15 @@ export class MultipartUpload {
     this.record = null;
     this.resetUrlCache(null);
     removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+    // A creation key kept because the record could not be saved would get this upload back.
+    this.forgetCreationKey();
+  }
+
+  /** The upload is complete: neither its record nor its creation key may find it again. */
+  private forgetFinishedUpload() {
+    this.record = null;
+    removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+    this.forgetCreationKey();
   }
 
   /** Forget part URLs signed for another upload: they would upload into it. */

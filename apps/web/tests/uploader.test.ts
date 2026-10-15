@@ -643,6 +643,75 @@ describe("MultipartUpload", () => {
     expect(keys[2]).not.toBe(keys[0]);
   });
 
+  it("keeps the creation key until the new upload's record is saved", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const keys: (string | undefined)[] = [];
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (_p: string, _b: unknown, key?: string) => {
+        keys.push(key);
+        return { data: { upload: uploadRecord("u-1"), partSize: PART, partCount: 2 }, etag: null };
+      }),
+    });
+    let unreadable = true;
+    const file = fakeFile(size);
+    const make = () =>
+      new MultipartUpload(
+        "p1",
+        {
+          ...file,
+          // The file cannot be read for the record's sample (or the page closes then).
+          slice: (start, end) => {
+            if (unreadable)
+              throw new DOMException("The file could not be read.", "NotReadableError");
+            return file.slice(start, end);
+          },
+        },
+        "video",
+        "video/mp4",
+        { api, putPart: async (url) => `"e${partOf(url)}"`, storage, sleep: noSleep },
+      );
+    await expect(make().start()).rejects.toBeInstanceOf(DOMException);
+    unreadable = false;
+    // The server created u-1, and the same key gets it back instead of another upload.
+    const upload = await make().start();
+    expect(upload.id).toBe("u-1");
+    expect(keys[1]).toBe(keys[0]);
+    expect([...storage.map.keys()].some((k) => k.startsWith("andarilho:upload-create:"))).toBe(
+      false,
+    );
+  });
+
+  it("forgets a creation key it could not replace with a record once the upload is done", async () => {
+    const size = PART;
+    const keys: (string | undefined)[] = [];
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async (_p: string, _b: unknown, key?: string) => {
+        keys.push(key);
+        return { data: { upload: uploadRecord("u-1"), partSize: PART, partCount: 1 }, etag: null };
+      }),
+    });
+    // Resume records cannot be stored, so the creation key stays while the upload runs.
+    const storage = new MemoryStorage();
+    const setItem = storage.setItem.bind(storage);
+    storage.setItem = (key: string, value: string) => {
+      if (key.startsWith("andarilho:upload:")) throw new Error("QuotaExceededError");
+      setItem(key, value);
+    };
+    const make = () =>
+      new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+        api,
+        putPart: async (url) => `"e${partOf(url)}"`,
+        storage,
+        sleep: noSleep,
+      });
+    await make().start();
+    // Done: the next upload of this file is a new upload with a new key.
+    await make().start();
+    expect(keys.length).toBe(2);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+
   it("does not reuse the key of a creation the server refused", async () => {
     const size = PART;
     const keys: (string | undefined)[] = [];
