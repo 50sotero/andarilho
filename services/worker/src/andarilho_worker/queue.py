@@ -445,6 +445,31 @@ def fail_run_revision(conn: psycopg.Connection, run_id: str, finding: Mapping[st
         _queue_scene_cleanup(conn, str(row["project_id"]), str(row["id"]))
 
 
+def queue_run_outputs(conn: psycopg.Connection, run_id: str) -> None:
+    """Queue what a run's succeeded stages wrote, once the run has ended unfinished.
+
+    A failed or cancelled run never had a valid scene (scene_validation succeeds the
+    run in the same transaction), so no layout save can read these outputs, and a retry
+    is a new run with its own prefixes. Without this the frames and datasets the
+    finished stages wrote would stay until the project is deleted. Each job's current
+    fence is the one it committed under; earlier fences were swept or queued already.
+    """
+    rows = conn.execute(
+        "SELECT id, project_id, stage, fencing_token FROM jobs "
+        "WHERE run_id = %s AND scene_revision_id IS NULL AND state = 'succeeded' "
+        "AND fencing_token > 0",
+        (run_id,),
+    ).fetchall()
+    by_project: dict[str, list[str]] = {}
+    for row in rows:
+        project_id = str(row["project_id"])
+        by_project.setdefault(project_id, []).append(
+            attempt_prefix(project_id, run_id, row["stage"], str(row["id"]), row["fencing_token"])
+        )
+    for project_id, prefixes in by_project.items():
+        queue_artifact_cleanup(conn, project_id, prefixes, reason="run_ended")
+
+
 def finalize_run_if_cancelled(conn: psycopg.Connection, run_id: str) -> bool:
     """When a cancelled run has no active jobs left, mark it cancelled and release budget."""
     row = conn.execute(
@@ -467,6 +492,7 @@ def finalize_run_if_cancelled(conn: psycopg.Connection, run_id: str) -> bool:
     if row is None:
         return False
     fail_run_revision(conn, run_id, RUN_CANCELLED_FINDING)
+    queue_run_outputs(conn, run_id)
     released = release_ledger(conn, run_id)
     log.info("run %s cancelled (ledger released=%s)", run_id, released)
     return True
@@ -493,6 +519,7 @@ def fail_run(conn: psycopg.Connection, run_id: str, error: Mapping[str, Any]) ->
     ).fetchall()
     _queue_unclaimed_attempts(conn, siblings)
     fail_run_revision(conn, run_id, RUN_FAILED_FINDING)
+    queue_run_outputs(conn, run_id)
     release_ledger(conn, run_id)
     return True
 

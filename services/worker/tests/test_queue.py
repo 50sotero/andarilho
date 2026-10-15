@@ -386,6 +386,30 @@ def test_reaper_queues_every_fence_a_job_ran_under_when_it_ends_it(db, seed):
     assert cleanup["input_manifest"]["prefixes"] == [f"{attempts}{fence}/" for fence in (1, 2, 3)]
 
 
+@pytest.mark.parametrize("ending", ["failed", "cancelled"])
+def test_a_run_that_ends_unfinished_queues_what_its_finished_stages_wrote(db, seed, ending):
+    pid = seed.project()
+    run_id, validating = seed.run(pid)
+    job = queue.claim(db, "w", "cpu")  # validating succeeds at fence 1
+    queue.complete_job(db, job, result_manifest={}, next_job=NextJob("preparing", "cpu", {}))
+    job = queue.claim(db, "w", "cpu")
+    assert job.stage == "preparing"
+    if ending == "failed":
+        assert queue.fail_job(db, job, error_body("INVALID_MEDIA")) == "failed"
+    else:
+        seed.exec(
+            "UPDATE reconstruction_runs SET cancel_requested_at = now() WHERE id = %s", run_id
+        )
+        assert queue.cancel_job(db, job)
+    assert seed.one("SELECT status FROM reconstruction_runs")["status"] == ending
+    [cleanup] = cleanup_jobs(seed, pid)
+    assert cleanup["input_manifest"] == {
+        "projectId": pid,
+        "prefixes": [f"tenants/{pid}/runs/{run_id}/attempts/validating/{validating}/1/"],
+        "reason": "run_ended",
+    }
+
+
 def test_failing_a_run_queues_its_first_revision_scene_prefix(db, seed):
     pid = seed.project()
     run_id, _ = seed.run(pid, first_stage="packaging")

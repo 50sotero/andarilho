@@ -6,8 +6,8 @@ jobs atomically and marks running jobs with ``cancel_requested_at``; workers
 acknowledge by moving their job to ``cancelled`` with their current fencing
 token. When no running job remains, the run becomes ``cancelled`` and its
 reservation is released exactly once (``state = 'reserved'`` guard). Storage that
-the cancelled work may have written is queued for deletion as ``artifact_cleanup``
-jobs, as the worker queues them.
+the cancelled work may have written, and what its finished stages wrote, is queued
+for deletion as ``artifact_cleanup`` jobs, as the worker queues them.
 """
 
 from __future__ import annotations
@@ -260,6 +260,26 @@ def _finalize_cancelled(db: Session, run: ReconstructionRun, now: datetime) -> N
             reason="revision_invalid",
             scene_revision_id=revision_id,
         )
+    # What the finished stages wrote is unreferenced too: a cancelled run never had a
+    # valid scene to re-texture, and a retry is a new run (the worker's queue_run_outputs).
+    finished = db.execute(
+        select(Job.id, Job.stage, Job.fencing_token).where(
+            Job.run_id == run.id,
+            Job.scene_revision_id.is_(None),
+            Job.state == "succeeded",
+            Job.fencing_token > 0,
+        )
+    ).all()
+    _queue_artifact_cleanup(
+        db,
+        project_id=run.project_id,
+        prefixes=[
+            attempt_prefix(run.project_id, run.id, job.stage, job.id, job.fencing_token)
+            for job in finished
+        ],
+        now=now,
+        reason="run_ended",
+    )
 
 
 def cancel_jobs(

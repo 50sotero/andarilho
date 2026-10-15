@@ -320,6 +320,23 @@ def test_cancelling_a_run_that_wrote_nothing_queues_no_cleanup(client, auth, db,
     assert _cleanup_jobs(db, project["id"]) == []
 
 
+def test_cancelling_a_run_queues_what_its_finished_stages_wrote(client, auth, db, project):
+    info = active_run(db, project["id"], job_states=("succeeded", "queued"))
+    validating = db.get(Job, uuid.UUID(info["jobIds"][0]))
+    validating.fencing_token = 1  # the attempt that succeeded
+    db.commit()
+    response = client.post(f"/v1/runs/{info['runId']}/cancel", headers=auth())
+    assert response.status_code == 202 and response.json()["status"] == "cancelled"
+
+    [cleanup] = _cleanup_jobs(db, project["id"])
+    pid, rid, jid = project["id"], info["runId"], info["jobIds"][0]
+    assert cleanup.input_manifest == {
+        "projectId": pid,
+        "prefixes": [f"tenants/{pid}/runs/{rid}/attempts/validating/{jid}/1/"],
+        "reason": "run_ended",
+    }
+
+
 def test_repeated_cancellation_queues_cleanup_once(client, auth, db, project):
     info = active_run(db, project["id"], job_states=("succeeded", "queued"))
     preparing = db.get(Job, uuid.UUID(info["jobIds"][1]))

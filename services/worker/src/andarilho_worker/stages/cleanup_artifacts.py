@@ -5,8 +5,8 @@ kinds of prefix:
 
 * an attempt prefix ``tenants/{p}/runs/{r}/attempts/{stage}/{job}/{fence}/`` of an
   attempt that was lost or cancelled before it committed (the reaper's view, or a
-  job cancelled before a later attempt could sweep what it left), or one a worker
-  failed to delete before the job ended;
+  job cancelled before a later attempt could sweep what it left), one a worker
+  failed to delete before the job ended, or the outputs of a run that ended unfinished;
 * a scene prefix ``tenants/{p}/scenes/{revision}/`` of a revision that is now invalid,
   because its pipeline failed or was cancelled before validation committed it.
 
@@ -20,9 +20,9 @@ are kept:
   cost: a failed layout save may still be the active draft when this job runs, and
   its files then stay until the project is deleted, because moving the pointer on
   queues no cleanup;
-* the attempt prefix a succeeded job committed under (its last fence). A succeeded
-  camera_reconstruction holds the frames that layout re-texturing needs. The job's
-  earlier fences are stale and deleted.
+* the attempt prefix a succeeded job committed under (its last fence), while its run
+  has not failed or been cancelled. A succeeded camera_reconstruction holds the frames
+  that layout re-texturing needs. The job's earlier fences are stale and deleted.
 
 Every requested prefix is checked before anything is deleted.
 """
@@ -98,15 +98,21 @@ def _revision_keep_reason(conn: Any, *, project_id: str, revision_id: str) -> st
 
 def _job_keep_reason(conn: Any, *, project_id: str, job_id: str, fence: int) -> str | None:
     row = conn.execute(
-        "SELECT state, fencing_token FROM jobs WHERE id = %s AND project_id = %s",
+        "SELECT j.state, j.fencing_token, r.status AS run_status FROM jobs j "
+        "LEFT JOIN reconstruction_runs r ON r.id = j.run_id AND r.project_id = j.project_id "
+        "WHERE j.id = %s AND j.project_id = %s",
         (job_id, project_id),
     ).fetchone()
     # Only the attempt that succeeded holds outputs that a later stage may still read. A
     # succeeded job is never claimed or reaped again, so its fence is the one it committed
     # under. Every other attempt, including one of a job that is gone, is unreferenced.
-    if row is not None and row["state"] == "succeeded" and row["fencing_token"] == fence:
-        return "the attempt's job succeeded"
-    return None
+    if row is None or row["state"] != "succeeded" or row["fencing_token"] != fence:
+        return None
+    # A run that ended unfinished never had a valid scene to re-texture, and a retry is
+    # a new run, so nothing reads what its stages wrote.
+    if row["run_status"] in ("failed", "cancelled"):
+        return None
+    return "the attempt's job succeeded"
 
 
 def run(ctx: StageContext) -> StageResult:

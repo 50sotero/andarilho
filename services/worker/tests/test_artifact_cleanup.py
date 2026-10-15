@@ -21,15 +21,18 @@ def sup(db, store, settings):
     return Supervisor(db, store, settings, delay_fn=lambda attempt: 0.0)
 
 
-def make_revision(seed, project_id: str, *, state: str = "invalid") -> dict[str, str]:
-    """A failed run and the scene and revision 1 it created, with the given validation state."""
+def make_revision(
+    seed, project_id: str, *, state: str = "invalid", run_status: str = "failed"
+) -> dict[str, str]:
+    """A run (failed unless ``run_status`` says otherwise) and the scene and revision 1 it
+    created, with the given validation state."""
     run_id, scene_id, revision_id = (str(uuid.uuid4()) for _ in range(3))
     seed.exec(
         "INSERT INTO reconstruction_runs (id, project_id, capture_set_id, created_by, "
         "recipe_name, recipe_digest, quality, include_supplementary_photos, resource_budget, "
         "status) VALUES (%s, %s, %s, 'user-1', 'synthetic', 'sha256:test', 'synthetic', true, "
-        "'{}'::jsonb, 'failed')",
-        run_id, project_id, seed.capture_set(project_id),
+        "'{}'::jsonb, %s)",
+        run_id, project_id, seed.capture_set(project_id), run_status,
     )  # fmt: skip
     seed.exec(
         "INSERT INTO scenes (id, project_id, run_id, version) VALUES (%s, %s, %s, 1)",
@@ -107,6 +110,17 @@ def run_due_cleanup(db, sup) -> str:
     assert job is not None and job.stage == "artifact_cleanup"
     assert job.run_id is None and job.scene_revision_id is None
     return sup.execute(job)
+
+
+def run_all_due_cleanups(db, sup) -> list[str]:
+    """Run every queued cleanup now; return their outcomes."""
+    with db.transaction() as conn:
+        conn.execute("UPDATE jobs SET available_at = now() WHERE stage = 'artifact_cleanup'")
+    outcomes = []
+    while (job := queue.claim(db, "worker-test", "cpu")) is not None:
+        assert job.stage == "artifact_cleanup"
+        outcomes.append(sup.execute(job))
+    return outcomes
 
 
 def cleanup_row(seed, project_id: str) -> dict:
@@ -237,10 +251,11 @@ def test_a_reference_to_another_revision_does_not_keep_this_one(db, seed, store,
     assert row["result_manifest"]["kept"] == [scene_of(pid, kept)]
 
 
-def test_an_attempt_of_a_succeeded_job_is_kept(db, seed, store, sup):
+@pytest.mark.parametrize("run_status", ["running", "succeeded"])
+def test_an_attempt_of_a_succeeded_job_is_kept(db, seed, store, sup, run_status):
     # A succeeded camera_reconstruction holds the frames that layout re-texturing reads.
     pid = seed.project()
-    rev = make_revision(seed, pid)
+    rev = make_revision(seed, pid, run_status=run_status)
     job_id = make_run_job(seed, pid, rev["run"], "succeeded")
     attempt = attempt_of(pid, rev["run"], job_id)
     store.put_bytes(attempt + "out.bin", b"x")
@@ -251,10 +266,27 @@ def test_an_attempt_of_a_succeeded_job_is_kept(db, seed, store, sup):
     assert cleanup_row(seed, pid)["result_manifest"]["kept"] == [attempt]
 
 
+@pytest.mark.parametrize("run_status", ["failed", "cancelled"])
+def test_a_succeeded_attempt_of_a_run_that_ended_unfinished_is_deleted(
+    db, seed, store, sup, run_status
+):
+    # Such a run never had a valid scene to re-texture, and a retry is a new run.
+    pid = seed.project()
+    rev = make_revision(seed, pid, run_status=run_status)
+    job_id = make_run_job(seed, pid, rev["run"], "succeeded")
+    attempt = attempt_of(pid, rev["run"], job_id)
+    store.put_bytes(attempt + "frames.tar", b"x")
+    enqueue(db, pid, [attempt], reason="run_ended")
+
+    assert run_due_cleanup(db, sup) == "succeeded"
+    assert store.list_keys(attempt) == []
+    assert cleanup_row(seed, pid)["result_manifest"]["deleted"] == [attempt]
+
+
 def test_only_the_fence_a_succeeded_job_committed_under_is_kept(db, seed, store, sup):
     # A worker that could not sweep fence 1 before succeeding at fence 2 queues fence 1.
     pid = seed.project()
-    rev = make_revision(seed, pid)
+    rev = make_revision(seed, pid, run_status="running")
     job_id = make_run_job(seed, pid, rev["run"], "succeeded")
     seed.exec("UPDATE jobs SET fencing_token = 2 WHERE id = %s", job_id)
     stale, committed = (attempt_of(pid, rev["run"], job_id, fence) for fence in (1, 2))
@@ -377,9 +409,12 @@ def test_a_rejected_scene_leaves_nothing_behind_once_its_cleanup_runs(db, seed, 
     prefix = f"tenants/{pid}/scenes/{rev['id']}/"
     assert store.list_keys(prefix)  # packaging wrote the viewer files before validation failed
 
-    assert run_due_cleanup(db, sup) == "succeeded"
+    assert store.list_keys(f"tenants/{pid}/runs/{run_id}/")  # the finished stages' outputs
+
+    # One cleanup for the scene, one for what the failed run's finished stages wrote.
+    assert run_all_due_cleanups(db, sup) == ["succeeded", "succeeded"]
     assert store.list_keys(prefix) == []
-    assert cleanup_row(seed, pid)["result_manifest"]["deleted"] == [prefix]
+    assert store.list_keys(f"tenants/{pid}/runs/{run_id}/") == []
 
 
 def test_a_worker_lost_on_its_last_attempt_leaves_nothing_behind(db, seed, store, sup):
