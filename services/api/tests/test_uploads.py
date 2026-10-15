@@ -81,9 +81,32 @@ def test_completing_on_a_versioned_bucket_leaves_no_staging_bytes(client, auth, 
     assert s3.get_object(Bucket=BUCKET, Key=row.immutable_key)["Body"].read() == b"v" * 1000
 
 
+def test_completing_again_replaces_a_copy_from_a_rolled_back_attempt(client, auth, db, s3):
+    s3.put_bucket_versioning(Bucket=BUCKET, VersioningConfiguration={"Status": "Enabled"})
+    pid = create_project(client, auth)["id"]
+    upload_id = _init(client, auth, pid, size=1000).json()["upload"]["id"]
+    _put_part(s3, db, upload_id, 1, b"v" * 1000)
+    # An earlier completion made the frozen copy, then its transaction rolled back.
+    frozen = f"tenants/{pid}/originals/{upload_id}"
+    s3.put_object(Bucket=BUCKET, Key=frozen, Body=b"v" * 1000)
+    done = client.post(f"/v1/uploads/{upload_id}/complete", json={}, headers=auth())
+    assert done.status_code == 202, done.text
+    row = db.get(Upload, uuid.UUID(upload_id))
+    db.refresh(row)
+    assert row.immutable_key == frozen
+    # Only the copy the database records remains.
+    versions = s3.list_object_versions(Bucket=BUCKET, Prefix=frozen).get("Versions", [])
+    assert [v["VersionId"] for v in versions] == [row.storage_version]
+
+
 def _refuse_deletes(app, monkeypatch) -> None:
+    """Storage refuses to delete staging copies (other deletes still work)."""
+    delete = app.state.storage.delete_all_versions
+
     def refuse(key: str) -> None:
-        raise StorageError("delete refused")
+        if "/staging/" in key:
+            raise StorageError("delete refused")
+        delete(key)
 
     monkeypatch.setattr(app.state.storage, "delete_all_versions", refuse)
 

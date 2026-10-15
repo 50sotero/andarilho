@@ -249,6 +249,13 @@ def _freeze(db: Session, storage: Storage, upload: Upload, info: ObjectInfo | No
         raise _size_mismatch()
 
     frozen_key = immutable_key(upload.project_id, upload.id)
+    # The upload is still open (and locked), so nothing references this key yet: a
+    # stored version can only be a copy whose transaction rolled back. Remove it
+    # instead of keeping an untracked full copy beside the new one.
+    try:
+        storage.delete_all_versions(frozen_key)
+    except StorageError:
+        raise _storage_unavailable() from None
     try:
         version = storage.copy_if_match(upload.staging_key, frozen_key, info.etag)
     except PreconditionFailed:
