@@ -113,8 +113,18 @@ class Storage:
         return response["UploadId"]
 
     def presign_upload_part(
-        self, key: str, multipart_upload_id: str, part_number: int, expires_in: int
+        self,
+        key: str,
+        multipart_upload_id: str,
+        part_number: int,
+        expires_in: int,
+        content_length: int,
     ) -> str:
+        """A URL for one ``UploadPart`` PUT of exactly ``content_length`` bytes.
+
+        The length is a signed header: storage refuses a body of any other size
+        (``SignatureDoesNotMatch``), so a URL cannot store more than the part it is for.
+        """
         return self.public.generate_presigned_url(
             "upload_part",
             Params={
@@ -122,6 +132,7 @@ class Storage:
                 "Key": key,
                 "UploadId": multipart_upload_id,
                 "PartNumber": part_number,
+                "ContentLength": content_length,
             },
             ExpiresIn=expires_in,
         )

@@ -176,6 +176,13 @@ def _require_open(upload: Upload) -> None:
         raise _expired()
 
 
+def _part_bytes(upload: Upload, part_number: int) -> int:
+    """A part's exact size: the part size, or what is left of the file for the last one."""
+    if part_number < upload.part_count:
+        return upload.part_size
+    return upload.expected_bytes - upload.part_size * (upload.part_count - 1)
+
+
 @router.post("/uploads/{upload_id}/parts")
 def sign_parts(
     upload_id: uuid.UUID,
@@ -192,15 +199,19 @@ def sign_parts(
         raise validation_failed("Part numbers must be between 1 and the upload's part count.")
     ttl = settings.upload_part_url_ttl_seconds
     expires_at = utcnow() + timedelta(seconds=ttl)
+    # Each URL is bound to its part's exact size, so a client that skips the official
+    # uploader still cannot store more than the declared bytes the quota counted.
     urls = [
         {
             "partNumber": n,
             "url": storage.presign_upload_part(
                 upload.staging_key,
-                upload.multipart_upload_id,
+                upload.multipart_upload_id,  # type: ignore[arg-type]
                 n,
-                ttl,  # type: ignore[arg-type]
+                ttl,
+                _part_bytes(upload, n),
             ),
+            "bytes": _part_bytes(upload, n),
         }
         for n in body.part_numbers
     ]

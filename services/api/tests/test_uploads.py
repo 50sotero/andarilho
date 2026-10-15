@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 from conftest import BUCKET
@@ -270,6 +270,13 @@ def test_multipart_upload_with_two_parts(client, auth, db, s3, app):
     body = _init(client, auth, pid, size=size).json()
     assert body["partCount"] == 2
     upload_id = body["upload"]["id"]
+    # Each URL signs its part's exact length: the part size, then what is left.
+    signed = client.post(
+        f"/v1/uploads/{upload_id}/parts", json={"partNumbers": [1, 2]}, headers=auth()
+    ).json()["urls"]
+    assert [(u["partNumber"], u["bytes"]) for u in signed] == [(1, 5 * MIB), (2, 10)]
+    for u in signed:
+        assert parse_qs(urlparse(u["url"]).query)["X-Amz-SignedHeaders"] == ["content-length;host"]
     _put_part(s3, db, upload_id, 1, b"a" * (5 * MIB))
     _put_part(s3, db, upload_id, 2, b"b" * 10)
     done = client.post(f"/v1/uploads/{upload_id}/complete", headers=auth())

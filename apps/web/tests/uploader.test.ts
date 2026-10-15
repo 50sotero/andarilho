@@ -70,6 +70,7 @@ function fakeApi(fileSize: number, overrides: Partial<UploaderApi> = {}) {
           urls: partNumbers.map((n) => ({
             partNumber: n,
             url: `https://storage.test/${uploadId}/${n}`,
+            bytes: Math.min(PART, fileSize - (n - 1) * PART),
           })),
           expiresAt: FUTURE,
         },
@@ -589,6 +590,7 @@ describe("MultipartUpload", () => {
           urls: partNumbers.map((n) => ({
             partNumber: n,
             url: `https://storage.test/${uploadId}/${n}`,
+            bytes: Math.min(PART, size - (n - 1) * PART),
           })),
           expiresAt: urlsExpire,
         },

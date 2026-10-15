@@ -144,7 +144,8 @@ export interface UploadStatusResponse {
 }
 
 export interface PartUrlsResponse {
-  urls: { partNumber: number; url: string }[];
+  // Each URL accepts exactly `bytes` bytes: the part size, or the remainder for the last.
+  urls: { partNumber: number; url: string; bytes: number }[];
   expiresAt: string;
 }
 
