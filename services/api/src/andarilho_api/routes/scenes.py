@@ -17,7 +17,11 @@ from andarilho_api.db import get_db
 from andarilho_api.deps import check_if_match, get_settings_dep, get_storage, utcnow
 from andarilho_api.domain import audit
 from andarilho_api.domain.membership import OWNER, WRITERS, load_project, load_scoped, lock_row
-from andarilho_api.domain.publication import published_revision_id
+from andarilho_api.domain.publication import (
+    publication_changed,
+    published_revision_id,
+    settle_expired_publication,
+)
 from andarilho_api.domain.revisions import (
     build_envelope,
     hash_token,
@@ -134,6 +138,14 @@ def get_scene(
     scene = load_scoped(db, Scene, scene_id, subject, "scene")
     # Draft layouts, findings and history are review material: owners/editors only.
     project, _ = load_project(db, scene.project_id, subject, roles=WRITERS)
+    if published_revision_id(db, project) != project.published_revision_id:
+        # A link expired since the publication was last set: settle it, so the ETag
+        # handed out here is the version a publish will be checked against.
+        project, _ = load_project(db, scene.project_id, subject, roles=WRITERS, lock=True)
+        settled = settle_expired_publication(db, project)
+        db.commit()  # also releases the project lock
+        if settled:
+            db.refresh(scene)
     revisions = (
         db.execute(
             select(SceneRevision)
@@ -159,29 +171,24 @@ def get_scene(
 
 
 def _lock_scene(db: Session, scene_id: uuid.UUID, subject: str, roles: tuple[str, ...]):
-    scoped = load_scoped(db, Scene, scene_id, subject, "scene")
-    project, role = load_project(
-        db, scoped.project_id, subject, roles=roles, lock=True, require_active=True
-    )
-    return project, lock_row(db, Scene, scoped.id)
+    """Lock the project, then the scene, after settling links that expired since.
 
-
-def _publication_changed(
-    db: Session, revision_ids: list[uuid.UUID | None], *, skip: uuid.UUID | None = None
-) -> None:
-    """Bump the version of each scene holding one of these revisions (except ``skip``).
-
-    Publishing is guarded by the scene ETag: a tab that read a scene before its
-    revision was published or unpublished must get a conflict, not publish over it.
+    A settled expiry is committed before the caller checks its If-Match: it gives the
+    scenes involved new versions, and the conflict it causes must not roll that back.
     """
-    ids = {r for r in revision_ids if r is not None}
-    if not ids:
-        return
-    holders = select(SceneRevision.scene_id).where(SceneRevision.id.in_(ids))
-    for held in db.execute(
-        select(Scene).where(Scene.id.in_(holders), Scene.id != skip).with_for_update()
-    ).scalars():
-        held.version += 1
+    scoped = load_scoped(db, Scene, scene_id, subject, "scene")
+
+    def lock_project() -> Project:
+        project, _ = load_project(
+            db, scoped.project_id, subject, roles=roles, lock=True, require_active=True
+        )
+        return project
+
+    project = lock_project()
+    if settle_expired_publication(db, project):
+        db.commit()
+        project = lock_project()
+    return project, lock_row(db, Scene, scoped.id)
 
 
 @router.put("/scenes/{scene_id}/layout", status_code=202)
@@ -361,7 +368,7 @@ def create_share(
     # Publishing changes what the scene's viewers see: a tab still holding the old
     # ETag must get a conflict instead of silently publishing over this.
     scene.version += 1
-    _publication_changed(db, [effective, stored], skip=scene.id)
+    publication_changed(db, [effective, stored], skip=scene.id)
     if revision.manifest_sha256 is None:
         revision.manifest_sha256 = manifest_sha256(revision)
     audit.record(
@@ -414,7 +421,7 @@ def revoke_share(share_id: uuid.UUID, subject: Subject, db: Db):
                 project.updated_at = now
         after = published_revision_id(db, project)
         if after != before:
-            _publication_changed(db, [before, after])
+            publication_changed(db, [before, after])
         audit.record(
             db,
             project_id=project.id,

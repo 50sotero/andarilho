@@ -465,7 +465,8 @@ def _publish_then_expire_a_newer_scene(client, auth, db, setup) -> dict:
     _expire_shares_of(db, newer["revisionId"])
     project = client.get(f"/v1/projects/{setup['pid']}", headers=auth()).json()["project"]
     assert project["publishedRevisionId"] == setup["revisionId"]
-    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"4"'
+    # Viewers see A again: reading it settles the expiry and bumps it to 5.
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"5"'
     return newer
 
 
@@ -475,8 +476,8 @@ def test_publishing_bumps_the_scene_viewers_see_when_the_pointer_expired(client,
     assert _approve(client, auth, third).status_code == 200
     assert _share(client, auth, third, 2).status_code == 201
     # Scene A was what viewers saw, and now it is not: a tab holding its ETag must conflict.
-    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"5"'
-    assert _share(client, auth, setup, 4).status_code == 409
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"6"'
+    assert _share(client, auth, setup, 5).status_code == 409
 
 
 def test_revoking_the_link_viewers_see_bumps_its_scene_when_the_pointer_expired(
@@ -488,9 +489,37 @@ def test_revoking_the_link_viewers_see_bumps_its_scene_when_the_pointer_expired(
     ).scalar_one()
     assert client.delete(f"/v1/shares/{live.id}", headers=auth()).status_code == 204
     # The stored pointer named the expired scene, but scene A is what stopped being shown.
-    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"5"'
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"6"'
     project = client.get(f"/v1/projects/{setup['pid']}", headers=auth()).json()["project"]
     assert project["publishedRevisionId"] is None
+
+
+def _publish_until_an_hour_from_now(client, auth, setup) -> None:
+    assert _approve(client, auth, setup).status_code == 200
+    expires = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    assert _share(client, auth, setup, 2, expiresAt=expires).status_code == 201  # version 3
+
+
+def test_a_link_expiring_on_its_own_invalidates_the_scene_etag(client, auth, db, setup):
+    _publish_until_an_hour_from_now(client, auth, setup)
+    # A tab read the scene while it was published; then its only link expired, and no
+    # request ran in between.
+    _expire_shares_of(db, setup["revisionId"])
+    assert _share(client, auth, setup, 3).status_code == 409
+    # The publish settled the expiry and kept it: a reload gets the new version.
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"4"'
+    assert _share(client, auth, setup, 4).status_code == 201
+
+
+def test_reading_a_scene_settles_an_expired_link_once(client, auth, db, setup):
+    _publish_until_an_hour_from_now(client, auth, setup)
+    _expire_shares_of(db, setup["revisionId"])
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"4"'
+    assert _get_scene(client, auth, setup["sceneId"]).headers["ETag"] == '"4"'
+    project = db.get(Project, uuid.UUID(setup["pid"]))
+    db.refresh(project)
+    assert project.published_revision_id is None
+    assert _share(client, auth, setup, 3).status_code == 409
 
 
 def test_revoking_newest_share_keeps_older_live_link_published(client, auth, db, setup):

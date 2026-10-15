@@ -4,6 +4,10 @@
 but links also expire on their own. Reads therefore derive publication from the
 links that are still live: the stored pointer while it has one, otherwise the
 newest live link's revision, otherwise nothing.
+
+An expiry changes the publication without any request, so nothing bumps the
+versions of the scenes involved when it happens. ``settle_expired_publication``
+does that for the first request that touches the project's scenes afterwards.
 """
 
 from __future__ import annotations
@@ -15,7 +19,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from andarilho_api.deps import utcnow
-from andarilho_api.models import Project, ShareLink
+from andarilho_api.models import Project, Scene, SceneRevision, ShareLink
 
 
 def live_published(db: Session, projects: Iterable[Project]) -> dict[uuid.UUID, uuid.UUID | None]:
@@ -47,3 +51,39 @@ def live_published(db: Session, projects: Iterable[Project]) -> dict[uuid.UUID, 
 
 def published_revision_id(db: Session, project: Project) -> uuid.UUID | None:
     return live_published(db, [project])[project.id]
+
+
+def publication_changed(
+    db: Session, revision_ids: Iterable[uuid.UUID | None], *, skip: uuid.UUID | None = None
+) -> None:
+    """Bump the version of each scene holding one of these revisions (except ``skip``).
+
+    Publishing is guarded by the scene ETag: a tab that read a scene before its
+    revision was published or unpublished must get a conflict, not publish over it.
+    """
+    ids = {r for r in revision_ids if r is not None}
+    if not ids:
+        return
+    holders = select(SceneRevision.scene_id).where(SceneRevision.id.in_(ids))
+    for held in db.execute(
+        select(Scene).where(Scene.id.in_(holders), Scene.id != skip).with_for_update()
+    ).scalars():
+        held.version += 1
+
+
+def settle_expired_publication(db: Session, project: Project) -> bool:
+    """Catch the stored pointer up with links that expired since it was last set.
+
+    When it differs from the live-derived publication, the pointer takes that value and
+    the scenes holding either revision get a new version, as an explicit revoke would
+    give them. The caller holds the project's row lock and commits. Returns whether
+    anything changed.
+    """
+    effective = published_revision_id(db, project)
+    stored = project.published_revision_id
+    if effective == stored:
+        return False
+    project.published_revision_id = effective
+    project.updated_at = utcnow()
+    publication_changed(db, [stored, effective])
+    return True
