@@ -1,5 +1,6 @@
 import { SparkRenderer, SplatFileType, SplatMesh } from "@sparkjsdev/spark";
 import type { Scene, WebGLRenderer } from "three";
+import { whenSparkIdle } from "./spark-idle";
 import { decomposeRenderTransform } from "./transform";
 
 /**
@@ -94,8 +95,11 @@ export function createSparkScene(options: SparkSceneOptions): SparkSceneHandle {
       disposed = true;
       options.scene.remove(mesh);
       options.scene.remove(spark);
-      mesh.dispose();
-      spark.dispose();
+      // Out of the scene nothing starts new work; let a sort in flight finish first.
+      whenSparkIdle(spark, () => {
+        mesh.dispose();
+        spark.dispose();
+      });
     },
   };
 }
