@@ -22,6 +22,8 @@ from scene_analysis_fixtures import (
 from stage_fixtures import stage_context
 
 from andarilho_worker import queue
+from andarilho_worker.artifacts import LocalObjectStore
+from andarilho_worker.errors import TransientError
 from andarilho_worker.geometry.layout import validate_layout
 from andarilho_worker.stages import STAGES
 from andarilho_worker.stages.propose_geometry import load_evidence, snap_rectangle
@@ -392,6 +394,31 @@ def test_a_malformed_analysis_gives_the_plain_room_and_names_the_error(
     assert layout["openings"] == [] and not layout.get("furniture")
     assert diagnostics["analysisError"] == "ValueError"
     assert diagnostics["rooms"] == 1
+
+
+class _AnalysisOutageStore(LocalObjectStore):
+    """Every read of an ``analysis.json`` fails as an object-store outage does."""
+
+    def get_bytes(self, key: str) -> bytes:
+        if key.endswith("/analysis.json"):
+            raise TransientError()
+        return super().get_bytes(key)
+
+
+def test_a_storage_outage_reading_the_analysis_retries_the_stage(
+    db, seed, store, settings, stage_run
+):
+    pid, run_id, job_id = stage_run
+    key = _seed_analysis(store, pid, run_id, _sofa_and_door_analysis())
+    outputs = _bounds_outputs(analysisStatus="complete", analysisKey=key)
+    seed.exec(
+        "UPDATE jobs SET input_manifest = input_manifest || %s::jsonb WHERE id = %s",
+        json.dumps({"outputs": outputs}), job_id,
+    )  # fmt: skip
+    sup = Supervisor(db, _AnalysisOutageStore(store.root), settings, stages=STAGES)
+    # Not the plain room: a retry can still place the analysed furniture once storage is back.
+    assert sup.execute(queue.claim(db, "cpu-worker", "cpu")) == "retry_wait"
+    assert seed.one("SELECT count(*) AS n FROM scene_revisions WHERE run_id = %s", run_id)["n"] == 0
 
 
 def test_a_foreign_analysis_key_is_never_read(db, seed, store, settings, stage_run):

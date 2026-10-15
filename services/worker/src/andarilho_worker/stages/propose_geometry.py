@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 from psycopg.types.json import Jsonb
 
-from andarilho_worker.errors import StageError
+from andarilho_worker.errors import Cancelled, LeaseLost, StageError, TransientError
 from andarilho_worker.geometry.grounding import (
     floor_objects,
     ground_doors,
@@ -190,6 +190,8 @@ def proposed_layout(ctx: StageContext) -> tuple[dict[str, Any], dict[str, Any]]:
         if analysis is None:
             return layout, diagnostics
         analysed, counts = _analysed_layout(analysis, evidence, bounds, spawn, layout)
+    except (TransientError, Cancelled, LeaseLost):
+        raise  # a storage outage retries the stage; only an unusable analysis falls back
     except Exception as exc:
         # The room is still a valid proposal: an analysis that cannot be used never fails it.
         diagnostics["analysisError"] = type(exc).__name__
