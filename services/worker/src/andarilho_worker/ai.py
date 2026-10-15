@@ -5,7 +5,7 @@ call is an ordinary bounded HTTP request: the key is read from the file that
 ``OPENCODE_API_KEY_FILE`` names each time a call is made, goes only into the
 ``Authorization`` header, and is never logged or put in an exception. Every failure is
 reduced to a short reason that is safe to record, so the caller can carry on without the
-model. The API's own AI client (``andarilho_api.ai``) follows the same rules.
+model. The API's own AI client (``services/api``, its ``ai`` package) follows the same rules.
 """
 
 from __future__ import annotations
