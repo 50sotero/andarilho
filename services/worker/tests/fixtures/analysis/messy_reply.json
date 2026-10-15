@@ -1,0 +1,135 @@
+{
+  "rooms": [
+    {"id": "r1", "label": "  Living room  "},
+    {"label": "no id"},
+    {"id": "r1", "label": "duplicate of r1"},
+    {"id": "r2", "label": "Kitchen"},
+    {"id": "r3"},
+    "not an object"
+  ],
+  "frames": [
+    {
+      "frame": 0,
+      "room": "r1",
+      "doors": [
+        {"box": [0.1, 0.1, 0.3, 0.9], "state": "open", "leadsTo": "r1"},
+        {"box": [0.5, 0.5, 0.5, 0.9], "state": "closed"},
+        {"box": [0.1, 0.1, 0.2], "state": "closed"},
+        {"box": [0.1, 0.1, 0.2, 0.2], "state": "ajar"},
+        {"box": [-0.5, 0.2, 0.4, 0.9], "state": "CLOSED", "leadsTo": "r99"}
+      ],
+      "objects": [
+        {"id": "o1", "box": [0.2, 0.5, 0.8, 1.0], "bottomVisible": true},
+        {"id": "o1", "box": [0.2, 0.5, 0.8, 1.0], "bottomVisible": true},
+        {"id": "o99", "box": [0.1, 0.1, 0.2, 0.2], "bottomVisible": true},
+        {"id": "o2", "box": [1.2, 0.1, 1.5, 0.5], "bottomVisible": true},
+        {"id": "o2", "box": [0.0, 0.0, 1.0, 1.0], "bottomVisible": "yes"}
+      ]
+    },
+    {"frame": 999, "room": "r1", "doors": [], "objects": []},
+    {"frame": 0, "room": "r2", "doors": [], "objects": []},
+    {"frame": 3, "room": "r9", "doors": [], "objects": []},
+    {
+      "frame": 5.0,
+      "room": "r1",
+      "doors": [],
+      "objects": [{"id": 2, "box": [0.3, 0.3, 0.6, 0.6], "bottomVisible": false}]
+    },
+    {"frame": 7.5, "room": "r1", "doors": [], "objects": []},
+    {
+      "frame": 9,
+      "objects": [{"id": "o1", "box": [0.1, 0.1, 0.5, 0.5], "bottomVisible": true}]
+    }
+  ],
+  "objects": [
+    {
+      "id": "o1",
+      "category": " Sofa ",
+      "label": "grey fabric sofa",
+      "mount": "FLOOR",
+      "solid": "no",
+      "size": [2.2, 0.8, 0.9],
+      "parts": [
+        {"shape": "box", "min": [0, 0, 0], "max": [1, 0.4, 1], "color": "#7A7F87"},
+        {"shape": "BOX", "min": [-1, 0, 0], "max": [0.5, 1, 1], "color": "#7a7f87"},
+        {"shape": "sphere", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#000000"},
+        {"shape": "box", "min": [0.5, 0, 0], "max": [0.5, 1, 1], "color": "#000000"},
+        {"shape": "box", "min": [0, 0, 0], "max": [1, 1, 1], "color": "red"},
+        {"shape": "box", "min": [0, 0, 0], "max": [2, 1, 1], "color": "#ffffff"},
+        "not a part"
+      ]
+    },
+    {
+      "id": "o1",
+      "category": "chair",
+      "label": "duplicate id",
+      "mount": "floor",
+      "solid": true,
+      "size": [0.5, 0.9, 0.5],
+      "parts": [{"shape": "box", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#000000"}]
+    },
+    {
+      "id": "o2",
+      "category": "Rug",
+      "label": "",
+      "mount": "floating",
+      "solid": false,
+      "size": [0.01, 9, 0.5],
+      "parts": [{"shape": "cylinder", "min": [0, 0, 0], "max": [1, 0.02, 1], "color": "#AABBCC"}]
+    },
+    {
+      "id": "o3",
+      "category": "lamp",
+      "label": "brass floor lamp",
+      "mount": "floor",
+      "solid": true,
+      "size": [0.4, 1.6]
+    },
+    {
+      "id": "o4",
+      "category": "potted plant",
+      "label": "tall green plant",
+      "mount": "floor",
+      "solid": true,
+      "size": [0.5, 1.0, 0.5],
+      "parts": [{"shape": "box", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#2e7d32"}]
+    },
+    {
+      "id": "o5",
+      "category": "coffee table",
+      "label": "no parts",
+      "mount": "floor",
+      "solid": true,
+      "size": [1.0, 0.4, 0.6],
+      "parts": []
+    },
+    {
+      "category": "stool",
+      "label": "no id",
+      "size": [0.4, 0.45, 0.4],
+      "parts": [{"shape": "box", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#111111"}]
+    },
+    {
+      "id": "o6",
+      "label": "no category",
+      "size": [0.4, 0.45, 0.4],
+      "parts": [{"shape": "box", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#111111"}]
+    },
+    {
+      "id": "o7",
+      "category": "vase",
+      "label": "short colour",
+      "size": [0.2, 0.3, 0.2],
+      "parts": [{"shape": "cylinder", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#abc"}]
+    },
+    {
+      "id": 2,
+      "category": "shelf",
+      "label": "oak wall shelf",
+      "mount": "wall",
+      "solid": true,
+      "size": [0.8, 1.8, 0.3],
+      "parts": [{"shape": "box", "min": [0, 0, 0], "max": [1, 1, 1], "color": "#8B5A2B"}]
+    }
+  ]
+}
