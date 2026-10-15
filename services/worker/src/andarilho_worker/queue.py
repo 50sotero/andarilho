@@ -28,6 +28,13 @@ log = logging.getLogger(__name__)
 # Storage cleanup waits this long so that a worker which lost its lease (but may still
 # be finishing a write) has stopped before its objects are removed.
 ARTIFACT_CLEANUP_DELAY_SECONDS = 300
+# A cleanup that used up its attempts on temporary failures (a storage outage, lost
+# workers) is queued again, waiting twice as long each time up to a day, so an outage
+# longer than the retry window cannot leave its objects until the project is deleted.
+# It gives up after this many requeues (about four days).
+ARTIFACT_CLEANUP_REQUEUE_SECONDS = 3600
+ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS = 24 * 3600
+ARTIFACT_CLEANUP_MAX_REQUEUES = 8
 
 # README section 6, verbatim CTE plus the run/project liveness predicates.
 CLAIM_SQL = """
@@ -341,17 +348,19 @@ def queue_artifact_cleanup(
     *,
     reason: str,
     scene_revision_id: str | None = None,
+    delay_seconds: float = ARTIFACT_CLEANUP_DELAY_SECONDS,
+    requeues: int = 0,
 ) -> None:
     """Queue ``artifact_cleanup`` to delete storage prefixes that no pipeline will complete.
 
     The job has no run, revision or upload, so run budgets, the one-stage-per-run index
-    and the next-stage chain ignore it. It becomes claimable after
-    ``ARTIFACT_CLEANUP_DELAY_SECONDS``. A request identical to a queued or retrying one
-    is already covered and is not queued again. The check is not serialized with a
-    concurrent enqueue: a lock here would sit outside the project -> run -> job order
-    and could deadlock with fenced transitions. A race can therefore queue a duplicate,
-    which costs one more idempotent delete. Prefixes outside the project's tenant
-    directory are a programming error.
+    and the next-stage chain ignore it. It becomes claimable after ``delay_seconds``
+    (``ARTIFACT_CLEANUP_DELAY_SECONDS`` unless it is a requeue). A request identical to a
+    queued or retrying one is already covered and is not queued again. The check is not
+    serialized with a concurrent enqueue: a lock here would sit outside the project ->
+    run -> job order and could deadlock with fenced transitions. A race can therefore
+    queue a duplicate, which costs one more idempotent delete. Prefixes outside the
+    project's tenant directory are a programming error.
     """
     if not prefixes:
         return
@@ -375,6 +384,8 @@ def queue_artifact_cleanup(
     manifest: dict[str, Any] = {"projectId": project_id, "prefixes": unique, "reason": reason}
     if scene_revision_id is not None:
         manifest["sceneRevisionId"] = scene_revision_id
+    if requeues:
+        manifest["requeues"] = requeues
     conn.execute(
         """
         INSERT INTO jobs (id, project_id, run_id, upload_id, scene_revision_id, capability, stage,
@@ -386,10 +397,44 @@ def queue_artifact_cleanup(
         (
             str(uuid.uuid4()),
             project_id,
-            float(ARTIFACT_CLEANUP_DELAY_SECONDS),
+            float(delay_seconds),
             Jsonb(manifest),
         ),
     )
+
+
+def requeue_artifact_cleanup(
+    conn: psycopg.Connection, project_id: str, manifest: Mapping[str, Any]
+) -> None:
+    """Queue a cleanup again, later, after it used up its attempts on temporary failures.
+
+    Only the paths that exhaust retries call this (retry_job and the reaper); a refused
+    request fails permanently and is never requeued. A malformed request is dropped
+    rather than raised, because this runs inside the failing job's transition.
+    """
+    prefixes = manifest.get("prefixes")
+    requeues = int(manifest.get("requeues") or 0)
+    if manifest.get("projectId") != project_id or not isinstance(prefixes, list):
+        return
+    if requeues >= ARTIFACT_CLEANUP_MAX_REQUEUES:
+        log.error("artifact cleanup gave up after %s requeues: %s", requeues, prefixes)
+        return
+    delay = min(
+        ARTIFACT_CLEANUP_REQUEUE_CAP_SECONDS, ARTIFACT_CLEANUP_REQUEUE_SECONDS * 2**requeues
+    )
+    revision = manifest.get("sceneRevisionId")
+    try:
+        queue_artifact_cleanup(
+            conn,
+            project_id,
+            prefixes,
+            reason=str(manifest.get("reason") or "requeued"),
+            scene_revision_id=str(revision) if revision else None,
+            delay_seconds=delay,
+            requeues=requeues + 1,
+        )
+    except (ValueError, TypeError, AttributeError):
+        log.error("artifact cleanup request is malformed; not requeued: %s", prefixes)
 
 
 def _queue_scene_cleanup(conn: psycopg.Connection, project_id: str, revision_id: str) -> None:
@@ -764,6 +809,8 @@ def retry_job(
                 fail_run(conn, job.run_id, final)  # type: ignore[arg-type]
             else:
                 fail_subject(conn, job)
+            if job.stage == "artifact_cleanup":
+                requeue_artifact_cleanup(conn, job.project_id, job.input_manifest)
             return "failed"
         conn.execute(
             """
@@ -845,7 +892,7 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
             FROM expired AS e
             WHERE j.id = e.id
             RETURNING j.id, j.project_id, j.run_id, j.upload_id, j.scene_revision_id, j.stage,
-                      j.state, j.fencing_token,
+                      j.state, j.fencing_token, j.input_manifest,
                       e.capability, e.charge_seconds
             """,
             {"err": Jsonb(lost)},
@@ -887,6 +934,8 @@ def reap_expired(db: Database) -> list[ReapOutcome]:
                 fail_upload(conn, str(row["project_id"]), upload_id)
             elif row["state"] == "failed" and row["scene_revision_id"] is not None:
                 fail_revision(conn, str(row["scene_revision_id"]))
+            elif row["state"] == "failed" and row["stage"] == "artifact_cleanup":
+                requeue_artifact_cleanup(conn, project_id, row["input_manifest"] or {})
             elif run_id and row["state"] == "cancelled":
                 finalize_run_if_cancelled(conn, run_id)
             outcomes.append(ReapOutcome(job_id, run_id, row["state"]))

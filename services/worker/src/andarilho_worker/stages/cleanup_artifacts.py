@@ -13,13 +13,13 @@ kinds of prefix:
 Nothing reads what this job deletes, so it stores no manifest. Two kinds of prefix
 are kept:
 
-* the scene prefix of a revision that is valid, or that a project pointer (active
-  draft or published), a scene's current draft or a share link still names. A valid
-  revision is served, approved, published or shared, and a referenced one may still
-  be reached through its pointer or link, so its files stay whatever its state. The
-  cost: a failed layout save may still be the active draft when this job runs, and
-  its files then stay until the project is deleted, because moving the pointer on
-  queues no cleanup;
+* the scene prefix of a revision that is valid, or that is still pending while a
+  project pointer (active draft or published), a scene's current draft or a share
+  link names it: a pending revision may still be processing. An invalid revision is
+  deleted whatever names it: every delivery path requires a valid revision and
+  validation never revisits an invalid one, so its files are never read again. (A
+  failed layout save usually stays the draft, and moving the pointer on later queues
+  no cleanup, so keeping it here would keep its files until the project is deleted.)
 * the attempt prefix a succeeded job committed under (its last fence), while its run
   has not failed or been cancelled. A succeeded camera_reconstruction holds the frames
   that layout re-texturing needs. The job's earlier fences are stale and deleted.
@@ -90,6 +90,9 @@ def _revision_keep_reason(conn: Any, *, project_id: str, revision_id: str) -> st
         return None
     if row["validation_state"] == "valid":
         return "the revision is valid"
+    # Nothing serves an invalid revision, whatever names it (see the module docstring).
+    if row["validation_state"] == "invalid":
+        return None
     if row["project_pointer"]:
         return "a project pointer names the revision"
     if row["scene_draft"]:

@@ -189,29 +189,46 @@ def test_the_stage_keeps_the_scene_of_a_valid_revision(db, seed, store, sup, how
     assert cleanup_row(seed, pid)["result_manifest"]["kept"] == [scene]
 
 
-@pytest.mark.parametrize(
-    "how",
-    [
-        pytest.param("active_draft", id="invalid-in-project-draft"),
-        pytest.param("published", id="invalid-published"),
-        pytest.param("scene_draft", id="invalid-in-scene-draft"),
-        pytest.param("shared", id="invalid-shared"),
-    ],
-)
-def test_the_stage_keeps_the_scene_of_an_invalid_revision_that_a_reference_still_names(
+REFERENCES = [
+    pytest.param("active_draft", id="project-draft"),
+    pytest.param("published", id="published"),
+    pytest.param("scene_draft", id="scene-draft"),
+    pytest.param("shared", id="shared"),
+]
+
+
+@pytest.mark.parametrize("how", REFERENCES)
+def test_the_stage_deletes_the_scene_of_an_invalid_revision_whatever_names_it(
     db, seed, store, sup, how
 ):
-    # A pointer may still name an invalid revision, and a share link may name one too.
-    # Either reference keeps the files, whatever the revision's state.
+    # A failed layout save usually stays the draft. Nothing serves an invalid revision,
+    # and moving the pointer on later queues no cleanup, so a reference keeps nothing.
     pid = seed.project()
     rev = make_revision(seed, pid, state="invalid")
     point_at(seed, pid, rev, how)
     scene = scene_of(pid, rev)
-    store.put_bytes(scene + "scene.ply", b"x")
+    store.put_bytes(scene + "model.glb", b"x")
     enqueue(db, pid, [scene], reason="revision_invalid")
 
     assert run_due_cleanup(db, sup) == "succeeded"
-    assert store.list_keys(scene) == [scene + "scene.ply"]
+    assert store.list_keys(scene) == []
+    assert cleanup_row(seed, pid)["result_manifest"]["deleted"] == [scene]
+
+
+@pytest.mark.parametrize("how", REFERENCES)
+def test_the_stage_keeps_the_scene_of_a_pending_revision_that_a_reference_names(
+    db, seed, store, sup, how
+):
+    # A pending revision may still be processing, so a reference keeps its files.
+    pid = seed.project()
+    rev = make_revision(seed, pid, state="pending")
+    point_at(seed, pid, rev, how)
+    scene = scene_of(pid, rev)
+    store.put_bytes(scene + "model.glb", b"x")
+    enqueue(db, pid, [scene], reason="revision_invalid")
+
+    assert run_due_cleanup(db, sup) == "succeeded"
+    assert store.list_keys(scene) == [scene + "model.glb"]
     assert cleanup_row(seed, pid)["result_manifest"]["kept"] == [scene]
 
 
@@ -235,8 +252,8 @@ def test_the_stage_deletes_the_scene_of_an_unreferenced_revision_that_is_not_val
 
 def test_a_reference_to_another_revision_does_not_keep_this_one(db, seed, store, sup):
     pid = seed.project()
-    doomed = make_revision(seed, pid, state="invalid")
-    kept = make_revision(seed, pid, state="invalid")
+    doomed = make_revision(seed, pid, state="pending")
+    kept = make_revision(seed, pid, state="pending")
     point_at(seed, pid, kept, "active_draft")
     point_at(seed, pid, kept, "shared")
     for rev in (doomed, kept):
@@ -396,7 +413,7 @@ def test_the_stage_refuses_foreign_and_malformed_prefixes_before_deleting_anythi
     )  # fmt: skip
 
     assert run_due_cleanup(db, sup) == "failed"
-    row = cleanup_row(seed, pid)
+    row = cleanup_row(seed, pid)  # the only cleanup job: a refusal is never requeued
     assert row["state"] == "failed"
     assert row["error"]["code"] == "INTERNAL_ERROR" and row["error"]["retryable"] is False
     assert store.list_keys(own) == [own + "scene.ply"]  # the valid entry was not deleted
@@ -578,3 +595,87 @@ def test_a_job_failed_before_its_stage_runs_queues_what_earlier_attempts_left(
     assert worker.execute(queue.claim(db, "worker-test", "cpu")) == "failed"
     attempt = f"tenants/{pid}/runs/{run_id}/attempts/validating/{job_id}/1/"
     assert [m["prefixes"] for m in queued_cleanups(seed, pid)] == [[attempt]]
+
+
+def queued_cleanup_rows(seed, project_id: str) -> list[dict]:
+    return seed.all(
+        "SELECT input_manifest, available_at - now() AS wait FROM jobs "
+        "WHERE project_id = %s AND stage = 'artifact_cleanup' AND state = 'queued'",
+        project_id,
+    )
+
+
+def exhaust_cleanup(db, worker) -> list[str]:
+    """Run the queued cleanup now and through every retry, without waiting out a requeue."""
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE jobs SET available_at = now() "
+            "WHERE stage = 'artifact_cleanup' AND state = 'queued'"
+        )
+    outcomes = []
+    while True:
+        queue.promote_retry_wait(db)  # retries are due at once (delay_fn returns 0)
+        job = queue.claim(db, "worker-test", "cpu")
+        if job is None:
+            return outcomes
+        outcomes.append(worker.execute(job))
+
+
+def test_a_cleanup_that_runs_out_of_retries_is_queued_again_later(db, seed, store, settings, sup):
+    # A storage outage longer than the retry window must not leave the objects behind.
+    pid = seed.project()
+    rev = make_revision(seed, pid)
+    scene = scene_of(pid, rev)
+    store.put_bytes(scene + "model.glb", b"x")
+    enqueue(db, pid, [scene], reason="revision_invalid", scene_revision_id=rev["revision"])
+    outage = Supervisor(db, UndeletableStore(store.root), settings, delay_fn=lambda attempt: 0.0)
+
+    assert exhaust_cleanup(db, outage) == ["retry_wait", "retry_wait", "failed"]
+    [again] = queued_cleanup_rows(seed, pid)
+    assert again["input_manifest"] == {
+        "projectId": pid, "prefixes": [scene], "reason": "revision_invalid",
+        "sceneRevisionId": rev["revision"], "requeues": 1,
+    }  # fmt: skip
+    expected = queue.ARTIFACT_CLEANUP_REQUEUE_SECONDS
+    assert expected - 60 < again["wait"].total_seconds() <= expected
+
+    # Once storage is back, the requeued cleanup deletes the scene.
+    assert run_all_due_cleanups(db, sup) == ["succeeded"]
+    assert store.list_keys(scene) == []
+
+
+def test_requeued_cleanups_wait_longer_each_time_and_finally_give_up(db, seed, store, settings):
+    pid = seed.project()
+    scene = scene_of(pid, make_revision(seed, pid))
+    outage = Supervisor(db, UndeletableStore(store.root), settings, delay_fn=lambda attempt: 0.0)
+    enqueue(db, pid, [scene], reason="revision_invalid", requeues=3)
+    assert exhaust_cleanup(db, outage)[-1] == "failed"
+    [again] = queued_cleanup_rows(seed, pid)
+    assert again["input_manifest"]["requeues"] == 4
+    assert again["wait"].total_seconds() > 8 * queue.ARTIFACT_CLEANUP_REQUEUE_SECONDS - 60
+
+    seed.exec("DELETE FROM jobs WHERE stage = 'artifact_cleanup'")
+    enqueue(
+        db, pid, [scene], reason="revision_invalid", requeues=queue.ARTIFACT_CLEANUP_MAX_REQUEUES
+    )
+    assert exhaust_cleanup(db, outage)[-1] == "failed"
+    assert queued_cleanup_rows(seed, pid) == []
+
+
+def test_a_cleanup_whose_worker_is_lost_on_its_last_attempt_is_queued_again(db, seed, store):
+    pid = seed.project()
+    scene = scene_of(pid, make_revision(seed, pid))
+    enqueue(db, pid, [scene], reason="revision_invalid")
+    seed.exec(
+        "UPDATE jobs SET available_at = now(), max_attempts = 1 WHERE stage = 'artifact_cleanup'"
+    )
+    job = queue.claim(db, "lost-worker", "cpu")
+    assert job is not None and job.stage == "artifact_cleanup"
+    seed.exec(
+        "UPDATE jobs SET lease_expires_at = now() - interval '1 second' WHERE id = %s", job.id
+    )
+
+    assert [o.state for o in queue.reap_expired(db)] == ["failed"]
+    [again] = queued_cleanup_rows(seed, pid)
+    assert again["input_manifest"]["prefixes"] == [scene]
+    assert again["input_manifest"]["requeues"] == 1
