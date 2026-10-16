@@ -247,6 +247,20 @@ def test_approve_share_and_public_delivery(client, auth, db, setup):
     assert project.published_revision_id is None
 
 
+def test_a_share_lifetime_is_applied_by_the_servers_clock(client, auth, db, setup):
+    _approve(client, auth, setup)
+    future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+    both = _share(client, auth, setup, 2, expiresAt=future, expiresInSeconds=86400)
+    assert both.status_code == 422
+    assert _share(client, auth, setup, 2, expiresInSeconds=10).status_code == 422
+    before = datetime.now(UTC)
+    created = _share(client, auth, setup, 2, expiresInSeconds=86400)
+    assert created.status_code == 201, created.text
+    share = db.get(ShareLink, uuid.UUID(created.json()["share"]["id"]))
+    lifetime = share.expires_at - before
+    assert timedelta(days=1) <= lifetime < timedelta(days=1, minutes=1)
+
+
 def test_expired_share(client, auth, db, setup):
     _approve(client, auth, setup)
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()

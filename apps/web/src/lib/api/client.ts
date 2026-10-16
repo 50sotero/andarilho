@@ -211,11 +211,12 @@ export function createApiClient(fetchImpl: FetchLike = (input, init) => fetch(in
       sceneId: string,
       sceneRevisionId: string,
       ifMatch: string,
-      expiresAt?: string | null,
+      // Applied by the server's clock: this device's may be off.
+      expiresInSeconds?: number | null,
     ) =>
       request<ShareCreated>(`/v1/scenes/${id(sceneId)}/shares`, {
         method: "POST",
-        body: expiresAt ? { sceneRevisionId, expiresAt } : { sceneRevisionId },
+        body: expiresInSeconds ? { sceneRevisionId, expiresInSeconds } : { sceneRevisionId },
         ifMatch,
       }),
     revokeShare: (shareId: string) =>

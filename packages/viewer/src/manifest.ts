@@ -98,15 +98,15 @@ export function sceneManifestIssues(manifest: SceneManifest): string[] {
   return issues;
 }
 
-export function deliveryEnvelopeIssues(envelope: DeliveryEnvelope, nowMs = Date.now()): string[] {
+export function deliveryEnvelopeIssues(envelope: DeliveryEnvelope): string[] {
   if (!envelope || typeof envelope !== "object") return ["delivery envelope is missing"];
   const issues = sceneManifestIssues(envelope.manifest);
   if (envelope.manifest && envelope.sceneRevisionId !== envelope.manifest.sceneRevisionId) {
     issues.push("envelope and manifest refer to different scene revisions");
   }
-  const expires = Date.parse(envelope.expiresAt);
-  if (!Number.isFinite(expires)) issues.push("expiresAt is invalid");
-  else if (expires <= nowMs) issues.push("delivery envelope has expired");
+  // Not compared with this device's clock, which may be off: storage refuses a link that
+  // has expired, and that failure is recoverable (the page asks for a fresh envelope).
+  if (!Number.isFinite(Date.parse(envelope.expiresAt))) issues.push("expiresAt is invalid");
   const render = envelope.assetUrls?.render;
   if (!render || !isAllowedUrl(render.url)) issues.push("render asset URL is missing or invalid");
   const collision = envelope.assetUrls?.collision;
@@ -135,13 +135,13 @@ export class ViewerInputError extends Error {
 }
 
 /** Validates the source and normalizes it into the URLs the engine loads. */
-export function resolveViewerSource(source: ViewerSource, nowMs = Date.now()): ResolvedSource {
+export function resolveViewerSource(source: ViewerSource): ResolvedSource {
   // Checked first: an outdated manifest has no fields this viewer can validate.
   const manifest = source.kind === "delivery" ? source.envelope?.manifest : source.manifest;
   const schemaVersion: unknown = manifest?.schemaVersion;
   if (schemaVersion === "1.0") throw new OutdatedSceneError();
   if (source.kind === "delivery") {
-    const issues = deliveryEnvelopeIssues(source.envelope, nowMs);
+    const issues = deliveryEnvelopeIssues(source.envelope);
     if (issues.length > 0) throw new ViewerInputError(issues);
     const { envelope } = source;
     const render = envelope.assetUrls.render!;

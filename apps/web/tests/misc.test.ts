@@ -17,7 +17,7 @@ import {
   stageLabel,
   stageStates,
 } from "@/features/processing/stages";
-import { expiryFromDays } from "@/features/sharing/SharePanel";
+import { lifetimeFromDays } from "@/features/sharing/SharePanel";
 import { awaitingRevision, awaitingScene, fallbackLayout } from "@/features/projects/PrivateWalk";
 import { removalMode, startReadiness } from "@/features/capture/CaptureFlow";
 import { rejectionMessage } from "@/features/uploads/UploadList";
@@ -222,9 +222,10 @@ describe("processing helpers", () => {
 });
 
 describe("share expiry", () => {
-  it("computes ISO expiry or null", () => {
-    expect(expiryFromDays("", 0)).toBeNull();
-    expect(expiryFromDays("1", 0)).toBe(new Date(86_400_000).toISOString());
+  it("sends a lifetime for the server to apply, or none", () => {
+    expect(lifetimeFromDays("")).toBeNull();
+    expect(lifetimeFromDays("1")).toBe(86_400);
+    expect(lifetimeFromDays("30")).toBe(30 * 86_400);
   });
 });
 

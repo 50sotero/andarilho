@@ -344,7 +344,9 @@ def create_share(
             "Only an approved revision can be shared.", "Approve the revision first."
         )
     expires_at = body.expires_at
-    if expires_at is not None:
+    if body.expires_in_seconds is not None:
+        expires_at = utcnow() + timedelta(seconds=body.expires_in_seconds)
+    elif expires_at is not None:
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=UTC)
         if expires_at <= utcnow():

@@ -416,10 +416,11 @@ describe("viewer lifecycle", () => {
     viewer.dispose();
   });
 
-  it("rejects an expired or inconsistent envelope", async () => {
+  it("rejects an inconsistent envelope", async () => {
+    // Its expiry is left to storage (a refused link is recoverable), not this device's clock.
     const h = harness();
     const env = envelope();
-    env.expiresAt = new Date(Date.now() - 1000).toISOString();
+    env.sceneRevisionId = "another-revision";
     const { viewer } = start(h, { source: { kind: "delivery", envelope: env } });
     await vi.waitFor(() =>
       expect(viewer.getState()).toMatchObject({

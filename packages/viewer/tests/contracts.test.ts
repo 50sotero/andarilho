@@ -112,6 +112,32 @@ describe("manifest and envelope checks", () => {
     );
   });
 
+  it("leaves a link's expiry to storage, not to this device's clock", () => {
+    // Issued a minute ago with a one-minute lifetime, by a server whose clock is behind
+    // this device's: storage may still accept it, and refuses it once it has expired.
+    const envelope: DeliveryEnvelope = {
+      sceneRevisionId: syntheticManifest().sceneRevisionId,
+      manifestSha256: "0".repeat(64),
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      manifest: syntheticManifest(),
+      assetUrls: {
+        render: {
+          url: "https://cdn.example.test/scene.glb?sig=1",
+          sha256: "0".repeat(64),
+          bytes: 1,
+          format: "glb",
+        },
+      },
+    };
+    expect(deliveryEnvelopeIssues(envelope)).toEqual([]);
+    expect(resolveViewerSource({ kind: "delivery", envelope }).renderUrl).toBe(
+      "https://cdn.example.test/scene.glb?sig=1",
+    );
+    expect(deliveryEnvelopeIssues({ ...envelope, expiresAt: "soon" })).toEqual([
+      "expiresAt is invalid",
+    ]);
+  });
+
   it("reports a 1.0 manifest as an unsupported schema version to the checks", () => {
     expect(sceneManifestIssues(v1Manifest())).toEqual(["unsupported manifest schemaVersion"]);
   });

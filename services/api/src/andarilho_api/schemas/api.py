@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic.alias_generators import to_camel
 
 from andarilho_api.schemas.scene import Layout
@@ -122,6 +122,15 @@ class RevisionRef(Body):
 class ShareCreate(Body):
     scene_revision_id: uuid.UUID
     expires_at: datetime | None = None
+    # A lifetime the server applies by its own clock, so a client whose clock is off still
+    # gets the one it chose. At most one of the two.
+    expires_in_seconds: Annotated[int, Field(ge=60, le=366 * 86400)] | None = None
+
+    @model_validator(mode="after")
+    def _one_expiry(self) -> ShareCreate:
+        if self.expires_at is not None and self.expires_in_seconds is not None:
+            raise ValueError("Send expiresAt or expiresInSeconds, not both.")
+        return self
 
 
 class PublicDeliveryRequest(Body):

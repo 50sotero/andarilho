@@ -13,10 +13,11 @@ const EXPIRY_OPTIONS = [
   { value: "30", label: "30 days" },
 ] as const;
 
-export function expiryFromDays(days: string, now: number = Date.now()): string | null {
+/** The link's lifetime in seconds, which the server applies by its own clock. */
+export function lifetimeFromDays(days: string): number | null {
   const n = Number(days);
   if (!days || !Number.isFinite(n) || n <= 0) return null;
-  return new Date(now + n * 24 * 60 * 60 * 1000).toISOString();
+  return Math.round(n * 24 * 60 * 60);
 }
 
 function shareState(share: Share): { label: string; tone: "good" | "bad" | "neutral" } {
@@ -77,7 +78,7 @@ export function SharePanel({
         sceneId,
         approvedRevisionId,
         etag,
-        expiryFromDays(expiryDays),
+        lifetimeFromDays(expiryDays),
       );
       const url = new URL(data.path, window.location.origin).toString();
       setCreatedUrl(url);
