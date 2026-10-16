@@ -585,10 +585,12 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
           File types are checked again on the server; a file can still be rejected after upload. If
           a previous upload was interrupted, select the same file again to resume it.
         </p>
+        {/* Every error listed above blocks the upload, as beginUpload does: a selection-wide
+            one (too few photos, two floor plans, over the size limit) as well as a file's. */}
         <Button
           className="mt-4"
           onClick={beginUpload}
-          disabled={candidates.length === 0 || typeErrors.length > 0 || Boolean(deleting)}
+          disabled={candidates.length === 0 || blockingErrors.length > 0 || Boolean(deleting)}
         >
           Upload selected files
         </Button>

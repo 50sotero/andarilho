@@ -84,3 +84,24 @@ describe("the AI scene analysis notice on the capture page", () => {
     expect(container.textContent).toContain("Walkthrough video");
   });
 });
+
+describe("the upload button", () => {
+  it("is disabled while a selection-wide error is listed, not only a file's", async () => {
+    await renderCapture();
+    const photos = container.querySelector<HTMLInputElement>('input[type="file"][multiple]')!;
+    // Well-formed photos, but fewer than a set without a video needs.
+    const files = Array.from(
+      { length: 5 },
+      (_, i) => new File(["x"], `photo-${i}.jpg`, { type: "image/jpeg" }),
+    );
+    Object.defineProperty(photos, "files", { value: files, configurable: true });
+    await act(async () => {
+      photos.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+    expect(container.textContent).toContain("Without a video, add at least");
+    const upload = [...container.querySelectorAll("button")].find(
+      (b) => b.textContent === "Upload selected files",
+    )!;
+    expect(upload.disabled).toBe(true);
+  });
+});
