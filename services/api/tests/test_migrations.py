@@ -237,6 +237,25 @@ def test_downgrade_refuses_while_a_job_of_the_removed_stage_can_still_run(
             command.upgrade(config, "head")
 
 
+def test_0008_downgrade_refuses_while_a_multipart_upload_is_reconciled(database_url, engine):
+    with engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO multipart_reconciliations (object_key, upload_id) "
+                "VALUES ('tenants/p/staging/u', 'mpu-1')"
+            )
+        )
+    head = _revision(engine)
+    with _alembic(database_url) as config:
+        try:
+            with pytest.raises(RuntimeError, match=r"1 multipart upload\(s\)"):
+                command.downgrade(config, "0007")
+            assert _revision(engine) == head
+            assert "multipart_reconciliations" in inspect(engine).get_table_names()
+        finally:
+            command.upgrade(config, "head")
+
+
 def test_0008_adds_the_multipart_reconciliation_table_and_its_downgrade_drops_it(
     database_url, engine
 ):

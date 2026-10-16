@@ -17,7 +17,7 @@ import {
   stageLabel,
   stageStates,
 } from "@/features/processing/stages";
-import { lifetimeFromDays } from "@/features/sharing/SharePanel";
+import { lifetimeFromDays, shareState } from "@/features/sharing/SharePanel";
 import { awaitingRevision, awaitingScene, fallbackLayout } from "@/features/projects/PrivateWalk";
 import { removalMode, startReadiness } from "@/features/capture/CaptureFlow";
 import { rejectionMessage } from "@/features/uploads/UploadList";
@@ -226,6 +226,23 @@ describe("share expiry", () => {
     expect(lifetimeFromDays("")).toBeNull();
     expect(lifetimeFromDays("1")).toBe(86_400);
     expect(lifetimeFromDays("30")).toBe(30 * 86_400);
+  });
+
+  it("shows a link's state as the server judged it, not by this device's clock", () => {
+    const share = {
+      id: "s1",
+      sceneRevisionId: "r1",
+      // Past by this device's clock, but the server still serves it.
+      expiresAt: new Date(Date.now() - 60_000).toISOString(),
+      revokedAt: null,
+      createdAt: new Date(Date.now() - 86_400_000).toISOString(),
+      active: true,
+    };
+    expect(shareState(share).label).toBe("Active");
+    expect(shareState({ ...share, active: false }).label).toBe("Expired");
+    expect(shareState({ ...share, active: false, revokedAt: share.createdAt }).label).toBe(
+      "Revoked",
+    );
   });
 });
 

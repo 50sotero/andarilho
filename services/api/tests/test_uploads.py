@@ -221,6 +221,7 @@ def test_full_upload_flow_with_immutable_copy(client, auth, db, s3):
     assert urlparse(url).netloc == "localhost:9000"
     assert "uploadId=" in url and "partNumber=1" in url
     assert parts.json()["expiresAt"].endswith("Z")
+    assert parts.json()["expiresInSeconds"] == 900
 
     incomplete = client.post(f"/v1/uploads/{upload_id}/complete", json={}, headers=auth())
     assert incomplete.status_code == 409

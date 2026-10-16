@@ -265,6 +265,7 @@ def test_expired_share(client, auth, db, setup):
     _approve(client, auth, setup)
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     body = _share(client, auth, setup, 2, expiresAt=future).json()
+    assert body["share"]["active"] is True
     assert (
         client.post("/v1/public/scenes/delivery", json={"token": body["token"]}).status_code == 200
     )
@@ -274,6 +275,8 @@ def test_expired_share(client, auth, db, setup):
     assert (
         client.post("/v1/public/scenes/delivery", json={"token": body["token"]}).status_code == 404
     )
+    shares = client.get(f"/v1/projects/{setup['pid']}", headers=auth()).json()["shares"]
+    assert [s["active"] for s in shares] == [False]
 
 
 def test_share_requires_approved_revision(client, auth, setup):

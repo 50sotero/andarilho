@@ -103,6 +103,8 @@ export interface Share {
   expiresAt: string | null;
   revokedAt: string | null;
   createdAt: string;
+  // Neither revoked nor expired, by the server's clock, which public delivery goes by.
+  active: boolean;
 }
 
 export interface ProjectList {
@@ -152,6 +154,8 @@ export interface PartUrlsResponse {
   // Each URL accepts exactly `bytes` bytes: the part size, or the remainder for the last.
   urls: { partNumber: number; url: string; bytes: number }[];
   expiresAt: string;
+  // The URLs' lifetime, timed from receipt: this device's clock may be off.
+  expiresInSeconds: number;
 }
 
 /** The deployment's capture limits (`GET /v1/intake-policy`); the API enforces them. */

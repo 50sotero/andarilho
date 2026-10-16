@@ -246,7 +246,8 @@ def sign_parts(
         }
         for n in body.part_numbers
     ]
-    return {"urls": urls, "expiresAt": ser.iso(expires_at)}
+    # The lifetime as well: a client times it from receipt, as its own clock may be off.
+    return {"urls": urls, "expiresAt": ser.iso(expires_at), "expiresInSeconds": ttl}
 
 
 def _reject(db: Session, upload: Upload, code: str, *, cleanup: bool = False) -> None:

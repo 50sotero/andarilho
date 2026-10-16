@@ -20,11 +20,10 @@ export function lifetimeFromDays(days: string): number | null {
   return Math.round(n * 24 * 60 * 60);
 }
 
-function shareState(share: Share): { label: string; tone: "good" | "bad" | "neutral" } {
+/** The server says whether a link still works: this device's clock may be off. */
+export function shareState(share: Share): { label: string; tone: "good" | "bad" | "neutral" } {
   if (share.revokedAt) return { label: "Revoked", tone: "neutral" };
-  if (share.expiresAt && Date.parse(share.expiresAt) <= Date.now()) {
-    return { label: "Expired", tone: "neutral" };
-  }
+  if (!share.active) return { label: "Expired", tone: "neutral" };
   return { label: "Active", tone: "good" };
 }
 
@@ -232,7 +231,9 @@ export function SharePanel({
                       <span> · expires {new Date(share.expiresAt).toLocaleString()}</span>
                     ) : null}
                   </div>
-                  {state.label === "Active" ? (
+                  {/* Revocable until revoked: this list can be older than the moment
+                      the server let the link expire. */}
+                  {!share.revokedAt ? (
                     confirmRevoke === share.id ? (
                       <div className="flex items-center gap-2">
                         <span>Stop this link working?</span>

@@ -73,6 +73,7 @@ function fakeApi(fileSize: number, overrides: Partial<UploaderApi> = {}) {
             bytes: Math.min(PART, fileSize - (n - 1) * PART),
           })),
           expiresAt: FUTURE,
+          expiresInSeconds: 24 * 3600,
         },
         etag: null,
       };
@@ -763,6 +764,34 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps a batch of part URLs for their lifetime when this device's clock is fast", async () => {
+    const size = 6 * PART;
+    const { api } = fakeApi(size, {
+      requestPartUrls: vi.fn(async (uploadId: string, partNumbers: number[]) => ({
+        data: {
+          urls: partNumbers.map((n) => ({
+            partNumber: n,
+            url: `https://storage.test/${uploadId}/${n}`,
+            bytes: PART,
+          })),
+          // By the server's clock, fifteen minutes from now: long past by this device's.
+          expiresAt: new Date(Date.now() + 900_000).toISOString(),
+          expiresInSeconds: 900,
+        },
+        etag: null,
+      })),
+    });
+    const upload = new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+      api,
+      putPart: async (url) => `"e${partOf(url)}"`,
+      storage: null,
+      now: () => Date.now() + 2 * 86_400_000,
+    });
+    await upload.start();
+    // One batch covers every part: none was taken for stale and signed again.
+    expect(api.requestPartUrls).toHaveBeenCalledTimes(1);
+  });
+
   it("aborts an upload whose creation answers after its file was removed", async () => {
     const size = 3 * PART;
     const server = fakeApi(size).api;
@@ -839,6 +868,7 @@ describe("MultipartUpload", () => {
             bytes: Math.min(PART, size - (n - 1) * PART),
           })),
           expiresAt: urlsExpire,
+          expiresInSeconds: 3600,
         },
         etag: null,
       })),

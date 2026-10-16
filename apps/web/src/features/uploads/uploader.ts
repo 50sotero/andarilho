@@ -622,13 +622,19 @@ export class MultipartUpload {
         if (!fresh && !this.pendingUrls.has(n) && !batch.includes(n)) batch.push(n);
       }
       const uploadId = this.record!.uploadId;
+      // Timed from before the request on this device's clock, which may be off from the
+      // server's: the URLs were signed later, so they last at least that long. Storage
+      // refusing one (403) drops it from the cache anyway.
+      const requestedAt = this.now();
       const request = this.api
         .requestPartUrls(uploadId, batch, signal)
         .then(({ data }) => {
           if (this.urlCacheUploadId !== uploadId) return; // the upload was replaced
-          const expiresAt = Date.parse(data.expiresAt);
+          const expiresAt = Number.isFinite(data.expiresInSeconds)
+            ? requestedAt + data.expiresInSeconds * 1000
+            : 0;
           for (const { partNumber: n, url } of data.urls) {
-            this.urlCache.set(n, { url, expiresAt: Number.isNaN(expiresAt) ? 0 : expiresAt });
+            this.urlCache.set(n, { url, expiresAt });
           }
         })
         .finally(() => {

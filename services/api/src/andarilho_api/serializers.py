@@ -211,6 +211,9 @@ def share(s: ShareLink) -> dict[str, Any]:
         "expiresAt": iso(s.expires_at),
         "revokedAt": iso(s.revoked_at),
         "createdAt": iso(s.created_at),
+        # By the server's clock, which public delivery goes by: a client's may be off.
+        "active": s.revoked_at is None
+        and (s.expires_at is None or s.expires_at > datetime.now(UTC)),
     }
 
 

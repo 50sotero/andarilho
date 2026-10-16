@@ -47,7 +47,19 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # The recorded upload IDs are lost: their uploads are then left to the bucket's
-    # abort-incomplete-multipart lifecycle rule alone.
+    # Once cleanup has cleared an upload's multipart ID or scrubbed a deleted project, an
+    # entry here is the only record of it, and late parts it still gets would stay stored
+    # for good: refuse rather than lose them.
+    rows = (
+        op.get_bind()
+        .execute(sa.text("SELECT count(*) FROM multipart_reconciliations"))
+        .scalar_one()
+    )
+    if rows:
+        raise RuntimeError(
+            f"cannot downgrade: {rows} multipart upload(s) are still reconciled from "
+            "multipart_reconciliations, the only record of their upload IDs; abort each "
+            "one, confirm ListParts finds nothing, and delete its row first"
+        )
     op.drop_index("ix_multipart_reconciliations_due", table_name="multipart_reconciliations")
     op.drop_table("multipart_reconciliations")
