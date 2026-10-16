@@ -444,6 +444,9 @@ export class MultipartUpload {
     // Known at once, before anything below can fail (the file may no longer be readable):
     // a file removed without a record still gets its upload aborted (discard).
     this.emit({ uploadId: data.upload.id, resumed: false });
+    // The file was removed while the upload was being created, before its ID could be
+    // aborted: abort it now, before the sample, which fails on a file no longer readable.
+    if (this.discarded) this.dropDiscarded(data.upload.id, this.discarded.abortOnServer);
     const record: UploadResumeRecord = {
       version: RESUME_RECORD_VERSION,
       uploadId: data.upload.id,
@@ -456,18 +459,21 @@ export class MultipartUpload {
       completedParts: [],
       expiresAt: data.upload.expiresAt,
     };
-    if (this.discarded) {
-      // The file was removed while the upload was being created: nothing may keep it.
-      if (this.discarded.abortOnServer) this.abortQuietly(record.uploadId);
-      this.forgetCreationKey();
-      throw new UploadAbortedError();
-    }
+    // Removed while the file was sampled: discard() aborted it by its ID, known by then.
+    if (this.discarded) this.dropDiscarded(record.uploadId, false);
     // This session now holds the upload in its record. Until a saved record can find it
     // after a reload, the stored creation key does: sending it again gets this same upload
     // back rather than creating another that also takes quota.
     this.creationKey = null;
     if (saveResumeRecord(record, this.storage)) this.clearSavedCreationKey();
     return record;
+  }
+
+  /** Lets go of an upload created for a file that was removed: nothing may keep it. */
+  private dropDiscarded(uploadId: string, abortOnServer: boolean): never {
+    if (abortOnServer) this.abortQuietly(uploadId);
+    this.forgetCreationKey();
+    throw new UploadAbortedError();
   }
 
   private holdCreationKey(key: string, saved: boolean) {

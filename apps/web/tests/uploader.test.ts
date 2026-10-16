@@ -1024,6 +1024,38 @@ describe("MultipartUpload", () => {
     expect(api.abortUpload).toHaveBeenCalledWith("u-1");
   });
 
+  it("aborts an upload created after its file was removed, though its sample fails", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    let unreadable = false;
+    let upload: MultipartUpload | null = null;
+    const { api } = fakeApi(size, {
+      createUpload: vi.fn(async () => {
+        upload!.discard({ abortOnServer: true }); // removed before the upload had an ID
+        unreadable = true; // and the file can no longer be read
+        return { data: { upload: uploadRecord("u-1"), partSize: PART, partCount: 2 }, etag: null };
+      }),
+    });
+    const file = fakeFile(size);
+    upload = new MultipartUpload(
+      "p1",
+      {
+        ...file,
+        slice: (start, end) => {
+          if (unreadable) throw new DOMException("The file could not be read.", "NotReadableError");
+          return file.slice(start, end);
+        },
+      },
+      "video",
+      "video/mp4",
+      { api, storage, sleep: noSleep, heldCreationKeys: new Set() },
+    );
+    await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+    expect(api.abortUpload).toHaveBeenCalledTimes(1);
+    expect(api.abortUpload).toHaveBeenCalledWith("u-1");
+    expect(storage.length).toBe(0);
+  });
+
   it("keeps the creation key until the new upload's record is saved", async () => {
     const size = 2 * PART;
     const storage = new MemoryStorage();
