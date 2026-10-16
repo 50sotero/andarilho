@@ -130,8 +130,8 @@ export interface UploaderOptions {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   random?: () => number;
   now?: () => number;
-  /** Creation keys held by this page's uploaders; a page (or a reload) starts empty. */
-  heldCreationKeys?: Set<string>;
+  /** What this page's uploaders hold; a page (or a reload) starts empty. */
+  page?: UploaderPage;
 }
 
 function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -160,12 +160,30 @@ function isRetryable(error: unknown): boolean {
   return error instanceof TypeError;
 }
 
-/**
- * Creation keys held by uploaders on this page. The same file selected twice has one
- * creation identity: a second uploader gets a key of its own, or the API would answer
- * both with one upload and both would upload into it.
- */
-const pageCreationKeys = new Set<string>();
+/** What the uploaders on one page hold, so that no two of them share an upload. */
+export interface UploaderPage {
+  /**
+   * Creation keys. The same file selected twice has one creation identity: a second
+   * uploader gets a key of its own, or the API would answer both with one upload.
+   */
+  creationKeys: Set<string>;
+  /**
+   * Uploads resumed or created. The same file selected twice after a reload matches the
+   * same saved records: each uploader resumes one no other uploader holds.
+   */
+  uploads: Set<string>;
+}
+
+export function newUploaderPage(): UploaderPage {
+  return { creationKeys: new Set(), uploads: new Set() };
+}
+
+let currentPage = newUploaderPage();
+
+/** Starts the uploaders that follow on a fresh page, as a reload does (for tests). */
+export function resetUploaderPage(): void {
+  currentPage = newUploaderPage();
+}
 
 /** Server states meaning the bytes were already completed and frozen. */
 const COMPLETED_STATUSES = new Set<Upload["status"]>(["uploaded_unverified", "verified"]);
@@ -189,7 +207,7 @@ export class MultipartUpload {
   private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
   private readonly random: () => number;
   private readonly now: () => number;
-  private readonly heldCreationKeys: Set<string>;
+  private readonly page: UploaderPage;
 
   private record: UploadResumeRecord | null = null;
   private controller: AbortController | null = null;
@@ -202,8 +220,10 @@ export class MultipartUpload {
   private urlCacheUploadId: string | null = null;
   // Idempotency-Key of a creation that has not had a definite answer yet.
   private creationKey: string | null = null;
-  // The key this uploader holds (pageCreationKeys), until it is done with its upload.
+  // The key this uploader holds (page.creationKeys), until it is done with its upload.
   private heldKey: string | null = null;
+  // The upload this uploader holds (page.uploads), until it is done with it.
+  private heldUpload: string | null = null;
   // Whether that key is the one saved for this file, which only its holder may clear.
   private heldKeySaved = false;
   // Fingerprint and content sample: what the saved creation key is found by.
@@ -236,7 +256,7 @@ export class MultipartUpload {
     this.sleep = options.sleep ?? abortableSleep;
     this.random = options.random ?? Math.random;
     this.now = options.now ?? Date.now;
-    this.heldCreationKeys = options.heldCreationKeys ?? pageCreationKeys;
+    this.page = options.page ?? currentPage;
     this.progress = {
       phase: "idle",
       uploadedBytes: 0,
@@ -295,6 +315,7 @@ export class MultipartUpload {
     this.resetUrlCache(null);
     this.removeRecord(uploadId);
     this.forgetCreationKey();
+    this.releaseUpload();
     if (options.abortOnServer && uploadId) this.abortQuietly(uploadId);
   }
 
@@ -373,7 +394,11 @@ export class MultipartUpload {
         if (!samples.has(candidate.partSize)) {
           samples.set(candidate.partSize, await contentSample(this.file, candidate.partSize));
         }
-        if (samples.get(candidate.partSize) === candidate.sample) {
+        // The same file selected twice again: each uploader resumes an upload of its own.
+        const taken =
+          this.page.uploads.has(candidate.uploadId) && this.heldUpload !== candidate.uploadId;
+        if (!taken && samples.get(candidate.partSize) === candidate.sample) {
+          this.holdUpload(candidate.uploadId);
           saved = candidate;
           break;
         }
@@ -416,7 +441,10 @@ export class MultipartUpload {
         }
       }
       if (inSession) this.discardRecord();
-      else this.removeRecord(saved.uploadId);
+      else {
+        this.removeRecord(saved.uploadId);
+        this.releaseUpload();
+      }
     }
 
     // A lost response may hide an upload the server created: a retry with the same
@@ -429,7 +457,7 @@ export class MultipartUpload {
         now: this.now(),
       });
       // Another uploader on this page holds it: the same file, selected again.
-      const held = this.heldCreationKeys.has(saved);
+      const held = this.page.creationKeys.has(saved);
       this.holdCreationKey(held ? newCreationKey() : saved, !held);
     }
     let data: Awaited<ReturnType<UploaderApi["createUpload"]>>["data"];
@@ -451,6 +479,7 @@ export class MultipartUpload {
     // Known at once, before anything below can fail (the file may no longer be readable):
     // a file removed without a record still gets its upload aborted (discard).
     this.emit({ uploadId: data.upload.id, resumed: false });
+    this.holdUpload(data.upload.id);
     // The file was removed while the upload was being created, before its ID could be
     // aborted: abort it now, before the sample, which fails on a file no longer readable.
     if (this.discarded) this.dropDiscarded(data.upload.id, this.discarded.abortOnServer);
@@ -480,20 +509,32 @@ export class MultipartUpload {
   private dropDiscarded(uploadId: string, abortOnServer: boolean): never {
     if (abortOnServer) this.abortQuietly(uploadId);
     this.forgetCreationKey();
+    this.releaseUpload();
     throw new UploadAbortedError();
   }
 
   private holdCreationKey(key: string, saved: boolean) {
     this.releaseCreationKey();
-    this.heldCreationKeys.add(key);
+    this.page.creationKeys.add(key);
     this.heldKey = key;
     this.heldKeySaved = saved;
     this.creationKey = key;
   }
 
   private releaseCreationKey() {
-    if (this.heldKey !== null) this.heldCreationKeys.delete(this.heldKey);
+    if (this.heldKey !== null) this.page.creationKeys.delete(this.heldKey);
     this.heldKey = null;
+  }
+
+  private holdUpload(uploadId: string) {
+    this.releaseUpload();
+    this.page.uploads.add(uploadId);
+    this.heldUpload = uploadId;
+  }
+
+  private releaseUpload() {
+    if (this.heldUpload !== null) this.page.uploads.delete(this.heldUpload);
+    this.heldUpload = null;
   }
 
   /** Clears the saved key, unless it belongs to another uploader of the same file. */
@@ -515,13 +556,19 @@ export class MultipartUpload {
     this.removeRecord(uploadId);
     // A creation key kept because the record could not be saved would get this upload back.
     this.forgetCreationKey();
+    this.releaseUpload();
   }
 
-  /** The upload is complete: neither its record nor its creation key may find it again. */
+  /**
+   * The upload is complete: neither its record nor its creation key may find it again.
+   * It stays held: it is this uploader's result, and another uploader still going through
+   * records it read before may not take it for its own.
+   */
   private forgetFinishedUpload(uploadId: string) {
     this.record = null;
     this.removeRecord(uploadId);
     this.forgetCreationKey();
+    this.holdUpload(uploadId);
   }
 
   /** Removes this file's saved record of that upload; other uploads' records stay. */

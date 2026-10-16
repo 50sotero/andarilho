@@ -1,9 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ApiError } from "@/lib/api/errors";
 import type { Upload } from "@/lib/api/types";
 import {
   MultipartUpload,
   StoragePutError,
+  newUploaderPage,
+  resetUploaderPage,
   UploadAbortedError,
   type PutPart,
   type UploadableFile,
@@ -94,6 +96,9 @@ const video = (file: UploadableFile) => uploadIdentity(file, "video", "video/mp4
 const noSleep = vi.fn(async () => undefined);
 
 describe("MultipartUpload", () => {
+  // Each test is a page of its own: uploads held by one test's uploaders are not another's.
+  beforeEach(() => resetUploaderPage());
+
   it("requests URLs in small batches and uploads with at most 3 concurrent PUTs", async () => {
     const size = 25 * PART - 7;
     const { api, batches, partCount } = fakeApi(size);
@@ -302,6 +307,7 @@ describe("MultipartUpload", () => {
         return `"e${partOf(url)}"`;
       },
       storage,
+      page: newUploaderPage(), // the reloaded page
     });
     await resumed.start();
     expect(second.api.createUpload).not.toHaveBeenCalled();
@@ -522,6 +528,49 @@ describe("MultipartUpload", () => {
     expect(putUrls).toEqual(["https://storage.test/u-b/2"]);
     // The other file's record is untouched, so it resumes its own upload in turn.
     expect(loadResumeRecord("p1", video(fileA), { storage })?.uploadId).toBe("u-a");
+  });
+
+  it("resumes a different saved upload for each copy of a file selected twice", async () => {
+    // Before a reload the same file was being uploaded twice; both uploads were paused.
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const file = fakeFile(size);
+    for (const uploadId of ["u-first", "u-second"]) {
+      saveResumeRecord(
+        {
+          version: RESUME_RECORD_VERSION,
+          uploadId,
+          projectId: "p1",
+          fingerprint: fileFingerprint(video(file)),
+          sample: (await contentSample(file, PART))!,
+          partSize: PART,
+          partCount: 2,
+          completedParts: [{ partNumber: 1, etag: '"e1"' }],
+          expiresAt: FUTURE,
+        },
+        storage,
+      );
+    }
+    const { api } = fakeApi(size, {
+      getUpload: vi.fn(async (uploadId: string) => ({
+        data: {
+          upload: uploadRecord(uploadId),
+          completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
+          acceptingParts: true,
+          assembled: false,
+        },
+        etag: null,
+      })),
+    });
+    const make = () =>
+      new MultipartUpload("p1", fakeFile(size), "video", "video/mp4", {
+        api,
+        putPart: async (url) => `"e${partOf(url)}"`,
+        storage,
+      });
+    const ids = (await Promise.all([make(), make()].map((u) => u.start()))).map((u) => u.id);
+    expect(ids.sort()).toEqual(["u-first", "u-second"]);
+    expect(api.createUpload).not.toHaveBeenCalled();
   });
 
   it("does not take an upload the server completed for another file as done", async () => {
@@ -1005,7 +1054,7 @@ describe("MultipartUpload", () => {
         storage,
         maxAttempts: 1,
         sleep: noSleep,
-        heldCreationKeys: new Set(),
+        page: newUploaderPage(),
       });
     await expect(make().start()).rejects.toBeInstanceOf(TypeError);
     lose = false;
@@ -1023,7 +1072,7 @@ describe("MultipartUpload", () => {
   it("gives files that share a name, size and date keys of their own", async () => {
     const size = 2 * PART;
     const storage = new MemoryStorage();
-    const page = new Set<string>();
+    const page = newUploaderPage();
     const keys: (string | undefined)[] = [];
     const { api } = fakeApi(size, {
       createUpload: vi.fn(async (_p: string, _b: unknown, key?: string) => {
@@ -1038,7 +1087,7 @@ describe("MultipartUpload", () => {
         putPart: async (url) => `"e${partOf(url)}"`,
         storage,
         sleep: noSleep,
-        heldCreationKeys: page,
+        page,
       });
     // Different bytes behind one name, size and date, then the same file selected twice:
     // one key would make the API answer them with one upload, and all would upload into it.
@@ -1066,7 +1115,7 @@ describe("MultipartUpload", () => {
         storage,
         maxAttempts: 1,
         sleep: noSleep,
-        heldCreationKeys: new Set(), // each on a page of its own, as after a reload
+        page: newUploaderPage(), // each on a page of its own, as after a reload
       });
     await expect(make(1).start()).rejects.toBeInstanceOf(TypeError);
     lose = false;
@@ -1097,7 +1146,7 @@ describe("MultipartUpload", () => {
       },
       "video",
       "video/mp4",
-      { api, storage: new MemoryStorage(), sleep: noSleep, heldCreationKeys: new Set() },
+      { api, storage: new MemoryStorage(), sleep: noSleep, page: newUploaderPage() },
     );
     await expect(upload.start()).rejects.toBeInstanceOf(DOMException);
     expect(upload.state.uploadId).toBe("u-1");
@@ -1129,7 +1178,7 @@ describe("MultipartUpload", () => {
       },
       "video",
       "video/mp4",
-      { api, storage, sleep: noSleep, heldCreationKeys: new Set() },
+      { api, storage, sleep: noSleep, page: newUploaderPage() },
     );
     await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
     expect(api.abortUpload).toHaveBeenCalledTimes(1);
@@ -1169,7 +1218,7 @@ describe("MultipartUpload", () => {
           putPart: async (url) => `"e${partOf(url)}"`,
           storage,
           sleep: noSleep,
-          heldCreationKeys: new Set(), // a page of its own, as after a reload
+          page: newUploaderPage(), // a page of its own, as after a reload
         },
       );
     await expect(make().start()).rejects.toBeInstanceOf(DOMException);
