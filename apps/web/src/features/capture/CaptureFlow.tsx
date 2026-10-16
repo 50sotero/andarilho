@@ -11,6 +11,7 @@ import {
   MultipartUpload,
   UploadAbortedError,
   fetchPutPart,
+  newUploaderPage,
   type UploadProgress,
 } from "@/features/uploads/uploader";
 import { UploadList, type UploadRowView } from "@/features/uploads/UploadList";
@@ -146,6 +147,9 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
   const [policy, setPolicy] = useState<IntakePolicy>(DEFAULT_INTAKE_POLICY);
 
   const uploadersRef = useRef(new Map<string, MultipartUpload>());
+  // What this flow's uploaders hold. Its own, not the module's: uploaders paused when the
+  // flow unmounted are gone, and a flow mounted later must be able to resume their uploads.
+  const [uploaderPage] = useState(newUploaderPage);
   const limiterRef = useRef(createLimiter(DEFAULT_CONCURRENCY));
   const intentRef = useRef<{ key: string; signature: string; captureSetId: string | null } | null>(
     null,
@@ -301,6 +305,7 @@ export function CaptureFlow({ projectId }: { projectId: string }) {
       const uploader = new MultipartUpload(projectId, file, kind, declaredContentType(file, kind), {
         api,
         putPart: (url, body, signal) => limiter.run(() => fetchPutPart(url, body, signal)),
+        page: uploaderPage,
       });
       uploader.subscribe((progress) => {
         updateRow(id, { progress, uploadId: progress.uploadId });

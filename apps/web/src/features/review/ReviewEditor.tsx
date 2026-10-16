@@ -39,6 +39,8 @@ import {
 
 /** Downloads of a scene's evidence tried before the editor stops asking for it. */
 const EVIDENCE_DOWNLOAD_ATTEMPTS = 3;
+/** How long after a failed evidence download the editor reads the scene for a new link. */
+export const EVIDENCE_RETRY_DELAY_MS = 5_000;
 
 function NumberField({
   label,
@@ -492,6 +494,8 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     pending: false,
     failures: 0,
   });
+  // Failed evidence downloads that asked for a fresh link: each one schedules a scene read.
+  const [evidenceRetries, setEvidenceRetries] = useState(0);
   const overlayId = useId();
   const evidenceId = useId();
   // The revision whose layout the canvas shows. Approval is only offered for it, so
@@ -513,33 +517,49 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   }, []);
 
   /** Adopt fresh scene data; follow a newer revision unless there are unsaved edits. */
-  const adoptScene = useCallback(
-    (data: SceneDetail, resetLayout: boolean) => {
-      setScene(data);
+  /** Counts a failed evidence download; while tries remain, a fresh link is asked for. */
+  const evidenceFailed = useCallback(() => {
+    const ev = evidenceRef.current;
+    ev.failures += 1;
+    if (ev.failures < EVIDENCE_DOWNLOAD_ATTEMPTS) setEvidenceRetries((n) => n + 1);
+  }, []);
+
+  /** Downloads the scene's evidence, unless it is loaded, under way or given up on. */
+  const requestEvidence = useCallback(
+    (data: SceneDetail) => {
       // A missing, expired or failed download leaves no layer and no error.
       const ev = evidenceRef.current;
       if (ev.sceneId !== data.scene.id) {
         Object.assign(ev, { sceneId: data.scene.id, loaded: false, failures: 0 });
       }
       if (
-        data.captureEvidence &&
-        !ev.loaded &&
-        !ev.pending &&
-        ev.failures < EVIDENCE_DOWNLOAD_ATTEMPTS
+        !data.captureEvidence ||
+        ev.loaded ||
+        ev.pending ||
+        ev.failures >= EVIDENCE_DOWNLOAD_ATTEMPTS
       ) {
-        const sceneId = data.scene.id;
-        ev.pending = true;
-        void loadCaptureEvidence(data.captureEvidence).then((loaded) => {
-          ev.pending = false;
-          if (ev.sceneId !== sceneId) return;
-          if (loaded) {
-            ev.loaded = true;
-            setEvidence(loaded);
-          } else {
-            ev.failures += 1;
-          }
-        });
+        return;
       }
+      const sceneId = data.scene.id;
+      ev.pending = true;
+      void loadCaptureEvidence(data.captureEvidence).then((loaded) => {
+        ev.pending = false;
+        if (ev.sceneId !== sceneId) return;
+        if (loaded) {
+          ev.loaded = true;
+          setEvidence(loaded);
+        } else {
+          evidenceFailed();
+        }
+      });
+    },
+    [evidenceFailed],
+  );
+
+  const adoptScene = useCallback(
+    (data: SceneDetail, resetLayout: boolean) => {
+      setScene(data);
+      requestEvidence(data);
       const rev = data.revision;
       if (!rev) return;
       if (resetLayout) {
@@ -553,7 +573,7 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
         }
       }
     },
-    [showRevision],
+    [showRevision, requestEvidence],
   );
 
   const refreshFloorPlan = useCallback(async (): Promise<FloorPlanLink | null> => {
@@ -596,6 +616,27 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
       active = false;
     };
   }, [sceneId, adoptScene]);
+
+  // Nothing else may read the scene again soon (a valid scene is not polled), so a failed
+  // evidence download reads it for a fresh link itself, a little later.
+  useEffect(() => {
+    if (evidenceRetries === 0 || !sceneId) return;
+    let active = true;
+    const timer = setTimeout(() => {
+      api.getScene(sceneId).then(
+        ({ data }) => {
+          if (active) requestEvidence(data);
+        },
+        () => {
+          if (active) evidenceFailed();
+        },
+      );
+    }, EVIDENCE_RETRY_DELAY_MS);
+    return () => {
+      active = false;
+      clearTimeout(timer);
+    };
+  }, [evidenceRetries, sceneId, requestEvidence, evidenceFailed]);
 
   // While a saved revision is being validated/packaged, poll the scene.
   const pending = revisionPending(scene);

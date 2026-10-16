@@ -160,7 +160,10 @@ function isRetryable(error: unknown): boolean {
   return error instanceof TypeError;
 }
 
-/** What the uploaders on one page hold, so that no two of them share an upload. */
+/**
+ * What the uploaders on one page hold, so that no two of them share an upload. A capture
+ * flow keeps one for as long as it is mounted; uploaders without one share the module's.
+ */
 export interface UploaderPage {
   /**
    * Creation keys. The same file selected twice has one creation identity: a second

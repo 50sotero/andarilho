@@ -3,7 +3,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { useProject } from "@/features/projects/use-project";
-import { ReviewEditor } from "@/features/review/ReviewEditor";
+import { EVIDENCE_RETRY_DELAY_MS, ReviewEditor } from "@/features/review/ReviewEditor";
 import { api } from "@/lib/api/client";
 import type {
   CaptureEvidenceLink,
@@ -227,6 +227,33 @@ describe("capture evidence in the review editor", () => {
     await settle();
     expect(fetchMock).toHaveBeenCalledTimes(2);
     expect(evidenceLayer()).not.toBeNull();
+  });
+
+  it("reads the scene for a fresh link itself after a failed evidence download", async () => {
+    // A valid scene is not polled, so nothing else would give the editor a new link.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      let calls = 0;
+      const fetchMock = vi.fn(async () => {
+        calls += 1;
+        if (calls === 1) throw new TypeError("Failed to fetch");
+        return { ok: true, json: async () => evidenceBody };
+      });
+      vi.stubGlobal("fetch", fetchMock);
+      await renderEditor(sceneDetail(evidenceLink));
+      expect(evidenceLayer()).toBeNull();
+      expect(api.getScene).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        vi.advanceTimersByTime(EVIDENCE_RETRY_DELAY_MS);
+      });
+      await settle();
+      expect(api.getScene).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(evidenceLayer()).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("stops asking for evidence that keeps failing", async () => {
