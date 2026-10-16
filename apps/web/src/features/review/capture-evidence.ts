@@ -94,13 +94,13 @@ export function evidenceOnPlan(evidence: CaptureEvidence, scale: number): Eviden
  * Downloads the evidence behind a link. Evidence only adds context, so every failure
  * (an expired link, a refused request, a malformed file) resolves to null and the
  * editor shows no layer. The request carries no credentials: the link is the grant.
+ * Its expiry is left to storage, which refuses an expired link: this device's clock
+ * may be off from the server's that set it.
  */
 export async function loadCaptureEvidence(
   link: CaptureEvidenceLink,
   fetchImpl: typeof fetch = fetch,
 ): Promise<CaptureEvidence | null> {
-  const expires = Date.parse(link.expiresAt);
-  if (!Number.isFinite(expires) || expires <= Date.now()) return null;
   try {
     const response = await fetchImpl(link.url, { credentials: "omit" });
     if (!response.ok) return null;

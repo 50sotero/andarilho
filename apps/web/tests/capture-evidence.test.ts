@@ -187,10 +187,11 @@ describe("loadCaptureEvidence", () => {
     }
   });
 
-  it("does not download a link that has already expired", async () => {
+  it("leaves a link's expiry to storage, not to this device's clock", async () => {
+    // Past by this device's clock, which may be fast: storage still accepts it.
+    const pastHere = { url: link.url, expiresAt: new Date(Date.now() - 1000).toISOString() };
     const fetchMock = vi.fn<typeof fetch>(async () => jsonResponse(valid));
-    const expired = { url: link.url, expiresAt: new Date(Date.now() - 1000).toISOString() };
-    await expect(loadCaptureEvidence(expired, fetchMock)).resolves.toBeNull();
-    expect(fetchMock).not.toHaveBeenCalled();
+    await expect(loadCaptureEvidence(pastHere, fetchMock)).resolves.not.toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

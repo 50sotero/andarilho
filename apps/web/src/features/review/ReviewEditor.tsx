@@ -37,6 +37,9 @@ import {
   type Selection,
 } from "./layout-edit";
 
+/** Downloads of a scene's evidence tried before the editor stops asking for it. */
+const EVIDENCE_DOWNLOAD_ATTEMPTS = 3;
+
 function NumberField({
   label,
   value,
@@ -480,9 +483,15 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
   const [underlay, setUnderlay] = useState<PlanUnderlay | null>(null);
   const [evidence, setEvidence] = useState<CaptureEvidence | null>(null);
   const [showEvidence, setShowEvidence] = useState(true);
-  // The scene whose evidence was requested: the evidence does not change for a run, so
-  // later polls only renew its link and do not download it again.
-  const evidenceSceneRef = useRef<string | null>(null);
+  // The evidence does not change for a run: once downloaded, later polls only renew its
+  // link. A failed download (an expired link, a network blip) is tried again with a later
+  // link, a few times at most, so a malformed file is not fetched on every poll.
+  const evidenceRef = useRef({
+    sceneId: null as string | null,
+    loaded: false,
+    pending: false,
+    failures: 0,
+  });
   const overlayId = useId();
   const evidenceId = useId();
   // The revision whose layout the canvas shows. Approval is only offered for it, so
@@ -508,9 +517,28 @@ export function ReviewEditor({ projectId }: { projectId: string }) {
     (data: SceneDetail, resetLayout: boolean) => {
       setScene(data);
       // A missing, expired or failed download leaves no layer and no error.
-      if (data.captureEvidence && evidenceSceneRef.current !== data.scene.id) {
-        evidenceSceneRef.current = data.scene.id;
-        void loadCaptureEvidence(data.captureEvidence).then(setEvidence);
+      const ev = evidenceRef.current;
+      if (ev.sceneId !== data.scene.id) {
+        Object.assign(ev, { sceneId: data.scene.id, loaded: false, failures: 0 });
+      }
+      if (
+        data.captureEvidence &&
+        !ev.loaded &&
+        !ev.pending &&
+        ev.failures < EVIDENCE_DOWNLOAD_ATTEMPTS
+      ) {
+        const sceneId = data.scene.id;
+        ev.pending = true;
+        void loadCaptureEvidence(data.captureEvidence).then((loaded) => {
+          ev.pending = false;
+          if (ev.sceneId !== sceneId) return;
+          if (loaded) {
+            ev.loaded = true;
+            setEvidence(loaded);
+          } else {
+            ev.failures += 1;
+          }
+        });
       }
       const rev = data.revision;
       if (!rev) return;

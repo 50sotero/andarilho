@@ -212,6 +212,36 @@ describe("capture evidence in the review editor", () => {
     expect(container.textContent).not.toMatch(/went wrong|Network problem/);
   });
 
+  it("tries a failed evidence download again with the scene's next link", async () => {
+    let calls = 0;
+    const fetchMock = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError("Failed to fetch");
+      return { ok: true, json: async () => evidenceBody };
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    await renderEditor(sceneDetail(evidenceLink));
+    expect(evidenceLayer()).toBeNull();
+
+    await click(button("Discard changes")!); // the scene is read again, with a new link
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(evidenceLayer()).not.toBeNull();
+  });
+
+  it("stops asking for evidence that keeps failing", async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ broken: true }) }));
+    vi.stubGlobal("fetch", fetchMock);
+    await renderEditor(sceneDetail(evidenceLink));
+    for (let i = 0; i < 4; i += 1) {
+      await click(button("Discard changes")!);
+      await settle();
+    }
+    expect(api.getScene).toHaveBeenCalledTimes(5);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(evidenceLayer()).toBeNull();
+  });
+
   it("downloads the evidence once per scene, not again when the layout reloads", async () => {
     const fetchMock = vi.fn(async () => ({ ok: true, json: async () => evidenceBody }));
     vi.stubGlobal("fetch", fetchMock);
