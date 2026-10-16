@@ -11,6 +11,7 @@ import {
   fileFingerprint,
   isExpired,
   loadResumeRecord,
+  loadResumeRecords,
   partRange,
   pruneResumeRecords,
   remainingParts,
@@ -125,7 +126,7 @@ describe("persistence", () => {
     const storage = new MemoryStorage();
     const { sample: _omitted, ...old } = record();
     storage.setItem(
-      resumeKey("project-1", fileFingerprint(file)),
+      resumeKey("project-1", fileFingerprint(file), "upload-1"),
       JSON.stringify({ ...old, version: 1 }),
     );
     expect(loadResumeRecord("project-1", file, { storage, now: NOW })).toBeNull();
@@ -161,7 +162,7 @@ describe("persistence", () => {
 
   it("ignores and removes corrupted JSON", () => {
     const storage = new MemoryStorage();
-    const key = resumeKey("project-1", fileFingerprint(file));
+    const key = resumeKey("project-1", fileFingerprint(file), "upload-1");
     storage.setItem(key, "{not json");
     expect(loadResumeRecord("project-1", file, { storage, now: NOW })).toBeNull();
     expect(storage.getItem(key)).toBeNull();
@@ -169,7 +170,7 @@ describe("persistence", () => {
 
   it("ignores structurally invalid records", () => {
     const storage = new MemoryStorage();
-    const key = resumeKey("project-1", fileFingerprint(file));
+    const key = resumeKey("project-1", fileFingerprint(file), "upload-1");
     const bad = [
       { ...record(), version: 99 },
       { ...record(), partSize: -1 },
@@ -204,7 +205,7 @@ describe("persistence", () => {
     const justPast = record({ expiresAt: new Date(NOW - 1000).toISOString() });
     saveResumeRecord(justPast, storage);
     expect(loadResumeRecord("project-1", file, { storage, now: NOW })).not.toBeNull();
-    removeResumeRecord("project-1", justPast.fingerprint, storage);
+    removeResumeRecord("project-1", justPast.fingerprint, justPast.uploadId, storage);
 
     // The server may still accept it, and it holds quota: the uploader asks the server.
     const nearExpiry = record({
@@ -217,7 +218,7 @@ describe("persistence", () => {
 
   it("deduplicates and sorts completed parts", () => {
     const storage = new MemoryStorage();
-    const key = resumeKey("project-1", fileFingerprint(file));
+    const key = resumeKey("project-1", fileFingerprint(file), "upload-1");
     storage.setItem(
       key,
       JSON.stringify(
@@ -241,13 +242,35 @@ describe("persistence", () => {
     const storage = new ThrowingStorage();
     expect(saveResumeRecord(record(), storage)).toBe(false);
     expect(loadResumeRecord("project-1", file, { storage, now: NOW })).toBeNull();
-    expect(() => removeResumeRecord("project-1", "x", storage)).not.toThrow();
+    expect(() => removeResumeRecord("project-1", "x", "upload-1", storage)).not.toThrow();
     expect(pruneResumeRecords(storage, NOW)).toBe(0);
   });
 
   it("works without storage at all", () => {
     expect(saveResumeRecord(record(), null)).toBe(false);
     expect(loadResumeRecord("project-1", file, { storage: null, now: NOW })).toBeNull();
+  });
+
+  it("keeps one record per upload for different files that share an identity", () => {
+    const storage = new MemoryStorage();
+    saveResumeRecord(record({ uploadId: "upload-a", sample: "aa".repeat(32) }), storage);
+    saveResumeRecord(record({ uploadId: "upload-b", sample: "bb".repeat(32) }), storage);
+    const found = loadResumeRecords("project-1", file, { storage, now: NOW });
+    expect(found.map((r) => r.uploadId)).toEqual(["upload-a", "upload-b"]);
+    removeResumeRecord("project-1", fileFingerprint(file), "upload-a", storage);
+    expect(
+      loadResumeRecords("project-1", file, { storage, now: NOW }).map((r) => r.uploadId),
+    ).toEqual(["upload-b"]);
+  });
+
+  it("prunes a record saved under the single slot used before records were per upload", () => {
+    const storage = new MemoryStorage();
+    storage.setItem(
+      `andarilho:upload:project-1:${fileFingerprint(file)}`,
+      JSON.stringify(record()),
+    );
+    expect(pruneResumeRecords(storage, NOW)).toBe(1);
+    expect(storage.length).toBe(0);
   });
 
   it("prunes only expired or corrupted upload records", () => {

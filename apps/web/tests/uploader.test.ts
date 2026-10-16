@@ -387,7 +387,7 @@ describe("MultipartUpload", () => {
     await upload.start();
     expect(api.getUpload).toHaveBeenCalledTimes(1);
     expect(api.createUpload).toHaveBeenCalledTimes(1);
-    expect(storage.getItem(resumeKey("p1", fileFingerprint(video(file))))).toBeNull();
+    expect(storage.getItem(resumeKey("p1", fileFingerprint(video(file)), "u-gone"))).toBeNull();
   });
 
   it("treats an upload the server already completed as done after a reload", async () => {
@@ -431,7 +431,7 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).not.toHaveBeenCalled();
     expect(api.completeUpload).not.toHaveBeenCalled();
     expect(putPart).not.toHaveBeenCalled();
-    expect(storage.getItem(resumeKey("p1", fileFingerprint(video(file))))).toBeNull();
+    expect(storage.getItem(resumeKey("p1", fileFingerprint(video(file)), "u-done"))).toBeNull();
   });
 
   it("starts a new upload for another file with the same name, size and date", async () => {
@@ -471,6 +471,57 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).toHaveBeenCalledTimes(1);
     expect(uploaded.sort()).toEqual([1, 2, 3]);
     expect(upload.state.resumed).toBe(false);
+  });
+
+  it("resumes each of two files that share a name, size and date into its own upload", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const fileA = fakeFile(size, "walk.mp4", 1);
+    const fileB = fakeFile(size, "walk.mp4", 2);
+    for (const [uploadId, file] of [
+      ["u-a", fileA],
+      ["u-b", fileB],
+    ] as const) {
+      saveResumeRecord(
+        {
+          version: RESUME_RECORD_VERSION,
+          uploadId,
+          projectId: "p1",
+          fingerprint: fileFingerprint(video(file)),
+          sample: (await contentSample(file, PART))!,
+          partSize: PART,
+          partCount: 2,
+          completedParts: [{ partNumber: 1, etag: '"e1"' }],
+          expiresAt: FUTURE,
+        },
+        storage,
+      );
+    }
+    const { api } = fakeApi(size, {
+      getUpload: vi.fn(async (uploadId: string) => ({
+        data: {
+          upload: uploadRecord(uploadId),
+          completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
+          acceptingParts: true,
+          assembled: false,
+        },
+        etag: null,
+      })),
+    });
+    const putUrls: string[] = [];
+    const upload = new MultipartUpload("p1", fileB, "video", "video/mp4", {
+      api,
+      putPart: async (url) => {
+        putUrls.push(url);
+        return `"e${partOf(url)}"`;
+      },
+      storage,
+    });
+    expect((await upload.start()).id).toBe("u-b");
+    expect(api.createUpload).not.toHaveBeenCalled();
+    expect(putUrls).toEqual(["https://storage.test/u-b/2"]);
+    // The other file's record is untouched, so it resumes its own upload in turn.
+    expect(loadResumeRecord("p1", video(fileA), { storage })?.uploadId).toBe("u-a");
   });
 
   it("does not take an upload the server completed for another file as done", async () => {

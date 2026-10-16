@@ -23,7 +23,7 @@ import {
   fileFingerprint,
   getDefaultStorage,
   isExpired,
-  loadResumeRecord,
+  loadResumeRecords,
   partRange,
   remainingParts,
   removeResumeRecord,
@@ -293,7 +293,7 @@ export class MultipartUpload {
     const uploadId = this.record?.uploadId ?? this.progress.uploadId;
     this.record = null;
     this.resetUrlCache(null);
-    removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+    this.removeRecord(uploadId);
     this.forgetCreationKey();
     if (options.abortOnServer && uploadId) this.abortQuietly(uploadId);
   }
@@ -309,7 +309,7 @@ export class MultipartUpload {
       if ("completedUpload" in initialized) {
         // The server already completed this upload (e.g. the completion response was
         // lost before a reload): treat it as done instead of uploading a duplicate.
-        this.forgetFinishedUpload();
+        this.forgetFinishedUpload(initialized.completedUpload.id);
         this.emit({ phase: "completed", uploadedBytes: this.file.size });
         return initialized.completedUpload;
       }
@@ -329,7 +329,7 @@ export class MultipartUpload {
       if (signal.aborted) throw new UploadAbortedError();
       this.emit({ phase: "completing" });
       const { data } = await this.api.completeUpload(record.uploadId);
-      this.forgetFinishedUpload();
+      this.forgetFinishedUpload(record.uploadId);
       this.emit({ phase: "completed", uploadedBytes: this.file.size });
       return data.upload;
     } catch (error) {
@@ -361,15 +361,22 @@ export class MultipartUpload {
       if (!isExpired(inSession, this.now())) return inSession;
       saved = inSession;
     } else {
-      saved = loadResumeRecord(this.projectId, this.identity, {
+      saved = null;
+      // Name, size and date only find records: another file can share all three, each
+      // with its own upload and record, and reusing another's upload would keep the old
+      // bytes or mix the two files. Only a record whose sample matches is this file's.
+      const samples = new Map<number, string | null>();
+      for (const candidate of loadResumeRecords(this.projectId, this.identity, {
         storage: this.storage,
         now: this.now(),
-      });
-      // Name, size and date only find the record: another file can share all three, and
-      // reusing its upload would keep the old bytes or mix the two files.
-      if (saved && (await contentSample(this.file, saved.partSize)) !== saved.sample) {
-        removeResumeRecord(this.projectId, this.fingerprint, this.storage);
-        saved = null;
+      })) {
+        if (!samples.has(candidate.partSize)) {
+          samples.set(candidate.partSize, await contentSample(this.file, candidate.partSize));
+        }
+        if (samples.get(candidate.partSize) === candidate.sample) {
+          saved = candidate;
+          break;
+        }
       }
     }
     if (signal.aborted) throw new UploadAbortedError();
@@ -409,7 +416,7 @@ export class MultipartUpload {
         }
       }
       if (inSession) this.discardRecord();
-      else removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+      else this.removeRecord(saved.uploadId);
     }
 
     // A lost response may hide an upload the server created: a retry with the same
@@ -502,18 +509,24 @@ export class MultipartUpload {
   }
 
   private discardRecord() {
+    const uploadId = this.record?.uploadId;
     this.record = null;
     this.resetUrlCache(null);
-    removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+    this.removeRecord(uploadId);
     // A creation key kept because the record could not be saved would get this upload back.
     this.forgetCreationKey();
   }
 
   /** The upload is complete: neither its record nor its creation key may find it again. */
-  private forgetFinishedUpload() {
+  private forgetFinishedUpload(uploadId: string) {
     this.record = null;
-    removeResumeRecord(this.projectId, this.fingerprint, this.storage);
+    this.removeRecord(uploadId);
     this.forgetCreationKey();
+  }
+
+  /** Removes this file's saved record of that upload; other uploads' records stay. */
+  private removeRecord(uploadId: string | null | undefined) {
+    if (uploadId) removeResumeRecord(this.projectId, this.fingerprint, uploadId, this.storage);
   }
 
   /** Forget part URLs signed for another upload: they would upload into it. */

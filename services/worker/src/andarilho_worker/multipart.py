@@ -14,12 +14,16 @@ its quota, until such a check: that check clears it. The horizon covers every pa
 upload the app supports (:func:`andarilho_worker.settings.reconcile_horizon`); a part that
 lands later anyway charges its upload's quota again, through its ID, until a check finds
 it gone.
+A completion can join the parts into the staging object and fail before freezing the
+upload, which may then expire with nothing else to delete that object: the first clean
+check after an abort deletes it too, unless an upload still takes parts into that key.
 Entries are never deleted: one costs a row and a ``ListParts`` call a week.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -34,6 +38,10 @@ RECHECK_MAX_SECONDS = 7 * 86400.0
 ERROR_RETRY_SECONDS = 300.0
 # Entries checked per maintenance pass at most, so one pass stays short.
 BATCH = 50
+# The API's staging keys, tenants/{project}/staging/{upload}: deleting one as a prefix
+# removes only that object, as an ID of fixed length is never another's prefix.
+_UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}"
+STAGING_KEY = re.compile(rf"^tenants/{_UUID}/staging/{_UUID}$")
 
 
 def record(conn: Any, uploads: Iterable[tuple[str, str]], *, aborted_at: float | None) -> None:
@@ -56,6 +64,16 @@ def record(conn: Any, uploads: Iterable[tuple[str, str]], *, aborted_at: float |
             """,
             (key, upload_id, aborted_at, aborted_at, RECHECK_FIRST_SECONDS),
         )
+
+
+def _abandoned_staging(conn: Any, key: str) -> bool:
+    """Whether ``key`` is a staging object no upload may still complete into."""
+    if not STAGING_KEY.match(key):
+        return False
+    taking = conn.execute(
+        "SELECT 1 FROM uploads WHERE staging_key = %s AND status = 'initiated'", (key,)
+    ).fetchone()
+    return taking is None
 
 
 def clean_delay(clean_checks: int) -> float:
@@ -91,6 +109,9 @@ def reconcile(
                     abort = store.count_multipart_parts(key, upload_id) > 0
                 if abort:
                     store.abort_multipart_upload(key, upload_id)
+                elif int(row["clean_checks"]) == 0 and _abandoned_staging(conn, key):
+                    # Before the quota is released below: the object holds the whole file.
+                    store.delete_prefix(key)
             except Exception as exc:  # any storage failure: try this entry again later
                 log.warning("multipart check failed: %s", type(exc).__name__)
                 stats["multipartFailed"] += 1

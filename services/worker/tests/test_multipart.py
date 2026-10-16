@@ -210,6 +210,35 @@ def test_a_part_landing_after_an_expired_upload_was_released_charges_it_again(db
     assert _multipart_id(seed, uid) is None
 
 
+def test_a_staging_object_a_failed_completion_left_is_deleted_once_its_upload_expired(
+    db, seed, store
+):
+    pid = seed.project()
+    uid, key = _expired_upload(seed, pid)
+    # A completion joined the parts, then failed before freezing the upload: the multipart
+    # upload is gone, and the staging object holds the whole file.
+    store.put_bytes(key, b"v" * 10)
+    assert queue.expire_uploads(db) == (1, 0)
+    reconcile(db, store, horizon_seconds=900)  # the abort: no multipart upload is left
+    assert store.head(key) is not None
+    _due(seed)
+    reconcile(db, store, horizon_seconds=900)  # a horizon later: deleted, then released
+    assert store.head(key) is None
+    assert _multipart_id(seed, uid) is None
+
+
+def test_a_staging_key_an_upload_still_takes_parts_into_is_left_alone(db, seed, store):
+    pid = seed.project()
+    uid, key = _expired_upload(seed, pid)
+    seed.exec("UPDATE uploads SET expires_at = now() + interval '1 day' WHERE id = %s", uid)
+    store.put_bytes(key, b"v")
+    with db.transaction() as conn:
+        record(conn, [(key, "mp-other")], aborted_at=time.time() - 900)
+    _due(seed)
+    assert reconcile(db, store, horizon_seconds=900)["multipartChecked"] == 1
+    assert store.head(key) is not None
+
+
 @pytest.mark.parametrize("status", ["aborted", "rejected"])
 def test_a_late_part_charges_a_removed_or_rejected_upload_again(db, seed, store, status):
     pid = seed.project()

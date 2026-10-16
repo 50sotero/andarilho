@@ -2,11 +2,11 @@
  * Local resume state for multipart uploads (README section 7, step 4).
  *
  * The browser cannot reopen a file after reload, so the user re-selects it;
- * we find its persisted record by a fingerprint built from the file's name,
+ * we find its persisted records by a fingerprint built from the file's name,
  * size and lastModified. That is only a hint: another file can share all
- * three, so the record also holds a hash of sampled bytes (`contentSample`),
- * and the uploader reuses the upload only when the re-selected file's sample
- * matches. Storage access is always wrapped in try/catch: private windows and
+ * three, so each record is kept per upload and holds a hash of sampled bytes
+ * (`contentSample`), and the uploader reuses an upload only when the
+ * re-selected file's sample matches its record. Storage access is always wrapped in try/catch: private windows and
  * blocked storage must not break uploading, they only disable resume.
  */
 
@@ -121,8 +121,17 @@ export async function contentSample(file: SampledFile, partSize: number): Promis
   return Array.from(digest, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-export function resumeKey(projectId: string, fingerprint: string): string {
-  return `${RESUME_STORAGE_PREFIX}${projectId}:${fingerprint}`;
+/**
+ * One record per upload: files that share a fingerprint each have their own upload,
+ * and one slot would let their records overwrite each other. A fingerprint has no
+ * unencoded ":" in its last field, so the prefix up to the upload ID is its own.
+ */
+export function resumeKey(projectId: string, fingerprint: string, uploadId: string): string {
+  return `${resumePrefix(projectId, fingerprint)}${uploadId}`;
+}
+
+function resumePrefix(projectId: string, fingerprint: string): string {
+  return `${RESUME_STORAGE_PREFIX}${projectId}:${fingerprint}:`;
 }
 
 export function getDefaultStorage(): KeyValueStorage | null {
@@ -205,7 +214,10 @@ export function saveResumeRecord(
   // A record without a content sample could not be checked against the file on resume.
   if (!storage || !record.sample) return false;
   try {
-    storage.setItem(resumeKey(record.projectId, record.fingerprint), JSON.stringify(record));
+    storage.setItem(
+      resumeKey(record.projectId, record.fingerprint, record.uploadId),
+      JSON.stringify(record),
+    );
     return true;
   } catch {
     return false;
@@ -215,57 +227,77 @@ export function saveResumeRecord(
 export function removeResumeRecord(
   projectId: string,
   fingerprint: string,
+  uploadId: string,
   storage: KeyValueStorage | null = getDefaultStorage(),
 ): void {
   if (!storage) return;
   try {
-    storage.removeItem(resumeKey(projectId, fingerprint));
+    storage.removeItem(resumeKey(projectId, fingerprint, uploadId));
   } catch {
     // ignore
   }
 }
 
 /**
- * Loads a record for this project/file. Corrupted, mismatched or expired
- * records are deleted and ignored. The file's identity only finds the record:
- * check its `sample` against the file (`contentSample`) before reusing it.
+ * Loads this project/file's records, one per upload: different files can share the
+ * identity, each with its own upload. Corrupted, mismatched or lapsed records are
+ * deleted and ignored. The identity only finds them: check a record's `sample`
+ * against the file (`contentSample`) before reusing its upload.
  */
+export function loadResumeRecords(
+  projectId: string,
+  file: FileIdentity,
+  options: { storage?: KeyValueStorage | null; now?: number } = {},
+): UploadResumeRecord[] {
+  const storage = options.storage === undefined ? getDefaultStorage() : options.storage;
+  if (!storage) return [];
+  const fingerprint = fileFingerprint(file);
+  const prefix = resumePrefix(projectId, fingerprint);
+  const keys: string[] = [];
+  try {
+    for (let i = 0; i < storage.length; i += 1) {
+      const key = storage.key(i);
+      if (key?.startsWith(prefix)) keys.push(key);
+    }
+  } catch {
+    return [];
+  }
+  const records: UploadResumeRecord[] = [];
+  for (const key of keys.sort()) {
+    let record: UploadResumeRecord | null = null;
+    try {
+      record = parseResumeRecord(JSON.parse(storage.getItem(key) ?? "null"));
+    } catch {
+      record = null;
+    }
+    const expectedParts = record ? Math.ceil(file.size / record.partSize) : 0;
+    if (
+      !record ||
+      record.projectId !== projectId ||
+      record.fingerprint !== fingerprint ||
+      key !== resumeKey(projectId, fingerprint, record.uploadId) ||
+      expectedParts !== record.partCount ||
+      hasLapsed(record, options.now)
+    ) {
+      try {
+        storage.removeItem(key);
+      } catch {
+        // ignore
+      }
+      continue;
+    }
+    records.push(record);
+  }
+  return records;
+}
+
+/** One of this file's records, or null: whether there is one to resume. */
 export function loadResumeRecord(
   projectId: string,
   file: FileIdentity,
   options: { storage?: KeyValueStorage | null; now?: number } = {},
 ): UploadResumeRecord | null {
-  const storage = options.storage === undefined ? getDefaultStorage() : options.storage;
-  if (!storage) return null;
-  const fingerprint = fileFingerprint(file);
-  const key = resumeKey(projectId, fingerprint);
-  let text: string | null;
-  try {
-    text = storage.getItem(key);
-  } catch {
-    return null;
-  }
-  if (!text) return null;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(text);
-  } catch {
-    removeResumeRecord(projectId, fingerprint, storage);
-    return null;
-  }
-  const record = parseResumeRecord(parsed);
-  const expectedParts = record ? Math.ceil(file.size / record.partSize) : 0;
-  if (
-    !record ||
-    record.projectId !== projectId ||
-    record.fingerprint !== fingerprint ||
-    expectedParts !== record.partCount ||
-    hasLapsed(record, options.now)
-  ) {
-    removeResumeRecord(projectId, fingerprint, storage);
-    return null;
-  }
-  return record;
+  return loadResumeRecords(projectId, file, options)[0] ?? null;
 }
 
 /** Returns a new record with this part marked complete (idempotent). */
@@ -408,7 +440,11 @@ export function pruneResumeRecords(
       } catch {
         record = null;
       }
-      if (!record || hasLapsed(record, now)) doomed.push(key);
+      // A record under any other key (one written before records were kept per upload)
+      // could overwrite or be overwritten by another file's: dropped.
+      const misplaced =
+        record && key !== resumeKey(record.projectId, record.fingerprint, record.uploadId);
+      if (!record || misplaced || hasLapsed(record, now)) doomed.push(key);
     }
     for (const key of doomed) storage.removeItem(key);
   } catch {
