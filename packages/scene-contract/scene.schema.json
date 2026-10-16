@@ -1,0 +1,448 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://andarilho.dev/schemas/scene/2.0.json",
+  "x-schema-version": "2.0",
+  "$defs": {
+    "Bounds": {
+      "additionalProperties": false,
+      "properties": {
+        "min": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Min",
+          "type": "array"
+        },
+        "max": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Max",
+          "type": "array"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "title": "Bounds",
+      "type": "object"
+    },
+    "CollisionAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "maxLength": 512,
+          "pattern": "^tenants/[A-Za-z0-9_-]+/scenes/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$",
+          "title": "Key",
+          "type": "string"
+        },
+        "bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "format": {
+          "const": "glb",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "bytes",
+        "sha256",
+        "format"
+      ],
+      "title": "CollisionAsset",
+      "type": "object"
+    },
+    "FloorRef": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "elevation": {
+          "title": "Elevation",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "elevation"
+      ],
+      "title": "FloorRef",
+      "type": "object"
+    },
+    "Navigation": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "enum": [
+            "approved_collision",
+            "inspection_only"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "layoutRevision": {
+          "minimum": 1,
+          "title": "Layoutrevision",
+          "type": "integer"
+        },
+        "approved": {
+          "title": "Approved",
+          "type": "boolean"
+        },
+        "playerRadius": {
+          "default": 0.25,
+          "exclusiveMinimum": 0,
+          "title": "Playerradius",
+          "type": "number"
+        },
+        "playerHeight": {
+          "default": 1.7,
+          "exclusiveMinimum": 0,
+          "title": "Playerheight",
+          "type": "number"
+        },
+        "eyeHeight": {
+          "default": 1.6,
+          "exclusiveMinimum": 0,
+          "title": "Eyeheight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "mode",
+        "layoutRevision",
+        "approved"
+      ],
+      "title": "Navigation",
+      "type": "object"
+    },
+    "PosterAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "maxLength": 512,
+          "pattern": "^tenants/[A-Za-z0-9_-]+/scenes/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$",
+          "title": "Key",
+          "type": "string"
+        },
+        "bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "format": {
+          "enum": [
+            "webp",
+            "png",
+            "jpeg"
+          ],
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "bytes",
+        "sha256",
+        "format"
+      ],
+      "title": "PosterAsset",
+      "type": "object"
+    },
+    "Provenance": {
+      "additionalProperties": false,
+      "properties": {
+        "recipeDigest": {
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Recipedigest",
+          "type": "string"
+        },
+        "captureSetId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Capturesetid",
+          "type": "string"
+        },
+        "geometrySource": {
+          "enum": [
+            "user_confirmed_trace",
+            "floor_plan_trace",
+            "proposal",
+            "synthetic_fixture"
+          ],
+          "title": "Geometrysource",
+          "type": "string"
+        }
+      },
+      "required": [
+        "recipeDigest",
+        "captureSetId",
+        "geometrySource"
+      ],
+      "title": "Provenance",
+      "type": "object"
+    },
+    "Quality": {
+      "additionalProperties": false,
+      "properties": {
+        "registeredViews": {
+          "minimum": 0,
+          "title": "Registeredviews",
+          "type": "integer"
+        },
+        "selectedViews": {
+          "minimum": 0,
+          "title": "Selectedviews",
+          "type": "integer"
+        },
+        "disconnectedComponents": {
+          "minimum": 0,
+          "title": "Disconnectedcomponents",
+          "type": "integer"
+        },
+        "warnings": {
+          "items": {
+            "maxLength": 500,
+            "type": "string"
+          },
+          "maxItems": 100,
+          "title": "Warnings",
+          "type": "array"
+        }
+      },
+      "required": [
+        "registeredViews",
+        "selectedViews",
+        "disconnectedComponents"
+      ],
+      "title": "Quality",
+      "type": "object"
+    },
+    "RenderAsset": {
+      "additionalProperties": false,
+      "description": "The textured layout model (binary glTF, unlit materials, world space).",
+      "properties": {
+        "key": {
+          "maxLength": 512,
+          "pattern": "^tenants/[A-Za-z0-9_-]+/scenes/[A-Za-z0-9_-]+/[A-Za-z0-9._-]+$",
+          "title": "Key",
+          "type": "string"
+        },
+        "bytes": {
+          "exclusiveMinimum": 0,
+          "title": "Bytes",
+          "type": "integer"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "format": {
+          "const": "glb",
+          "title": "Format",
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "bytes",
+        "sha256",
+        "format"
+      ],
+      "title": "RenderAsset",
+      "type": "object"
+    },
+    "SceneAssets": {
+      "additionalProperties": false,
+      "properties": {
+        "render": {
+          "$ref": "#/$defs/RenderAsset"
+        },
+        "collision": {
+          "$ref": "#/$defs/CollisionAsset"
+        },
+        "poster": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PosterAsset"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "render",
+        "collision"
+      ],
+      "title": "SceneAssets",
+      "type": "object"
+    },
+    "Spawn": {
+      "additionalProperties": false,
+      "properties": {
+        "feet": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Feet",
+          "type": "array"
+        },
+        "yawRadians": {
+          "title": "Yawradians",
+          "type": "number"
+        },
+        "floorId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Floorid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "feet",
+        "yawRadians",
+        "floorId"
+      ],
+      "title": "Spawn",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Persistent scene manifest. Contains object keys, never signed URLs or tokens.",
+  "properties": {
+    "schemaVersion": {
+      "const": "2.0",
+      "title": "Schemaversion",
+      "type": "string"
+    },
+    "sceneId": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+      "title": "Sceneid",
+      "type": "string"
+    },
+    "sceneRevisionId": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+      "title": "Scenerevisionid",
+      "type": "string"
+    },
+    "revision": {
+      "minimum": 1,
+      "title": "Revision",
+      "type": "integer"
+    },
+    "runId": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+      "title": "Runid",
+      "type": "string"
+    },
+    "renderMode": {
+      "const": "mesh",
+      "title": "Rendermode",
+      "type": "string"
+    },
+    "units": {
+      "const": "m",
+      "title": "Units",
+      "type": "string"
+    },
+    "upAxis": {
+      "const": "+Y",
+      "title": "Upaxis",
+      "type": "string"
+    },
+    "cameraForward": {
+      "const": "-Z",
+      "title": "Cameraforward",
+      "type": "string"
+    },
+    "scaleStatus": {
+      "enum": [
+        "user_measured",
+        "estimated"
+      ],
+      "title": "Scalestatus",
+      "type": "string"
+    },
+    "geometrySpace": {
+      "const": "world",
+      "title": "Geometryspace",
+      "type": "string"
+    },
+    "bounds": {
+      "$ref": "#/$defs/Bounds"
+    },
+    "spawn": {
+      "$ref": "#/$defs/Spawn"
+    },
+    "floors": {
+      "items": {
+        "$ref": "#/$defs/FloorRef"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Floors",
+      "type": "array"
+    },
+    "assets": {
+      "$ref": "#/$defs/SceneAssets"
+    },
+    "navigation": {
+      "$ref": "#/$defs/Navigation"
+    },
+    "quality": {
+      "$ref": "#/$defs/Quality"
+    },
+    "provenance": {
+      "$ref": "#/$defs/Provenance"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "sceneId",
+    "sceneRevisionId",
+    "revision",
+    "runId",
+    "renderMode",
+    "units",
+    "upAxis",
+    "cameraForward",
+    "scaleStatus",
+    "geometrySpace",
+    "bounds",
+    "spawn",
+    "floors",
+    "assets",
+    "navigation",
+    "quality",
+    "provenance"
+  ],
+  "title": "SceneManifest",
+  "type": "object"
+}

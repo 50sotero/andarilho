@@ -1,0 +1,187 @@
+{
+  "generatedFrom": "services/worker/src/andarilho_worker/recipes.py",
+  "preview": {
+    "name": "preview-v3",
+    "digest": "sha256:73901bfc1267c4e6ad7761821bb6864c176a2a1c26fbba434b8c4d531ed62f0f",
+    "stages": [
+      {
+        "stage": "validating",
+        "capability": "cpu"
+      },
+      {
+        "stage": "preparing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "camera_reconstruction",
+        "capability": "gpu"
+      },
+      {
+        "stage": "normalizing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_analysis",
+        "capability": "cpu"
+      },
+      {
+        "stage": "geometry_proposal",
+        "capability": "cpu"
+      },
+      {
+        "stage": "texturing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "packaging",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_validation",
+        "capability": "cpu"
+      }
+    ],
+    "params": {
+      "maxFrames": 400,
+      "longEdge": 1600,
+      "maxVideos": 8,
+      "maxPhotos": 400,
+      "minRegisteredViews": 30,
+      "minRegisteredRatio": 0.8,
+      "fps": 4,
+      "keyframeOversample": 3,
+      "sequentialOverlap": 20,
+      "seed": 42,
+      "texture": {
+        "texelSize": 0.01,
+        "pageSize": 2048,
+        "maxPages": 8,
+        "jpegQuality": 85
+      },
+      "analysis": {
+        "keyframes": 12,
+        "maxPhotos": 6,
+        "imageLongEdge": 1024,
+        "floorPlanLongEdge": 1600,
+        "jpegQuality": 80
+      }
+    }
+  },
+  "standard": {
+    "name": "standard-v3",
+    "digest": "sha256:8d72d2134b9b6f67583299fa461bc1714bf46ca6ff6d3291ce42af4d1903befa",
+    "stages": [
+      {
+        "stage": "validating",
+        "capability": "cpu"
+      },
+      {
+        "stage": "preparing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "camera_reconstruction",
+        "capability": "gpu"
+      },
+      {
+        "stage": "normalizing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_analysis",
+        "capability": "cpu"
+      },
+      {
+        "stage": "geometry_proposal",
+        "capability": "cpu"
+      },
+      {
+        "stage": "texturing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "packaging",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_validation",
+        "capability": "cpu"
+      }
+    ],
+    "params": {
+      "maxFrames": 400,
+      "longEdge": 1600,
+      "maxVideos": 8,
+      "maxPhotos": 400,
+      "minRegisteredViews": 30,
+      "minRegisteredRatio": 0.8,
+      "fps": 4,
+      "keyframeOversample": 3,
+      "sequentialOverlap": 20,
+      "seed": 42,
+      "texture": {
+        "texelSize": 0.01,
+        "pageSize": 2048,
+        "maxPages": 8,
+        "jpegQuality": 85
+      },
+      "analysis": {
+        "keyframes": 12,
+        "maxPhotos": 6,
+        "imageLongEdge": 1024,
+        "floorPlanLongEdge": 1600,
+        "jpegQuality": 80
+      }
+    }
+  },
+  "synthetic": {
+    "name": "synthetic-v3",
+    "digest": "sha256:c13a2d5f3936a5b653a41bc8eb47f8e58cdb3dd09d6c80196c893e7adf1c2b47",
+    "stages": [
+      {
+        "stage": "validating",
+        "capability": "cpu"
+      },
+      {
+        "stage": "preparing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "normalizing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_analysis",
+        "capability": "cpu"
+      },
+      {
+        "stage": "geometry_proposal",
+        "capability": "cpu"
+      },
+      {
+        "stage": "texturing",
+        "capability": "cpu"
+      },
+      {
+        "stage": "packaging",
+        "capability": "cpu"
+      },
+      {
+        "stage": "scene_validation",
+        "capability": "cpu"
+      }
+    ],
+    "params": {
+      "fixture": "synthetic-two-room",
+      "texture": {
+        "texelSize": 0.01,
+        "pageSize": 2048,
+        "maxPages": 8,
+        "jpegQuality": 85
+      }
+    }
+  },
+  "intake": {
+    "minPhotosWithoutVideo": 30
+  }
+}

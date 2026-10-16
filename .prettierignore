@@ -1,0 +1,13 @@
+pnpm-lock.yaml
+README.md
+**/node_modules
+**/.next
+**/dist
+**/coverage
+**/test-results
+**/playwright-report
+services/
+packages/scene-contract/scene.schema.json
+packages/scene-contract/layout.schema.json
+packages/scene-contract/scene.ts
+packages/viewer/public/fixtures/

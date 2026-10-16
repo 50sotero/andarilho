@@ -1,0 +1,600 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://andarilho.dev/schemas/layout/1.0.json",
+  "x-schema-version": "1.0",
+  "$defs": {
+    "Calibration": {
+      "additionalProperties": false,
+      "description": "User-confirmed metric calibration.\n\n``render_scale`` is the cumulative uniform scale, about the world origin, applied\nto the run's estimated frame (its camera poses and capture evidence). It is\nabsolute rather than relative to the previous revision, so re-saving a layout\nnever compounds it.",
+      "properties": {
+        "method": {
+          "const": "known_distance",
+          "title": "Method",
+          "type": "string"
+        },
+        "renderScale": {
+          "exclusiveMinimum": 0,
+          "title": "Renderscale",
+          "type": "number"
+        },
+        "referenceLength": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Referencelength"
+        }
+      },
+      "required": [
+        "method",
+        "renderScale"
+      ],
+      "title": "Calibration",
+      "type": "object"
+    },
+    "Furniture": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "provenance": {
+          "default": "user",
+          "enum": [
+            "user",
+            "floor_plan",
+            "proposal",
+            "synthetic"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "floorId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Floorid",
+          "type": "string"
+        },
+        "category": {
+          "maxLength": 40,
+          "minLength": 1,
+          "title": "Category",
+          "type": "string"
+        },
+        "label": {
+          "default": "",
+          "maxLength": 120,
+          "title": "Label",
+          "type": "string"
+        },
+        "position": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Position",
+          "type": "array"
+        },
+        "yawRadians": {
+          "title": "Yawradians",
+          "type": "number"
+        },
+        "size": {
+          "items": {
+            "exclusiveMinimum": 0,
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Size",
+          "type": "array"
+        },
+        "solid": {
+          "default": true,
+          "title": "Solid",
+          "type": "boolean"
+        },
+        "parts": {
+          "items": {
+            "$ref": "#/$defs/FurniturePart"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Parts",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "floorId",
+        "category",
+        "position",
+        "yawRadians",
+        "size",
+        "parts"
+      ],
+      "title": "Furniture",
+      "type": "object"
+    },
+    "FurniturePart": {
+      "additionalProperties": false,
+      "properties": {
+        "shape": {
+          "enum": [
+            "box",
+            "cylinder"
+          ],
+          "title": "Shape",
+          "type": "string"
+        },
+        "min": {
+          "items": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Min",
+          "type": "array"
+        },
+        "max": {
+          "items": {
+            "maximum": 1,
+            "minimum": 0,
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Max",
+          "type": "array"
+        },
+        "color": {
+          "pattern": "^#[0-9a-fA-F]{6}$",
+          "title": "Color",
+          "type": "string"
+        }
+      },
+      "required": [
+        "shape",
+        "min",
+        "max",
+        "color"
+      ],
+      "title": "FurniturePart",
+      "type": "object"
+    },
+    "Landmark": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "planPoint": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Planpoint"
+        },
+        "worldPoint": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Worldpoint",
+          "type": "array"
+        },
+        "uncertainty": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Uncertainty",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "worldPoint"
+      ],
+      "title": "Landmark",
+      "type": "object"
+    },
+    "LayoutFloor": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "elevation": {
+          "title": "Elevation",
+          "type": "number"
+        },
+        "polygons": {
+          "items": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "maxItems": 512,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Polygons",
+          "type": "array"
+        },
+        "holes": {
+          "items": {
+            "items": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 2,
+              "minItems": 2,
+              "type": "array"
+            },
+            "maxItems": 512,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 64,
+          "title": "Holes",
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "elevation",
+        "polygons"
+      ],
+      "title": "LayoutFloor",
+      "type": "object"
+    },
+    "LayoutSpawn": {
+      "additionalProperties": false,
+      "properties": {
+        "feet": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "title": "Feet",
+          "type": "array"
+        },
+        "yawRadians": {
+          "title": "Yawradians",
+          "type": "number"
+        },
+        "floorId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Floorid",
+          "type": "string"
+        }
+      },
+      "required": [
+        "feet",
+        "yawRadians",
+        "floorId"
+      ],
+      "title": "LayoutSpawn",
+      "type": "object"
+    },
+    "Obstacle": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "provenance": {
+          "default": "user",
+          "enum": [
+            "user",
+            "floor_plan",
+            "proposal",
+            "synthetic"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "floorId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Floorid",
+          "type": "string"
+        },
+        "footprint": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "maxItems": 512,
+          "minItems": 3,
+          "title": "Footprint",
+          "type": "array"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "floorId",
+        "footprint",
+        "height"
+      ],
+      "title": "Obstacle",
+      "type": "object"
+    },
+    "Opening": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "provenance": {
+          "default": "user",
+          "enum": [
+            "user",
+            "floor_plan",
+            "proposal",
+            "synthetic"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "wallId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Wallid",
+          "type": "string"
+        },
+        "offset": {
+          "minimum": 0,
+          "title": "Offset",
+          "type": "number"
+        },
+        "width": {
+          "exclusiveMinimum": 0,
+          "title": "Width",
+          "type": "number"
+        },
+        "bottom": {
+          "default": 0.0,
+          "minimum": 0,
+          "title": "Bottom",
+          "type": "number"
+        },
+        "top": {
+          "exclusiveMinimum": 0,
+          "title": "Top",
+          "type": "number"
+        },
+        "state": {
+          "default": "open",
+          "enum": [
+            "open",
+            "closed"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "wallId",
+        "offset",
+        "width",
+        "top"
+      ],
+      "title": "Opening",
+      "type": "object"
+    },
+    "Wall": {
+      "additionalProperties": false,
+      "properties": {
+        "confidence": {
+          "default": 1.0,
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "provenance": {
+          "default": "user",
+          "enum": [
+            "user",
+            "floor_plan",
+            "proposal",
+            "synthetic"
+          ],
+          "title": "Provenance",
+          "type": "string"
+        },
+        "id": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Id",
+          "type": "string"
+        },
+        "floorId": {
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$",
+          "title": "Floorid",
+          "type": "string"
+        },
+        "start": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "Start",
+          "type": "array"
+        },
+        "end": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "title": "End",
+          "type": "array"
+        },
+        "thickness": {
+          "exclusiveMinimum": 0,
+          "title": "Thickness",
+          "type": "number"
+        },
+        "height": {
+          "exclusiveMinimum": 0,
+          "title": "Height",
+          "type": "number"
+        }
+      },
+      "required": [
+        "id",
+        "floorId",
+        "start",
+        "end",
+        "thickness",
+        "height"
+      ],
+      "title": "Wall",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schemaVersion": {
+      "const": "1.0",
+      "title": "Schemaversion",
+      "type": "string"
+    },
+    "floors": {
+      "items": {
+        "$ref": "#/$defs/LayoutFloor"
+      },
+      "maxItems": 16,
+      "minItems": 1,
+      "title": "Floors",
+      "type": "array"
+    },
+    "walls": {
+      "items": {
+        "$ref": "#/$defs/Wall"
+      },
+      "maxItems": 2048,
+      "title": "Walls",
+      "type": "array"
+    },
+    "openings": {
+      "items": {
+        "$ref": "#/$defs/Opening"
+      },
+      "maxItems": 1024,
+      "title": "Openings",
+      "type": "array"
+    },
+    "obstacles": {
+      "items": {
+        "$ref": "#/$defs/Obstacle"
+      },
+      "maxItems": 1024,
+      "title": "Obstacles",
+      "type": "array"
+    },
+    "furniture": {
+      "items": {
+        "$ref": "#/$defs/Furniture"
+      },
+      "maxItems": 256,
+      "title": "Furniture",
+      "type": "array"
+    },
+    "landmarks": {
+      "items": {
+        "$ref": "#/$defs/Landmark"
+      },
+      "maxItems": 256,
+      "title": "Landmarks",
+      "type": "array"
+    },
+    "spawn": {
+      "$ref": "#/$defs/LayoutSpawn"
+    },
+    "calibration": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Calibration"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "floors",
+    "spawn"
+  ],
+  "title": "Layout",
+  "type": "object"
+}

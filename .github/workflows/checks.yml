@@ -1,0 +1,115 @@
+name: checks
+
+# Routine CI is CPU-only (README section 19). GPU smoke checks live in
+# gpu-smoke.yml and never run untrusted pull-request code.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  javascript:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.11.30"
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: format, contracts, lint, typecheck, unit tests
+        run: pnpm check
+      - name: build web
+        run: pnpm --filter @andarilho/web build
+        env:
+          NEXT_PUBLIC_APP_URL: http://localhost:3000
+          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: example-publishable-key
+
+  viewer-e2e:
+    # The viewer dev page in headless Chromium against the synthetic fixture.
+    # WebGL renders in software, so this stays CPU-only.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: corepack enable
+      - run: pnpm install --frozen-lockfile
+      - name: install chromium
+        run: pnpm --filter @andarilho/viewer exec playwright install --with-deps chromium
+      - name: viewer walk-through checks
+        run: pnpm --filter @andarilho/viewer e2e
+      - uses: actions/upload-artifact@v7
+        if: failure()
+        with:
+          name: viewer-e2e-report
+          path: |
+            packages/viewer/playwright-report/
+            packages/viewer/test-results/
+          retention-days: 7
+
+  python:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: andarilho
+          POSTGRES_PASSWORD: local-password
+          POSTGRES_DB: andarilho
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U andarilho"
+          --health-interval 3s --health-timeout 3s --health-retries 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: "0.11.30"
+      - name: install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: api lint
+        working-directory: services/api
+        run: |
+          uv sync --frozen
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: api migrations are complete
+        working-directory: services/api
+        env:
+          DATABASE_URL: postgresql+psycopg://andarilho:local-password@localhost:55432/andarilho
+        run: |
+          uv run alembic upgrade head
+          uv run alembic check
+          uv run alembic downgrade base
+      - name: api tests
+        working-directory: services/api
+        run: uv run pytest
+      - name: worker lint
+        working-directory: services/worker
+        run: |
+          uv sync --frozen
+          uv run ruff check .
+          uv run ruff format --check .
+      - name: worker tests
+        working-directory: services/worker
+        run: uv run pytest
+      - name: worker does not import the API package
+        run: "! grep -rn 'andarilho_api' services/worker/src"
+      - name: fixtures are reproducible and valid
+        run: |
+          uv run --project services/worker python scripts/build-fixture.py --check
+          uv run --project services/worker python scripts/check-scene.py packages/scene-contract/fixtures/synthetic-two-room.manifest.json

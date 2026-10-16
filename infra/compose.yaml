@@ -1,0 +1,195 @@
+# Application mode (README section 14): web, API, PostgreSQL, S3-compatible storage
+# and a CPU worker. GPU reconstruction runs separately on a Linux NVIDIA host
+# (infra/Dockerfile.worker-gpu).
+#
+#   docker compose -f infra/compose.yaml up --build
+#   docker compose -f infra/compose.yaml exec api alembic upgrade head
+#   docker compose -f infra/compose.yaml exec api python /app/scripts/seed-fixture.py --subject <supabase-user-id>
+#
+# Values below are local-development defaults; override them in ../.env.
+name: andarilho
+
+x-app-env: &app-env
+  APP_ENV: ${APP_ENV:-development}
+  DATABASE_URL: postgresql+psycopg://andarilho:${POSTGRES_PASSWORD:-local-password}@postgres:5432/andarilho
+  AUTH_ISSUER: ${AUTH_ISSUER:-https://example.supabase.co/auth/v1}
+  AUTH_AUDIENCE: ${AUTH_AUDIENCE:-authenticated}
+  AUTH_JWKS_URL: ${AUTH_JWKS_URL:-https://example.supabase.co/auth/v1/.well-known/jwks.json}
+  S3_ENDPOINT_URL: http://minio:9000
+  S3_PUBLIC_ENDPOINT_URL: ${S3_PUBLIC_ENDPOINT_URL:-http://localhost:9000}
+  S3_REGION: ${S3_REGION:-us-east-1}
+  S3_BUCKET: ${S3_BUCKET:-andarilho-local}
+  S3_ACCESS_KEY_ID: ${S3_ACCESS_KEY_ID:-local-development-only}
+  S3_SECRET_ACCESS_KEY: ${S3_SECRET_ACCESS_KEY:-local-development-only}
+  UPLOAD_MAX_TOTAL_BYTES: ${UPLOAD_MAX_TOTAL_BYTES:-2147483648}
+  RUN_MAX_SECONDS: ${RUN_MAX_SECONDS:-3600}
+  # Shared: the API signs part URLs with these, and the worker derives from them how long
+  # after an abort a part upload already under way can still land.
+  UPLOAD_PART_SIZE: ${UPLOAD_PART_SIZE:-16777216}
+  UPLOAD_PART_URL_TTL_SECONDS: ${UPLOAD_PART_URL_TTL_SECONDS:-900}
+  UPLOAD_MIN_BYTES_PER_SECOND: ${UPLOAD_MIN_BYTES_PER_SECOND:-16000}
+  DELIVERY_URL_TTL_SECONDS: ${DELIVERY_URL_TTL_SECONDS:-300}
+  # The web proxy forwards each visitor's address for public share throttling.
+  # Only trust it where browsers reach the web app solely through an edge that
+  # overwrites X-Forwarded-For (the edge service below) and the API is private.
+  PUBLIC_DELIVERY_TRUST_FORWARDED_FOR: ${PUBLIC_DELIVERY_TRUST_FORWARDED_FOR:-true}
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: andarilho
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-password}
+      POSTGRES_DB: andarilho
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U andarilho -d andarilho"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # MinIO's official images are no longer published; pgsty/minio is a
+  # maintained community build of the same server.
+  minio:
+    image: pgsty/minio:RELEASE.2026-08-04T00-00-00Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY_ID:-local-development-only}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_ACCESS_KEY:-local-development-only}
+      # MinIO applies CORS server-wide rather than through PutBucketCors.
+      MINIO_API_CORS_ALLOW_ORIGIN: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/ready || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # One-shot: create the private bucket, enable versioning, apply CORS and the
+  # abort-incomplete-multipart lifecycle rule.
+  storage-init:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    command: ["python", "/app/scripts/bootstrap-storage.py"]
+    environment:
+      <<: *app-env
+      STORAGE_CORS_FILE: /app/infra/storage-cors.json
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.api
+    environment:
+      <<: *app-env
+      # Optional AI advice for failed runs (README section 16): set AI_PROVIDER=opencode
+      # and OPENCODE_API_KEY_HOST_FILE (the key file's host path) in ../.env. The file
+      # is mounted read-only as a secret; the key itself never enters the environment.
+      AI_PROVIDER: ${AI_PROVIDER:-}
+      AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/go/v1}
+      AI_MODEL: ${AI_MODEL:-deepseek-v4.1-flash}
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-60}
+      AI_MAX_OUTPUT_TOKENS: ${AI_MAX_OUTPUT_TOKENS:-2048}
+      AI_MAX_CONCURRENCY: ${AI_MAX_CONCURRENCY:-2}
+      OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
+    secrets:
+      - opencode_api_key
+    depends_on:
+      postgres:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')",
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  worker-cpu:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.worker
+    environment:
+      <<: *app-env
+      WORKER_CAPABILITY: cpu
+      WORKER_MAX_CONCURRENCY: ${WORKER_MAX_CONCURRENCY:-1}
+      WORKER_SCRATCH_DIR: /scratch
+      # Scene analysis (scene_analysis stage): off unless AI_SCENE_ANALYSIS is true. When on,
+      # the worker sends downscaled keyframes, registered photos and the floor plan to the
+      # model above; the key comes from the same read-only secret as the API's AI advice.
+      # Its timeout and reply budget are its own: one call carries a dozen images.
+      AI_SCENE_ANALYSIS: ${AI_SCENE_ANALYSIS:-false}
+      AI_BASE_URL: ${AI_BASE_URL:-https://opencode.ai/inference/go/v1}
+      AI_MODEL: ${AI_MODEL:-deepseek-v4.1-flash}
+      AI_SCENE_TIMEOUT_SECONDS: ${AI_SCENE_TIMEOUT_SECONDS:-180}
+      AI_SCENE_MAX_OUTPUT_TOKENS: ${AI_SCENE_MAX_OUTPUT_TOKENS:-8192}
+      OPENCODE_API_KEY_FILE: /run/secrets/opencode_api_key
+    secrets:
+      - opencode_api_key
+    volumes:
+      - worker-scratch:/scratch
+    depends_on:
+      postgres:
+        condition: service_healthy
+      storage-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  web:
+    build:
+      context: ..
+      dockerfile: infra/Dockerfile.web
+      args:
+        NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-https://example.supabase.co}
+        NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:-example-publishable-key}
+        # The capture page's privacy notice follows the worker's switch, so the two agree.
+        NEXT_PUBLIC_AI_SCENE_ANALYSIS: ${AI_SCENE_ANALYSIS:-false}
+    environment:
+      API_INTERNAL_URL: http://api:8000
+      # The proxy waits for AI advice as long as the API may (same setting).
+      AI_TIMEOUT_SECONDS: ${AI_TIMEOUT_SECONDS:-60}
+    depends_on:
+      api:
+        condition: service_healthy
+    # Not published: browsers go through the edge, which sets X-Forwarded-For.
+    expose:
+      - "3000"
+
+  edge:
+    image: caddy:2.10.2-alpine
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    depends_on:
+      - web
+    ports:
+      - "127.0.0.1:3000:3000"
+
+volumes:
+  postgres-data:
+  minio-data:
+  worker-scratch:
+
+secrets:
+  opencode_api_key:
+    # Unconfigured, this mounts an empty file and AI advice stays off.
+    file: ${OPENCODE_API_KEY_HOST_FILE:-./ai-key.none}

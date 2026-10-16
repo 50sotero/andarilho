@@ -1,0 +1,21 @@
+{
+  "name": "andarilho",
+  "private": true,
+  "packageManager": "pnpm@11.9.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "check": "pnpm run format:check && pnpm run contracts:check && pnpm -r --if-present run lint && pnpm -r --if-present run typecheck && pnpm -r --if-present run test",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "contracts": "uv run --project services/api python scripts/generate-contracts.py",
+    "contracts:check": "uv run --project services/api python scripts/generate-contracts.py --check",
+    "dev:web": "pnpm --filter @andarilho/web dev",
+    "test:api": "uv run --project services/api pytest services/api/tests",
+    "test:worker": "uv run --project services/worker pytest services/worker/tests"
+  },
+  "devDependencies": {
+    "prettier": "3.9.10"
+  }
+}

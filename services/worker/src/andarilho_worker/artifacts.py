@@ -1,0 +1,536 @@
+"""Object storage abstraction and artifact bookkeeping.
+
+Keys always live under ``tenants/{project_id}/``. Stage outputs go to immutable
+attempt paths ``tenants/{project_id}/runs/{run_id}/attempts/{stage}/{job_id}/{fence}/...``
+so a retried or late attempt can never overwrite another attempt's output;
+viewer derivatives go to ``tenants/{project_id}/scenes/{scene_revision_id}/``
+and are written with :func:`put_immutable` (never overwritten with different bytes).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+import re
+import shutil
+import tempfile
+import uuid
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+from andarilho_worker.errors import StageError, TransientError
+from andarilho_worker.geometry.glb import MAX_GLB_BYTES
+
+_KEY = re.compile(r"^tenants/[A-Za-z0-9_-]+/[A-Za-z0-9._/-]+$")
+MAX_INLINE_BYTES = 256 * 1024 * 1024
+# The render asset is the textured layout model (GLB with JPEG atlases). Validation
+# parses it whole, so it shares the GLB reader's own cap.
+MAX_RENDER_BYTES = MAX_GLB_BYTES
+# A scene poster is one WebP still; packaging reads it into memory.
+MAX_POSTER_BYTES = 4 * 1024 * 1024
+
+
+def check_key(key: str) -> str:
+    if not _KEY.match(key) or ".." in key.split("/") or "//" in key:
+        raise ValueError(f"invalid object key {key!r}")
+    return key
+
+
+# Where ``preparing`` stores its frames inside its attempt prefix. camera_reconstruction
+# packs undistorted copies into its dataset, so they are disposable once the run ends.
+FRAMES_DIRECTORY = "images/"
+
+
+def attempt_prefix(project_id: str, run_id: str, stage: str, job_id: str, fence: int) -> str:
+    # The job ID keeps concurrent jobs of one run (e.g. two layout revisions, each
+    # starting at fence 1) from sharing mutable intermediate objects.
+    return f"tenants/{project_id}/runs/{run_id}/attempts/{stage}/{job_id}/{fence}/"
+
+
+def scene_prefix(project_id: str, scene_revision_id: str) -> str:
+    return f"tenants/{project_id}/scenes/{scene_revision_id}/"
+
+
+def project_prefix(project_id: str) -> str:
+    return f"tenants/{project_id}/"
+
+
+@dataclass(frozen=True)
+class ObjectInfo:
+    key: str
+    size: int
+    version: str | None
+
+
+class ObjectStore(Protocol):
+    def put_bytes(self, key: str, data: bytes, content_type: str = ...) -> ObjectInfo: ...
+    def create_new(
+        self, key: str, data: bytes | Path, content_type: str = ...
+    ) -> ObjectInfo | None: ...
+    def put_file(self, key: str, path: Path, content_type: str = ...) -> ObjectInfo: ...
+    def get_bytes(self, key: str, version: str | None = None, max_bytes: int = ...) -> bytes: ...
+    def download(self, key: str, dest: Path, version: str | None = None) -> str: ...
+    def head(self, key: str, version: str | None = None) -> ObjectInfo | None: ...
+    def copy(self, src: str, dst: str) -> ObjectInfo: ...
+    def list_keys(self, prefix: str) -> list[str]: ...
+    def delete_prefix(self, prefix: str) -> int: ...
+    def abort_multipart_uploads(self, prefix: str) -> int: ...
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]: ...
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None: ...
+    def count_multipart_parts(self, key: str, upload_id: str) -> int: ...
+
+
+def _sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+class LocalObjectStore:
+    """Filesystem-backed store for tests and single-host development (no versioning)."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(root)
+        self.root.mkdir(parents=True, exist_ok=True)
+        self.multipart_uploads: dict[str, str] = {}  # upload id -> key (simulated)
+        # Parts stored for an upload id (simulated). An abort removes them, but a part in
+        # flight can land after it, as in S3; tests add such a part here.
+        self.stored_parts: dict[str, int] = {}
+
+    def _path(self, key: str) -> Path:
+        return self.root.joinpath(*check_key(key).split("/"))
+
+    def put_bytes(self, key: str, data: bytes, content_type: str = "application/octet-stream"):
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+        return ObjectInfo(key, len(data), None)
+
+    def create_new(
+        self, key: str, data: bytes | Path, content_type: str = "application/octet-stream"
+    ):
+        """Atomically create ``key`` from bytes or a file; return ``None`` if it already exists."""
+        path = self._path(key)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        if isinstance(data, Path):
+            shutil.copyfile(data, tmp)
+        else:
+            tmp.write_bytes(data)
+        size = tmp.stat().st_size
+        try:
+            os.link(tmp, path)  # fails if the destination exists; never replaces it
+        except FileExistsError:
+            return None
+        finally:
+            tmp.unlink(missing_ok=True)
+        return ObjectInfo(key, size, None)
+
+    def put_file(self, key: str, path: Path, content_type: str = "application/octet-stream"):
+        dest = self._path(key)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_name(f".{dest.name}.{uuid.uuid4().hex}.tmp")
+        shutil.copyfile(path, tmp)
+        os.replace(tmp, dest)
+        return ObjectInfo(key, dest.stat().st_size, None)
+
+    def get_bytes(self, key: str, version: str | None = None, max_bytes: int = MAX_INLINE_BYTES):
+        path = self._path(key)
+        if not path.is_file():
+            raise FileNotFoundError(key)
+        if path.stat().st_size > max_bytes:
+            raise StageError("BUDGET_EXHAUSTED", "An object is too large to process.")
+        return path.read_bytes()
+
+    def download(self, key: str, dest: Path, version: str | None = None) -> str:
+        path = self._path(key)
+        if not path.is_file():
+            raise FileNotFoundError(key)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(path, dest)
+        return _sha256_file(dest)
+
+    def head(self, key: str, version: str | None = None) -> ObjectInfo | None:
+        path = self._path(key)
+        return ObjectInfo(key, path.stat().st_size, None) if path.is_file() else None
+
+    def copy(self, src: str, dst: str) -> ObjectInfo:
+        return self.put_file(dst, self._path(src))
+
+    def list_keys(self, prefix: str) -> list[str]:
+        base = self.root
+        out = []
+        for path in base.rglob("*"):
+            if path.is_file() and not path.name.endswith(".tmp"):
+                key = path.relative_to(base).as_posix()
+                if key.startswith(prefix):
+                    out.append(key)
+        return sorted(out)
+
+    def delete_prefix(self, prefix: str) -> int:
+        keys = self.list_keys(prefix)
+        for key in keys:
+            self._path(key).unlink(missing_ok=True)
+        return len(keys)
+
+    def abort_multipart_uploads(self, prefix: str) -> int:
+        doomed = self.list_multipart_uploads(prefix)
+        for key, uid in doomed:
+            self.abort_multipart_upload(key, uid)
+        return len(doomed)
+
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]:
+        return sorted(
+            (key, uid) for uid, key in self.multipart_uploads.items() if key.startswith(prefix)
+        )
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        self.multipart_uploads.pop(upload_id, None)
+        self.stored_parts.pop(upload_id, None)
+
+    def count_multipart_parts(self, key: str, upload_id: str) -> int:
+        return self.stored_parts.get(upload_id, 0)
+
+
+class S3ObjectStore:
+    """S3/MinIO store. Versioned buckets return and accept storage versions."""
+
+    def __init__(self, bucket: str, client: Any) -> None:
+        self.bucket = bucket
+        self.client = client
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> S3ObjectStore:
+        import boto3
+        from botocore.config import Config
+
+        client = boto3.client(
+            "s3",
+            endpoint_url=settings.s3_endpoint_url,
+            region_name=settings.s3_region,
+            aws_access_key_id=settings.s3_access_key_id,
+            aws_secret_access_key=settings.s3_secret_access_key,
+            config=Config(
+                signature_version="s3v4", retries={"max_attempts": 5, "mode": "standard"}
+            ),
+        )
+        return cls(settings.s3_bucket, client)
+
+    @staticmethod
+    def _code(exc: Exception) -> str:
+        return str(getattr(exc, "response", {}).get("Error", {}).get("Code", ""))
+
+    def _wrap(self, exc: Exception) -> Exception:
+        code = self._code(exc)
+        if code in ("NoSuchKey", "404", "NotFound", "NoSuchVersion"):
+            return FileNotFoundError("object not found")
+        return TransientError("TRANSIENT_FAILURE", "Storage is temporarily unavailable.")
+
+    def put_bytes(self, key: str, data: bytes, content_type: str = "application/octet-stream"):
+        try:
+            resp = self.client.put_object(
+                Bucket=self.bucket,
+                Key=check_key(key),
+                Body=data,
+                ContentType=content_type,
+                ChecksumAlgorithm="SHA256",
+            )
+        except Exception as exc:  # botocore raises many types
+            raise self._wrap(exc) from exc
+        return ObjectInfo(key, len(data), resp.get("VersionId"))
+
+    def create_new(
+        self, key: str, data: bytes | Path, content_type: str = "application/octet-stream"
+    ):
+        """Conditional create (``If-None-Match: *``); return ``None`` if ``key`` exists.
+
+        A file is streamed as the request body (one PUT: at most 5 GiB, which bounds
+        ``MAX_RENDER_BYTES``), so large render assets are never held in memory.
+        """
+        try:
+            with contextlib.ExitStack() as stack:
+                body = stack.enter_context(data.open("rb")) if isinstance(data, Path) else data
+                resp = self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=check_key(key),
+                    Body=body,
+                    ContentType=content_type,
+                    ChecksumAlgorithm="SHA256",
+                    IfNoneMatch="*",
+                )
+        except Exception as exc:
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if code in ("PreconditionFailed", "412", "ConditionalRequestConflict"):
+                return None
+            raise self._wrap(exc) from exc
+        size = data.stat().st_size if isinstance(data, Path) else len(data)
+        return ObjectInfo(key, size, resp.get("VersionId"))
+
+    def put_file(self, key: str, path: Path, content_type: str = "application/octet-stream"):
+        try:
+            self.client.upload_file(
+                str(path),
+                self.bucket,
+                check_key(key),
+                ExtraArgs={"ContentType": content_type, "ChecksumAlgorithm": "SHA256"},
+            )
+            info = self.head(key)
+        except Exception as exc:
+            raise self._wrap(exc) from exc
+        if info is None:
+            raise TransientError("TRANSIENT_FAILURE", "Storage is temporarily unavailable.")
+        return info
+
+    def _get(self, key: str, version: str | None):
+        kwargs = {"Bucket": self.bucket, "Key": check_key(key)}
+        if version:
+            kwargs["VersionId"] = version
+        try:
+            return self.client.get_object(**kwargs)
+        except Exception as exc:
+            raise self._wrap(exc) from exc
+
+    def get_bytes(self, key: str, version: str | None = None, max_bytes: int = MAX_INLINE_BYTES):
+        resp = self._get(key, version)
+        if resp["ContentLength"] > max_bytes:
+            raise StageError("BUDGET_EXHAUSTED", "An object is too large to process.")
+        return resp["Body"].read()
+
+    def download(self, key: str, dest: Path, version: str | None = None) -> str:
+        """Stream an exact key/version to disk and return the sha256 of the bytes written."""
+        resp = self._get(key, version)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        h = hashlib.sha256()
+        with dest.open("wb") as fh:
+            for chunk in resp["Body"].iter_chunks(1024 * 1024):
+                h.update(chunk)
+                fh.write(chunk)
+        return h.hexdigest()
+
+    def head(self, key: str, version: str | None = None) -> ObjectInfo | None:
+        kwargs = {"Bucket": self.bucket, "Key": check_key(key)}
+        if version:
+            kwargs["VersionId"] = version
+        try:
+            resp = self.client.head_object(**kwargs)
+        except Exception as exc:
+            wrapped = self._wrap(exc)
+            if isinstance(wrapped, FileNotFoundError):
+                return None
+            raise wrapped from exc
+        return ObjectInfo(key, resp["ContentLength"], resp.get("VersionId"))
+
+    def copy(self, src: str, dst: str) -> ObjectInfo:
+        try:
+            resp = self.client.copy_object(
+                Bucket=self.bucket,
+                Key=check_key(dst),
+                CopySource={"Bucket": self.bucket, "Key": check_key(src)},
+            )
+        except Exception as exc:
+            raise self._wrap(exc) from exc
+        info = self.head(dst)
+        if info is None:
+            raise TransientError("TRANSIENT_FAILURE", "Storage is temporarily unavailable.")
+        return ObjectInfo(dst, info.size, resp.get("VersionId") or info.version)
+
+    def _iter_versions(self, prefix: str) -> Iterator[dict[str, str]]:
+        paginator = self.client.get_paginator("list_object_versions")
+        for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for item in page.get("Versions", []) + page.get("DeleteMarkers", []):
+                yield {"Key": item["Key"], "VersionId": item["VersionId"]}
+
+    def list_keys(self, prefix: str) -> list[str]:
+        try:
+            check_key(prefix.rstrip("/") + "/x")
+            keys = {v["Key"] for v in self._iter_versions(prefix)}
+            paginator = self.client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                keys.update(item["Key"] for item in page.get("Contents", []))
+        except Exception as exc:
+            raise self._wrap(exc) from exc
+        return sorted(keys)
+
+    def _delete_batch(self, objects: list[dict[str, str]]) -> int:
+        """One multi-object delete; any per-object error fails the whole cleanup.
+
+        S3 answers 200 even when some objects were not deleted and lists them under
+        ``Errors``; counting the batch as deleted would let cleanup drop the database
+        pointer to bytes that are still stored.
+        """
+        response = self.client.delete_objects(
+            Bucket=self.bucket, Delete={"Objects": objects, "Quiet": True}
+        )
+        if response.get("Errors"):
+            raise TransientError("TRANSIENT_FAILURE", "Storage is temporarily unavailable.")
+        return len(objects)
+
+    def delete_prefix(self, prefix: str) -> int:
+        """Delete every object version and delete marker under ``prefix``."""
+        check_key(prefix.rstrip("/") + "/x")
+        deleted = 0
+        try:
+            batch: list[dict[str, str]] = []
+            for item in self._iter_versions(prefix):
+                batch.append(item)
+                if len(batch) == 1000:
+                    deleted += self._delete_batch(batch)
+                    batch = []
+            if batch:
+                deleted += self._delete_batch(batch)
+            # Unversioned buckets: also remove current objects directly.
+            paginator = self.client.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                objs = [{"Key": i["Key"]} for i in page.get("Contents", [])]
+                if objs:
+                    deleted += self._delete_batch(objs)
+        except Exception as exc:
+            raise self._wrap(exc) from exc
+        return deleted
+
+    def abort_multipart_uploads(self, prefix: str) -> int:
+        aborted = 0
+        try:
+            paginator = self.client.get_paginator("list_multipart_uploads")
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+                for upload in page.get("Uploads", []):
+                    self.client.abort_multipart_upload(
+                        Bucket=self.bucket, Key=upload["Key"], UploadId=upload["UploadId"]
+                    )
+                    aborted += 1
+        except Exception as exc:
+            raise self._wrap(exc) from exc
+        return aborted
+
+    def list_multipart_uploads(self, prefix: str) -> list[tuple[str, str]]:
+        """The ``(key, upload id)`` of every multipart upload in progress under ``prefix``."""
+        check_key(prefix.rstrip("/") + "/x")
+        try:
+            paginator = self.client.get_paginator("list_multipart_uploads")
+            return [
+                (upload["Key"], upload["UploadId"])
+                for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix)
+                for upload in page.get("Uploads", [])
+            ]
+        except Exception as exc:
+            raise self._wrap(exc) from exc
+
+    def abort_multipart_upload(self, key: str, upload_id: str) -> None:
+        """Abort one upload. One that is already gone (aborted or completed) is fine."""
+        try:
+            self.client.abort_multipart_upload(
+                Bucket=self.bucket, Key=check_key(key), UploadId=upload_id
+            )
+        except Exception as exc:
+            if self._code(exc) == "NoSuchUpload":
+                return
+            raise self._wrap(exc) from exc
+
+    def count_multipart_parts(self, key: str, upload_id: str) -> int:
+        """How many parts S3 still stores for an upload; 0 once the upload is gone.
+
+        A part upload in flight can still succeed after the upload was aborted, so S3
+        asks for the abort to be repeated until ``ListParts`` comes back empty.
+        """
+        try:
+            paginator = self.client.get_paginator("list_parts")
+            return sum(
+                len(page.get("Parts", []))
+                for page in paginator.paginate(
+                    Bucket=self.bucket, Key=check_key(key), UploadId=upload_id
+                )
+            )
+        except Exception as exc:
+            if self._code(exc) == "NoSuchUpload":
+                return 0
+            raise self._wrap(exc) from exc
+
+
+def put_immutable(
+    store: ObjectStore,
+    key: str,
+    data: bytes | Path,
+    content_type: str,
+    *,
+    sha256: str | None = None,
+) -> ObjectInfo:
+    """Write ``data`` once; an identical existing object is reused, a different one is an error.
+
+    ``data`` is bytes or a local file, which is streamed (render assets can be
+    GiBs). The create is atomic (conditional), so a stale attempt racing a retry
+    can never replace bytes that the fenced winner already committed to a
+    manifest. On a collision the existing object is streamed to a temporary file
+    and compared by SHA-256; ``sha256`` saves rehashing a file the caller hashed.
+    """
+    created = store.create_new(key, data, content_type)
+    if created is not None:
+        return created
+    if isinstance(data, Path):
+        expected = sha256 or _sha256_file(data)
+        scratch = data.parent
+    else:
+        expected = sha256 or hashlib.sha256(data).hexdigest()
+        scratch = None
+    existing = store.head(key)
+    with tempfile.TemporaryDirectory(dir=scratch) as tmp:
+        current = store.download(key, Path(tmp) / "existing")
+    if existing is not None and current == expected:
+        return existing
+    raise StageError("ARTIFACT_CONFLICT")
+
+
+def put_json(store: ObjectStore, key: str, value: Mapping[str, Any]) -> tuple[ObjectInfo, str]:
+    blob = json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    info = store.put_bytes(key, blob, "application/json")
+    return info, hashlib.sha256(blob).hexdigest()
+
+
+def insert_artifact(
+    conn: Any,
+    *,
+    project_id: str,
+    run_id: str | None,
+    job_id: str | None,
+    kind: str,
+    key: str,
+    version: str | None,
+    sha256: str,
+    size: int,
+    provenance: Mapping[str, Any],
+    validation_state: str,
+) -> str:
+    """Insert (or reuse) an artifacts row; call only inside a fenced transaction."""
+    row = conn.execute(
+        """
+        INSERT INTO artifacts (id, project_id, run_id, job_id, kind, object_key, storage_version,
+                               sha256, bytes, provenance, validation_state)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
+        ON CONFLICT (object_key) DO UPDATE SET validation_state = EXCLUDED.validation_state
+        WHERE artifacts.sha256 = EXCLUDED.sha256 AND artifacts.project_id = EXCLUDED.project_id
+        RETURNING id
+        """,
+        (
+            str(uuid.uuid4()),
+            project_id,
+            run_id,
+            job_id,
+            kind,
+            key,
+            version,
+            sha256,
+            size,
+            json.dumps(dict(provenance)),
+            validation_state,
+        ),
+    ).fetchone()
+    if row is None:
+        raise StageError("ARTIFACT_CONFLICT")
+    return str(row["id"])

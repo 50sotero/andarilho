@@ -1,0 +1,93 @@
+{
+  "schemaVersion": "1.0",
+  "floors": [
+    {
+      "id": "floor-0",
+      "elevation": 0,
+      "polygons": [
+        [
+          [-4, -2.5],
+          [4, -2.5],
+          [4, 2.5],
+          [-4, 2.5]
+        ]
+      ],
+      "holes": []
+    }
+  ],
+  "walls": [
+    {
+      "id": "wall-south",
+      "floorId": "floor-0",
+      "start": [-4, 2.5],
+      "end": [4, 2.5],
+      "thickness": 0.1,
+      "height": 2.6,
+      "provenance": "synthetic"
+    },
+    {
+      "id": "wall-east",
+      "floorId": "floor-0",
+      "start": [4, 2.5],
+      "end": [4, -2.5],
+      "thickness": 0.1,
+      "height": 2.6,
+      "provenance": "synthetic"
+    },
+    {
+      "id": "wall-north",
+      "floorId": "floor-0",
+      "start": [4, -2.5],
+      "end": [-4, -2.5],
+      "thickness": 0.1,
+      "height": 2.6,
+      "provenance": "synthetic"
+    },
+    {
+      "id": "wall-west",
+      "floorId": "floor-0",
+      "start": [-4, -2.5],
+      "end": [-4, 2.5],
+      "thickness": 0.1,
+      "height": 2.6,
+      "provenance": "synthetic"
+    },
+    {
+      "id": "wall-divider",
+      "floorId": "floor-0",
+      "start": [0, -2.5],
+      "end": [0, 2.5],
+      "thickness": 0.1,
+      "height": 2.6,
+      "provenance": "synthetic"
+    }
+  ],
+  "openings": [
+    {
+      "id": "door-0",
+      "wallId": "wall-divider",
+      "offset": 2.05,
+      "width": 0.9,
+      "bottom": 0,
+      "top": 2.1,
+      "state": "open",
+      "provenance": "synthetic"
+    }
+  ],
+  "obstacles": [
+    {
+      "id": "table-0",
+      "floorId": "floor-0",
+      "footprint": [
+        [-2.5, -1],
+        [-1.5, -1],
+        [-1.5, 0],
+        [-2.5, 0]
+      ],
+      "height": 0.75,
+      "provenance": "synthetic"
+    }
+  ],
+  "landmarks": [],
+  "spawn": { "feet": [2, 0, 0], "yawRadians": 1.5707963267948966, "floorId": "floor-0" }
+}

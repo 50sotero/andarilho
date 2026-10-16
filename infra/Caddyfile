@@ -1,0 +1,12 @@
+# The only public entry point in Compose. Caddy ignores X-Forwarded-For from
+# untrusted clients and sets it to the address of the connection it accepted,
+# so the web proxy's rightmost entry is the real visitor (public share
+# throttling depends on this; see PUBLIC_DELIVERY_TRUST_FORWARDED_FOR).
+{
+	admin off
+	auto_https off
+}
+
+:3000 {
+	reverse_proxy web:3000
+}

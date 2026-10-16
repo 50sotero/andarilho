@@ -1,0 +1,61 @@
+name: gpu-smoke
+
+# Short real reconstruction and texturing smoke check on a protected,
+# self-hosted Linux NVIDIA runner (README section 19). Manual only: it never
+# runs pull-request code and needs no cloud credentials. Keep the time limit.
+on:
+  workflow_dispatch:
+    inputs:
+      fixture_url:
+        description: Checksum-pinned URL of a permitted capture fixture
+        required: true
+      fixture_sha256:
+        description: Expected SHA-256 of the fixture
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: [self-hosted, linux, gpu]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+      - name: build pinned GPU worker image
+        run: docker build -f infra/Dockerfile.worker-gpu -t andarilho-worker-gpu:smoke .
+      - name: fetch fixture
+        env:
+          FIXTURE_URL: ${{ inputs.fixture_url }}
+          FIXTURE_SHA256: ${{ inputs.fixture_sha256 }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/fixture"
+          curl -fsSL "$FIXTURE_URL" -o "$RUNNER_TEMP/fixture/capture.mp4"
+          echo "$FIXTURE_SHA256  $RUNNER_TEMP/fixture/capture.mp4" | sha256sum -c -
+      - name: toolchain smoke
+        run: |
+          docker run --rm --gpus all andarilho-worker-gpu:smoke nvidia-smi
+          docker run --rm --gpus all andarilho-worker-gpu:smoke colmap -h
+          docker run --rm andarilho-worker-gpu:smoke python -m andarilho_worker.toolcheck
+      # The real pipeline: FFmpeg frames -> COLMAP -> normalization -> geometry
+      # proposal -> texturing, through the worker's pinned recipe and stage code.
+      # Fails if any stage fails.
+      - name: capture pipeline smoke
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          docker run --rm --gpus all \
+            -v "$RUNNER_TEMP/fixture:/data:ro" -v "$RUNNER_TEMP/out:/out" \
+            andarilho-worker-gpu:smoke \
+            python -m andarilho_worker.smoke --video /data/capture.mp4 --out /out --max-seconds 4800
+          test -s "$RUNNER_TEMP/out/report.json"
+          cat "$RUNNER_TEMP/out/report.json"
+      # The report and the scene bundle it describes (render model, collision,
+      # manifest, layout, poster), so the result can be walked locally with VIEWER_BUNDLE_DIR.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: gpu-smoke-report
+          path: |
+            ${{ runner.temp }}/out/report.json
+            ${{ runner.temp }}/out/bundle/
+          if-no-files-found: ignore

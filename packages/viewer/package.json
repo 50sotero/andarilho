@@ -1,0 +1,34 @@
+{
+  "name": "@andarilho/viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./alignment": "./src/review/alignment.ts"
+  },
+  "scripts": {
+    "dev": "vite",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "playwright test"
+  },
+  "dependencies": {
+    "@andarilho/scene-contract": "workspace:*",
+    "@dimforge/rapier3d-compat": "0.21.0",
+    "three": "0.180.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.19.2",
+    "@types/three": "0.180.0",
+    "eslint": "9.39.5",
+    "jsdom": "30.1.2",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.71.2",
+    "vite": "7.3.7",
+    "vitest": "5.0.4"
+  }
+}

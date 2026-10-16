@@ -1,0 +1,13 @@
+{
+  "name": "@andarilho/scene-contract",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Generated scene manifest/layout contracts and tiny synthetic fixtures.",
+  "exports": {
+    ".": "./scene.ts",
+    "./scene.schema.json": "./scene.schema.json",
+    "./layout.schema.json": "./layout.schema.json",
+    "./fixtures/*": "./fixtures/*"
+  }
+}
