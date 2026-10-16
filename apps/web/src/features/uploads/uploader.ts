@@ -310,7 +310,8 @@ export class MultipartUpload {
   discard(options: { abortOnServer: boolean }): void {
     this.discarded = options;
     this.pause();
-    const uploadId = this.record?.uploadId ?? this.progress.uploadId;
+    // Or, while it is being resumed, the saved upload this uploader picked for its file.
+    const uploadId = this.record?.uploadId ?? this.progress.uploadId ?? this.heldUpload;
     this.record = null;
     this.resetUrlCache(null);
     this.removeRecord(uploadId);
@@ -403,11 +404,19 @@ export class MultipartUpload {
           break;
         }
       }
+      // Removed while the records were sampled, before discard() could tell which upload
+      // was this file's: let it go now, as discard() would have.
+      if (this.discarded && saved) {
+        this.removeRecord(saved.uploadId);
+        this.dropDiscarded(saved.uploadId, this.discarded.abortOnServer);
+      }
     }
     if (signal.aborted) throw new UploadAbortedError();
     if (saved) {
       try {
         const { data } = await this.api.getUpload(saved.uploadId, signal);
+        // Removed meanwhile: discard() let this upload go, and nothing may keep it.
+        if (this.discarded) throw new UploadAbortedError();
         if (COMPLETED_STATUSES.has(data.upload.status)) {
           return { completedUpload: data.upload };
         }

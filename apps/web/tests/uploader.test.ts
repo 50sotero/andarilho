@@ -573,6 +573,70 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).not.toHaveBeenCalled();
   });
 
+  it("lets a saved upload go when its file is removed while it is being resumed", async () => {
+    for (const removedWhile of ["sampling", "asking the server"] as const) {
+      const size = 2 * PART;
+      const storage = new MemoryStorage();
+      const file = fakeFile(size);
+      saveResumeRecord(
+        {
+          version: RESUME_RECORD_VERSION,
+          uploadId: "u-saved",
+          projectId: "p1",
+          fingerprint: fileFingerprint(video(file)),
+          sample: (await contentSample(file, PART))!,
+          partSize: PART,
+          partCount: 2,
+          completedParts: [{ partNumber: 1, etag: '"e1"' }],
+          expiresAt: FUTURE,
+        },
+        storage,
+      );
+      let upload: MultipartUpload | null = null;
+      const { api } = fakeApi(size, {
+        getUpload: vi.fn(async (uploadId: string) => {
+          if (removedWhile === "asking the server") upload!.discard({ abortOnServer: true });
+          return {
+            data: {
+              upload: uploadRecord(uploadId),
+              completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
+              acceptingParts: true,
+              assembled: false,
+            },
+            etag: null,
+          };
+        }),
+      });
+      let sampled = false;
+      const putPart = vi.fn<PutPart>(async () => '"e"');
+      upload = new MultipartUpload(
+        "p1",
+        {
+          ...file,
+          slice: (start, end) => {
+            if (removedWhile === "sampling" && !sampled) {
+              sampled = true;
+              upload!.discard({ abortOnServer: true }); // the row is removed meanwhile
+            }
+            return file.slice(start, end);
+          },
+        },
+        "video",
+        "video/mp4",
+        { api, putPart, storage },
+      );
+      await expect(upload.start()).rejects.toBeInstanceOf(UploadAbortedError);
+      // Its upload is aborted, so it does not hold quota until it expires, and its record
+      // is gone, so nothing finds it again.
+      expect(api.abortUpload).toHaveBeenCalledTimes(1);
+      expect(api.abortUpload).toHaveBeenCalledWith("u-saved");
+      expect(storage.length).toBe(0);
+      expect(api.createUpload).not.toHaveBeenCalled();
+      expect(putPart).not.toHaveBeenCalled();
+      resetUploaderPage();
+    }
+  });
+
   it("does not take an upload the server completed for another file as done", async () => {
     const size = 2 * PART;
     const storage = new MemoryStorage();
