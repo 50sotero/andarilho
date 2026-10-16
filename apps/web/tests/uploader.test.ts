@@ -288,6 +288,7 @@ describe("MultipartUpload", () => {
             { partNumber: 2, etag: '"e2"', size: PART },
           ],
           acceptingParts: true,
+          assembled: false,
         },
         etag: null,
       })),
@@ -323,7 +324,12 @@ describe("MultipartUpload", () => {
         return { data: { upload, partSize: PART, partCount: 2 }, etag: null };
       }),
       getUpload: vi.fn(async (id: string) => ({
-        data: { upload: uploadRecord(id, "initiated"), completedParts: [], acceptingParts: true },
+        data: {
+          upload: uploadRecord(id, "initiated"),
+          completedParts: [],
+          acceptingParts: true,
+          assembled: false,
+        },
         etag: null,
       })),
     });
@@ -407,6 +413,7 @@ describe("MultipartUpload", () => {
           upload: uploadRecord("u-done", "uploaded_unverified"),
           completedParts: [],
           acceptingParts: false,
+          assembled: false,
         },
         etag: null,
       })),
@@ -489,6 +496,7 @@ describe("MultipartUpload", () => {
           upload: uploadRecord("u-done", "uploaded_unverified"),
           completedParts: [],
           acceptingParts: false,
+          assembled: false,
         },
         etag: null,
       })),
@@ -589,6 +597,7 @@ describe("MultipartUpload", () => {
           upload: uploadRecord(uploadId),
           completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
           acceptingParts: true,
+          assembled: false,
         },
         etag: null,
       })),
@@ -646,6 +655,7 @@ describe("MultipartUpload", () => {
           upload: { ...uploadRecord("u-open"), expiresAt },
           completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
           acceptingParts: true,
+          assembled: false,
         },
         etag: null,
       })),
@@ -667,6 +677,50 @@ describe("MultipartUpload", () => {
     expect(api.createUpload).not.toHaveBeenCalled();
     expect(uploaded).toEqual([2]);
     expect(upload.state.resumed).toBe(true);
+  });
+
+  it("completes a saved upload whose parts storage already joined", async () => {
+    const size = 2 * PART;
+    const storage = new MemoryStorage();
+    const file = fakeFile(size);
+    saveResumeRecord(
+      {
+        version: RESUME_RECORD_VERSION,
+        uploadId: "u-joined",
+        projectId: "p1",
+        fingerprint: fileFingerprint(video(file)),
+        sample: (await contentSample(file, PART))!,
+        partSize: PART,
+        partCount: 2,
+        completedParts: [{ partNumber: 1, etag: '"e1"' }],
+        expiresAt: FUTURE,
+      },
+      storage,
+    );
+    // A completion joined the parts and then failed before the server recorded it.
+    const { api } = fakeApi(size, {
+      getUpload: vi.fn(async () => ({
+        data: {
+          upload: uploadRecord("u-joined"),
+          completedParts: [],
+          acceptingParts: false,
+          assembled: true,
+        },
+        etag: null,
+      })),
+    });
+    const putPart = vi.fn<PutPart>(async () => '"e"');
+    const upload = new MultipartUpload("p1", file, "video", "video/mp4", {
+      api,
+      putPart,
+      storage,
+    });
+    expect((await upload.start()).id).toBe("u-joined");
+    expect(api.createUpload).not.toHaveBeenCalled();
+    expect(api.requestPartUrls).not.toHaveBeenCalled();
+    expect(putPart).not.toHaveBeenCalled();
+    expect(api.completeUpload).toHaveBeenCalledWith("u-joined");
+    expect(upload.state.phase).toBe("completed");
   });
 
   it("replaces a saved upload the server no longer accepts, whatever this clock says", async () => {
@@ -694,6 +748,7 @@ describe("MultipartUpload", () => {
           upload: uploadRecord("u-over"),
           completedParts: [{ partNumber: 1, etag: '"e1"', size: PART }],
           acceptingParts: false,
+          assembled: false,
         },
         etag: null,
       })),

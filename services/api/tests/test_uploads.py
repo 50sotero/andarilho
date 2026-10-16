@@ -230,7 +230,7 @@ def test_full_upload_flow_with_immutable_copy(client, auth, db, s3):
     status = client.get(f"/v1/uploads/{upload_id}", headers=auth()).json()
     assert [p["partNumber"] for p in status["completedParts"]] == [1]
     assert status["completedParts"][0]["size"] == 1000
-    assert status["acceptingParts"] is True
+    assert status["acceptingParts"] is True and status["assembled"] is False
 
     done = client.post(f"/v1/uploads/{upload_id}/complete", json={}, headers=auth())
     assert done.status_code == 202, done.text
@@ -457,6 +457,37 @@ def test_capture_set_requires_verified_uploads(client, auth, db):
     assert set(body["inputs"][0]) == {"uploadId", "mediaKind", "sha256", "bytes"}
     # Not visible to other users.
     assert client.post(url, json={"uploadIds": [video]}, headers=auth("user-b")).status_code == 404
+
+
+def test_an_upload_assembled_by_a_failed_completion_can_be_completed_again(client, auth, db, s3):
+    pid = create_project(client, auth)["id"]
+    upload_id = _init(client, auth, pid, size=1000).json()["upload"]["id"]
+    _put_part(s3, db, upload_id, 1, b"v" * 1000)
+    # Storage joined the parts, then the completion failed before its commit: the row
+    # still names a multipart upload that no longer exists.
+    row = db.get(Upload, uuid.UUID(upload_id))
+    db.refresh(row)
+    listed = s3.list_parts(Bucket=BUCKET, Key=row.staging_key, UploadId=row.multipart_upload_id)
+    s3.complete_multipart_upload(
+        Bucket=BUCKET,
+        Key=row.staging_key,
+        UploadId=row.multipart_upload_id,
+        MultipartUpload={
+            "Parts": [{"PartNumber": p["PartNumber"], "ETag": p["ETag"]} for p in listed["Parts"]]
+        },
+    )
+    status = client.get(f"/v1/uploads/{upload_id}", headers=auth())
+    assert status.status_code == 200, status.text
+    body = status.json()
+    assert body["upload"]["status"] == "initiated"
+    assert body["assembled"] is True and body["acceptingParts"] is False
+    assert body["completedParts"] == []
+
+    done = client.post(f"/v1/uploads/{upload_id}/complete", json={}, headers=auth())
+    assert done.status_code == 202, done.text
+    assert done.json()["upload"]["status"] == "uploaded_unverified"
+    after = client.get(f"/v1/uploads/{upload_id}", headers=auth()).json()
+    assert after["assembled"] is False and after["acceptingParts"] is False
 
 
 def test_expired_upload_rejects_parts_and_holds_quota_until_its_parts_are_gone(

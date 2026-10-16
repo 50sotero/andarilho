@@ -210,6 +210,8 @@ export class MultipartUpload {
   private creationIdentity: string | null = null;
   // Set by discard(): an upload created after it is aborted (when asked) and never kept.
   private discarded: { abortOnServer: boolean } | null = null;
+  // An upload whose parts storage already joined: it has no part left to send.
+  private assembledUploadId: string | null = null;
 
   constructor(
     projectId: string,
@@ -318,7 +320,10 @@ export class MultipartUpload {
       if (signal.aborted) throw new UploadAbortedError();
       this.emitPartProgress("uploading");
 
-      const queue = remainingParts(record.partCount, record.completedParts);
+      const queue =
+        this.assembledUploadId === record.uploadId
+          ? []
+          : remainingParts(record.partCount, record.completedParts);
       await this.uploadParts(queue, signal);
 
       if (signal.aborted) throw new UploadAbortedError();
@@ -373,6 +378,12 @@ export class MultipartUpload {
         const { data } = await this.api.getUpload(saved.uploadId, signal);
         if (COMPLETED_STATUSES.has(data.upload.status)) {
           return { completedUpload: data.upload };
+        }
+        if (data.assembled) {
+          // A completion joined the parts and then failed: completing again finishes it.
+          this.assembledUploadId = saved.uploadId;
+          this.emit({ resumed: true, uploadId: saved.uploadId });
+          return saved;
         }
         // The server decides by its own clock: this device's may be off, and a replacement
         // could be refused while this upload still holds the project's quota.

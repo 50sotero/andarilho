@@ -157,20 +157,37 @@ def create_upload(
 def get_upload(upload_id: uuid.UUID, subject: Subject, db: Db, storage: Store):
     upload = load_scoped(db, Upload, upload_id, subject, "upload")
     completed: list[dict] = []
+    assembled = False
     if upload.status == "initiated" and upload.multipart_upload_id:
         try:
             parts = storage.list_parts(upload.staging_key, upload.multipart_upload_id)
         except Exception:
-            logger.exception("list_parts failed")
-            raise _storage_unavailable() from None
-        completed = [{"partNumber": p.part_number, "etag": p.etag, "size": p.size} for p in parts]
+            # A completion that joined the parts and then failed before its commit leaves no
+            # multipart upload to list, only the staging object: completing again picks it up.
+            if not _assembled(storage, upload):
+                logger.exception("list_parts failed")
+                raise _storage_unavailable() from None
+            assembled = True
+        else:
+            completed = [
+                {"partNumber": p.part_number, "etag": p.etag, "size": p.size} for p in parts
+            ]
     # By the server's clock, so a client whose clock is off resumes an upload that still
     # holds the project's quota rather than creating a replacement the quota refuses.
+    open_ = _accepts_parts(upload)
     return {
         "upload": ser.upload(upload),
         "completedParts": completed,
-        "acceptingParts": _accepts_parts(upload),
+        "acceptingParts": open_ and not assembled,
+        "assembled": open_ and assembled,
     }
+
+
+def _assembled(storage: Storage, upload: Upload) -> bool:
+    try:
+        return storage.head_object(upload.staging_key) is not None
+    except StorageError:
+        return False
 
 
 def _accepts_parts(upload: Upload) -> bool:

@@ -143,6 +143,9 @@ export interface UploadStatusResponse {
   completedParts: { partNumber: number; etag: string; size: number }[];
   // Whether the upload still takes parts, by the server's clock.
   acceptingParts: boolean;
+  // Storage already joined every part (a completion failed after that): only completing
+  // the upload remains, and the server still accepts that.
+  assembled: boolean;
 }
 
 export interface PartUrlsResponse {
